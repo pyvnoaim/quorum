@@ -6,36 +6,46 @@ import { rankName } from './rating.js';
 const BLURPLE = 0x5865f2;
 const GREEN = 0x57f287;
 
-export function lobbyEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
-  const { min, max } = FORMATS[match.format as Format];
-  const list = rows.length
-    ? rows
-        .map((r) => {
-          const p = players.get(r.discord_id);
-          const mark = r.accepted ? '✅' : '⏳';
-          return `${mark} <@${r.discord_id}> · ${p ? `${p.elo} ${rankName(p.elo)} · ${p.tier}` : ''}`;
-        })
-        .join('\n')
-    : '_nobody yet_';
+/** The open call: "someone is looking for a 1v1". Fills up, then starts itself. */
+export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
+  const { max } = FORMATS[match.format as Format];
+  const opener = players.get(match.host_id);
 
   return new EmbedBuilder()
-    .setTitle(`${match.format} lobby`)
+    .setTitle(`Looking for a ${match.format}`)
     .setColor(BLURPLE)
-    .setDescription(list)
+    .setDescription(
+      rows
+        .map((r) => {
+          const p = players.get(r.discord_id)!;
+          return `<@${r.discord_id}> · **${p.elo}** ${rankName(p.elo)}`;
+        })
+        .join('\n'),
+    )
     .setFooter({
-      text: `${rows.filter((r) => r.accepted).length}/${rows.length} accepted · needs ${min}${max === min ? '' : `-${max}`} players · host: start when everyone's in`,
+      text: `${rows.length}/${max} · ${opener?.tier ?? ''} tier · starts the moment it fills`,
     });
+}
+
+export function panelEmbed() {
+  return new EmbedBuilder()
+    .setTitle('Scrims')
+    .setColor(BLURPLE)
+    .setDescription(
+      "Pick a format and the bot posts your call in this channel. When someone takes it you'll be pulled into a voice channel and your scenarios go up.\n\nScores are read from KovaaK's — there's nothing to submit.",
+    );
 }
 
 export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
   const scenarios: string[] = JSON.parse(match.scenarios);
   const teams = [...new Set(rows.map((r) => r.team))];
 
+  const voice = match.voice_channel_id ? `\nVoice: <#${match.voice_channel_id}>` : '';
   const embed = new EmbedBuilder()
-    .setTitle(`${match.format} · live`)
+    .setTitle(`${match.format} · ongoing`)
     .setColor(BLURPLE)
     .setDescription(
-      `Play these, in any order, then the host hits **Finish**. Your best run on each while the match is open counts — nothing to submit.\n\n${scenarios
+      `Play these in any order, then hit **Finish**. Your best run on each while the match is open counts — nothing to submit.${voice}\n\n${scenarios
         .map((s, i) => `**${i + 1}.** ${s}`)
         .join('\n')}`,
     );

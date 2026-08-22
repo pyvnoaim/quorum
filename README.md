@@ -24,19 +24,26 @@ process — back that file up, it's the whole ladder.
 
 ## How a match runs
 
-1. `/pug start format:1v1|2v2|group` — opens a lobby.
-2. Host picks players from the dropdown. Each one gets checked for a KovaaK's
-   link and for tier eligibility before they're added.
-3. Players hit **Accept**.
-4. Host hits **Start** — teams are drawn, 3 scenarios are rolled (one per
-   category), the clock starts.
-5. Everyone plays them, in any order, as many attempts as they like. **Refresh
-   scores** shows the board filling in.
-6. Host hits **Finish** — placings, Elo changes and the scoreboard go to the
-   results channel.
+`/pug panel` once, in the queue channel — one message with a **1v1** and a
+**2v2** button that stays there forever. Then:
+
+1. Someone hits **1v1**. The bot posts their call in the channel: _looking for a
+   1v1_.
+2. Someone else hits **Scrim** on it. That's the whole matchmaking.
+3. The moment it fills it starts itself — teams drawn, 3 scenarios rolled (one
+   per category), a temporary voice channel made and everyone dragged in.
+4. The call message becomes the live scoreboard: scenarios, players, scores
+   filling in. **Refresh scores** re-reads KovaaK's.
+5. **Finish** posts placings and Elo changes to the results channel, deletes the
+   call message, and deletes the voice channel.
 
 Other commands: `/pug score`, `/pug stats`, `/pug leaderboard`, and
 `/pug tier @player <tier>` for staff. Everything else is a button.
+
+Set `VOICE_CATEGORY_ID` for the voice half. The bot needs **Manage Channels**
+and **Move Members** for it, and only someone already sitting in a voice channel
+can be dragged — everyone else gets the channel link in the match message,
+which is as far as Discord lets a bot go.
 
 ## Tiers
 

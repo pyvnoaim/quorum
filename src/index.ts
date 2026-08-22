@@ -2,22 +2,25 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   Client,
   EmbedBuilder,
   GatewayIntentBits,
   MessageFlags,
   PermissionFlagsBits,
   SlashCommandBuilder,
-  UserSelectMenuBuilder,
+  type Guild,
   type Interaction,
 } from 'discord.js';
 import {
   CATEGORIES,
   FORMATS,
+  PANEL_FORMATS,
   RESULTS_CHANNEL_ID,
   ROUNDS,
   TIERS,
   TIER_SEED,
+  VOICE_CATEGORY_ID,
   type Format,
   type Tier,
 } from './config.js';
@@ -29,15 +32,20 @@ import {
   leaderboard,
   matchPlayers,
   type Match,
+  type MatchPlayer,
 } from './db.js';
-import { liveEmbed, lobbyEmbed, resultsEmbed } from './embeds.js';
+import { liveEmbed, openEmbed, panelEmbed, resultsEmbed } from './embeds.js';
 import { kovaaksNameForDiscordId, scoreInWindow } from './kovaaks.js';
 import { canPlay, eloDeltas, placings, rankName } from './rating.js';
 
 const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set');
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  // GuildVoiceStates is what makes member.voice.channel readable - without it
+  // nobody can be dragged into the match VC.
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+});
 
 const NO_LINK =
   "That account has no KovaaK's on file. Link your Discord inside KovaaK's (Settings → Discord) and try again — it's the only setup this bot needs.";
@@ -46,16 +54,7 @@ const command = new SlashCommandBuilder()
   .setName('pug')
   .setDescription('pick-up games')
   .addSubcommand((s) =>
-    s
-      .setName('start')
-      .setDescription('open a game')
-      .addStringOption((o) =>
-        o
-          .setName('format')
-          .setDescription('1v1, 2v2 or a group game')
-          .setRequired(true)
-          .addChoices(...Object.keys(FORMATS).map((f) => ({ name: f, value: f }))),
-      ),
+    s.setName('panel').setDescription('post the queue panel in this channel (staff)'),
   )
   .addSubcommand((s) => s.setName('score').setDescription('refresh the scoreboard'))
   .addSubcommand((s) =>
@@ -77,8 +76,7 @@ const command = new SlashCommandBuilder()
           .setRequired(true)
           .addChoices(...TIERS.map((t) => ({ name: t, value: t }))),
       ),
-  )
-  .setDefaultMemberPermissions(null);
+  );
 
 /** One scenario per category, cycling, so a match is never three of the same
  *  thing. Falls back to whatever is left if the pool is smaller than ROUNDS. */
@@ -92,61 +90,106 @@ function rollScenarios() {
   return out;
 }
 
+/** The panel is one static message that never changes - its buttons carry the
+ *  format, so it survives restarts with nothing stored about it. */
+function panel() {
+  return {
+    embeds: [panelEmbed()],
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        PANEL_FORMATS.map((f) =>
+          new ButtonBuilder()
+            .setCustomId(`pug:open:${f}`)
+            .setLabel(f)
+            .setStyle(ButtonStyle.Primary),
+        ),
+      ),
+    ],
+  };
+}
+
 function render(match: Match) {
   const rows = matchPlayers(match.id);
   const players = new Map(rows.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
-  const { max } = FORMATS[match.format];
 
   if (match.status === 'lobby') {
     return {
-      embeds: [lobbyEmbed(match, rows, players)],
+      embeds: [openEmbed(match, rows, players)],
       components: [
-        new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
-          new UserSelectMenuBuilder()
-            .setCustomId(`pug:add:${match.id}`)
-            .setPlaceholder('host: pick players')
-            .setMinValues(1)
-            .setMaxValues(Math.max(1, max - 1)),
-        ),
         new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder()
-            .setCustomId(`pug:accept:${match.id}`)
-            .setLabel('Accept')
+            .setCustomId(`pug:join:${match.id}`)
+            .setLabel('Scrim')
             .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`pug:leave:${match.id}`)
-            .setLabel('Leave')
-            .setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder()
-            .setCustomId(`pug:begin:${match.id}`)
-            .setLabel('Start')
-            .setStyle(ButtonStyle.Primary),
           new ButtonBuilder()
             .setCustomId(`pug:cancel:${match.id}`)
             .setLabel('Cancel')
-            .setStyle(ButtonStyle.Danger),
-        ),
-      ],
-    };
-  }
-  if (match.status === 'live') {
-    return {
-      embeds: [liveEmbed(match, rows, players)],
-      components: [
-        new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`pug:refresh:${match.id}`)
-            .setLabel('Refresh scores')
             .setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder()
-            .setCustomId(`pug:finish:${match.id}`)
-            .setLabel('Finish')
-            .setStyle(ButtonStyle.Success),
         ),
       ],
     };
   }
-  return { embeds: [liveEmbed(match, rows, players)], components: [] };
+  return {
+    embeds: [liveEmbed(match, rows, players)],
+    components:
+      match.status === 'live'
+        ? [
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`pug:refresh:${match.id}`)
+                .setLabel('Refresh scores')
+                .setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder()
+                .setCustomId(`pug:finish:${match.id}`)
+                .setLabel('Finish')
+                .setStyle(ButtonStyle.Success),
+            ),
+          ]
+        : [],
+  };
+}
+
+/** A throwaway voice channel per match, deleted when it ends. Only someone
+ *  already sitting in voice can be moved - the rest get the channel link in the
+ *  match message, which is the best Discord allows. */
+async function openVoice(guild: Guild, match: Match, rows: MatchPlayer[]) {
+  if (!VOICE_CATEGORY_ID) return null;
+  const channel = await guild.channels
+    .create({
+      name: `${match.format} #${match.id}`,
+      type: ChannelType.GuildVoice,
+      parent: VOICE_CATEGORY_ID,
+      userLimit: rows.length,
+    })
+    .catch(() => null);
+  if (!channel) return null;
+
+  await Promise.all(
+    rows.map(async (r) => {
+      const member = await guild.members.fetch(r.discord_id).catch(() => null);
+      if (member?.voice.channel) await member.voice.setChannel(channel).catch(() => {});
+    }),
+  );
+  return channel.id;
+}
+
+async function startMatch(guild: Guild, match: Match) {
+  const rows = matchPlayers(match.id);
+  const { teamSize } = FORMATS[match.format];
+  const shuffled = [...rows].sort(() => Math.random() - 0.5);
+  shuffled.forEach((row, idx) => {
+    db.prepare('update match_player set team = ? where match_id = ? and discord_id = ?').run(
+      Math.floor(idx / teamSize),
+      match.id,
+      row.discord_id,
+    );
+  });
+  const voiceId = await openVoice(guild, match, rows);
+  db.prepare(
+    `update match set status = 'live', scenarios = ?, started_at = ?, voice_channel_id = ?
+     where id = ?`,
+  ).run(JSON.stringify(rollScenarios()), Date.now(), voiceId, match.id);
+  return getMatch(match.id)!;
 }
 
 /** Reads every player's best in-window run off KovaaK's. A score already on
@@ -212,10 +255,14 @@ async function finishMatch(match: Match) {
        where match_id = ? and discord_id = ?`,
     ).run(place, entrant.elo, entrant.elo + delta, done.id, entrant.id);
   }
+
+  if (done.voice_channel_id) {
+    const vc = await client.channels.fetch(done.voice_channel_id).catch(() => null);
+    if (vc?.isVoiceBased()) await vc.delete().catch(() => {});
+  }
   return { match: getMatch(done.id)!, deltas };
 }
 
-/** The match this user is currently in, in this guild. */
 function activeMatchFor(discordId: string, guildId: string) {
   return db
     .prepare(
@@ -234,7 +281,6 @@ client.once('clientReady', async (c) => {
 client.on('interactionCreate', async (i: Interaction) => {
   try {
     if (i.isChatInputCommand() && i.commandName === 'pug') await onCommand(i);
-    else if (i.isUserSelectMenu() && i.customId.startsWith('pug:add:')) await onAddPlayers(i);
     else if (i.isButton() && i.customId.startsWith('pug:')) await onButton(i);
   } catch (err) {
     console.error(err);
@@ -249,22 +295,34 @@ client.on('interactionCreate', async (i: Interaction) => {
 async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const sub = i.options.getSubcommand();
 
+  if (sub === 'panel') {
+    if (!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      await i.reply({ content: 'Staff only.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    await i.reply(panel());
+    return;
+  }
+
   if (sub === 'leaderboard') {
     const rows = leaderboard();
-    const embed = new EmbedBuilder()
-      .setTitle('Ladder')
-      .setColor(0x5865f2)
-      .setDescription(
-        rows.length
-          ? rows
-              .map(
-                (p, n) =>
-                  `**${n + 1}.** <@${p.discord_id}> — **${p.elo}** ${rankName(p.elo)} · ${p.wins}W ${p.losses}L (${Math.round((p.wins / (p.wins + p.losses)) * 100)}%)`,
-              )
-              .join('\n')
-          : '_no games played yet_',
-      );
-    await i.reply({ embeds: [embed] });
+    await i.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Ladder')
+          .setColor(0x5865f2)
+          .setDescription(
+            rows.length
+              ? rows
+                  .map(
+                    (p, n) =>
+                      `**${n + 1}.** <@${p.discord_id}> — **${p.elo}** ${rankName(p.elo)} · ${p.wins}W ${p.losses}L (${Math.round((p.wins / (p.wins + p.losses)) * 100)}%)`,
+                  )
+                  .join('\n')
+              : '_no games played yet_',
+          ),
+      ],
+    });
     return;
   }
 
@@ -303,8 +361,8 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
     }
     const existing = getPlayer(target.id);
     ensurePlayer(target.id, name, tier);
-    // Re-seeding Elo on a tier change would wipe a played record, so it only
-    // happens for someone who hasn't played yet.
+    // Re-seeding Elo would wipe a played record, so it only happens for someone
+    // who hasn't played yet.
     if (existing && existing.wins + existing.losses === 0) {
       db.prepare('update player set tier = ?, elo = ? where discord_id = ?').run(
         tier,
@@ -318,179 +376,79 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
     return;
   }
 
-  if (sub === 'score') {
-    const match = activeMatchFor(i.user.id, i.guildId!);
-    if (!match) {
-      await i.reply({ content: "You're not in a live match.", flags: MessageFlags.Ephemeral });
-      return;
-    }
-    await i.deferReply({ flags: MessageFlags.Ephemeral });
-    await refreshScores(match);
-    const fresh = getMatch(match.id)!;
-    await i.editReply(render(fresh));
-    await editMatchMessage(fresh);
+  // score
+  const match = activeMatchFor(i.user.id, i.guildId!);
+  if (!match) {
+    await i.reply({ content: "You're not in a live match.", flags: MessageFlags.Ephemeral });
     return;
   }
-
-  // start
-  if (!i.guildId) {
-    await i.reply({ content: 'Guild only.', flags: MessageFlags.Ephemeral });
-    return;
-  }
-  const format = i.options.getString('format', true) as Format;
-  const name = await kovaaksNameForDiscordId(i.user.id);
-  if (!name) {
-    await i.reply({ content: NO_LINK, flags: MessageFlags.Ephemeral });
-    return;
-  }
-  ensurePlayer(i.user.id, name);
-  const { lastInsertRowid } = db
-    .prepare(
-      'insert into match (guild_id, channel_id, host_id, format) values (?, ?, ?, ?)',
-    )
-    .run(i.guildId, i.channelId, i.user.id, format);
-  const matchId = Number(lastInsertRowid);
-  db.prepare(
-    'insert into match_player (match_id, discord_id, accepted) values (?, ?, 1)',
-  ).run(matchId, i.user.id);
-
-  const match = getMatch(matchId)!;
-  await i.reply(render(match));
-  const msg = await i.fetchReply();
-  db.prepare('update match set message_id = ? where id = ?').run(msg.id, matchId);
-}
-
-async function onAddPlayers(i: import('discord.js').UserSelectMenuInteraction) {
-  const match = getMatch(Number(i.customId.split(':')[2]));
-  if (!match || match.status !== 'lobby') {
-    await i.reply({ content: 'That lobby is closed.', flags: MessageFlags.Ephemeral });
-    return;
-  }
-  if (i.user.id !== match.host_id) {
-    await i.reply({ content: 'Only the host picks players.', flags: MessageFlags.Ephemeral });
-    return;
-  }
-  await i.deferUpdate();
-
-  const { max } = FORMATS[match.format];
-  const problems: string[] = [];
-
-  for (const user of i.users.values()) {
-    const rows = matchPlayers(match.id);
-    if (rows.some((r) => r.discord_id === user.id)) continue;
-    if (user.bot) continue;
-    if (rows.length >= max) {
-      problems.push(`Lobby is full (${max}).`);
-      break;
-    }
-    const name = await kovaaksNameForDiscordId(user.id);
-    if (!name) {
-      problems.push(`<@${user.id}> has no KovaaK's account linked to their Discord.`);
-      continue;
-    }
-    const player = ensurePlayer(user.id, name);
-    // Tier gate against everyone already in, not just the host - otherwise a
-    // novice and an elite meet in the middle through an intermediate.
-    const clash = rows
-      .map((r) => getPlayer(r.discord_id)!)
-      .find((other) => !canPlay(player.tier, other.tier));
-    if (clash) {
-      problems.push(
-        `<@${user.id}> (${player.tier}) is too far from <@${clash.discord_id}> (${clash.tier}).`,
-      );
-      continue;
-    }
-    db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(
-      match.id,
-      user.id,
-    );
-  }
-
-  await i.editReply(render(getMatch(match.id)!));
-  if (problems.length) {
-    await i.followUp({ content: problems.join('\n'), flags: MessageFlags.Ephemeral });
-  }
+  await i.deferReply({ flags: MessageFlags.Ephemeral });
+  await refreshScores(match);
+  const fresh = getMatch(match.id)!;
+  await i.editReply(render(fresh));
+  await editMatchMessage(fresh);
 }
 
 async function onButton(i: import('discord.js').ButtonInteraction) {
-  const [, action, rawId] = i.customId.split(':');
-  const match = getMatch(Number(rawId));
+  const [, action, arg] = i.customId.split(':');
+
+  if (action === 'open') return onOpen(i, arg as Format);
+
+  const match = getMatch(Number(arg));
   if (!match) {
     await i.reply({ content: 'That match is gone.', flags: MessageFlags.Ephemeral });
     return;
   }
   const rows = matchPlayers(match.id);
-  const me = rows.find((r) => r.discord_id === i.user.id);
-  const isHost = i.user.id === match.host_id;
+  const isOpener = i.user.id === match.host_id;
 
-  if (action === 'accept') {
-    if (!me) {
-      await i.reply({ content: "You weren't invited to this one.", flags: MessageFlags.Ephemeral });
+  if (action === 'join') {
+    if (match.status !== 'lobby') {
+      await i.reply({ content: 'That one already started.', flags: MessageFlags.Ephemeral });
       return;
     }
-    db.prepare(
-      'update match_player set accepted = 1 where match_id = ? and discord_id = ?',
-    ).run(match.id, i.user.id);
-    await i.update(render(getMatch(match.id)!));
-    return;
-  }
-
-  if (action === 'leave') {
-    if (!me || isHost) {
+    if (rows.some((r) => r.discord_id === i.user.id)) {
+      await i.reply({ content: "You're already in it.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const name = await kovaaksNameForDiscordId(i.user.id);
+    if (!name) {
+      await i.reply({ content: NO_LINK, flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const player = ensurePlayer(i.user.id, name);
+    // Tier gate against everyone already in, not just the opener - otherwise a
+    // novice and an elite meet in the middle through an intermediate.
+    const clash = rows
+      .map((r) => getPlayer(r.discord_id)!)
+      .find((other) => !canPlay(player.tier, other.tier));
+    if (clash) {
       await i.reply({
-        content: isHost ? 'The host cancels, not leaves.' : "You're not in this one.",
+        content: `You're ${player.tier}, this one's ${clash.tier} — too far apart.`,
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
-    db.prepare('delete from match_player where match_id = ? and discord_id = ?').run(
+    db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(
       match.id,
       i.user.id,
     );
-    await i.update(render(getMatch(match.id)!));
+
+    const full = matchPlayers(match.id).length >= FORMATS[match.format].max;
+    await i.deferUpdate();
+    const next = full ? await startMatch(i.guild!, match) : getMatch(match.id)!;
+    await i.editReply(render(next));
     return;
   }
 
   if (action === 'cancel') {
-    if (!isHost) {
-      await i.reply({ content: 'Host only.', flags: MessageFlags.Ephemeral });
+    if (!isOpener) {
+      await i.reply({ content: 'Only whoever opened it can cancel.', flags: MessageFlags.Ephemeral });
       return;
     }
     db.prepare("update match set status = 'cancelled' where id = ?").run(match.id);
-    await i.update({ content: 'Cancelled.', embeds: [], components: [] });
-    return;
-  }
-
-  if (action === 'begin') {
-    if (!isHost) {
-      await i.reply({ content: 'Host only.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-    const { min, max, teamSize } = FORMATS[match.format];
-    const accepted = rows.filter((r) => r.accepted);
-    if (accepted.length < min || accepted.length > max) {
-      await i.reply({
-        content: `${match.format} needs ${min}${max === min ? '' : `-${max}`} accepted players, you have ${accepted.length}.`,
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-    if (teamSize > 1 && accepted.length % teamSize !== 0) {
-      await i.reply({ content: 'Uneven teams.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-    const shuffled = [...accepted].sort(() => Math.random() - 0.5);
-    shuffled.forEach((row, idx) => {
-      db.prepare(
-        'update match_player set team = ? where match_id = ? and discord_id = ?',
-      ).run(Math.floor(idx / teamSize), match.id, row.discord_id);
-    });
-    // Anyone who never accepted is dropped rather than carried in at 0.
-    db.prepare('delete from match_player where match_id = ? and accepted = 0').run(match.id);
-    db.prepare(
-      "update match set status = 'live', scenarios = ?, started_at = ? where id = ?",
-    ).run(JSON.stringify(rollScenarios()), Date.now(), match.id);
-    await i.update(render(getMatch(match.id)!));
+    await i.deferUpdate();
+    await i.message.delete().catch(() => {});
     return;
   }
 
@@ -506,8 +464,8 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
   }
 
   if (action === 'finish') {
-    if (!isHost) {
-      await i.reply({ content: 'Host only.', flags: MessageFlags.Ephemeral });
+    if (!rows.some((r) => r.discord_id === i.user.id)) {
+      await i.reply({ content: 'Players only.', flags: MessageFlags.Ephemeral });
       return;
     }
     if (match.status !== 'live') {
@@ -518,14 +476,47 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
     const { match: done, deltas } = await finishMatch(match);
     const rowsDone = matchPlayers(done.id);
     const players = new Map(rowsDone.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
-    const embed = resultsEmbed(done, rowsDone, players, deltas);
 
-    await i.editReply({ embeds: [liveEmbed(done, rowsDone, players)], components: [] });
     const channelId = RESULTS_CHANNEL_ID ?? done.channel_id;
     const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (channel?.isSendable()) await channel.send({ embeds: [embed] });
-    else await i.followUp({ embeds: [embed] });
+    if (channel?.isSendable()) {
+      await channel.send({ embeds: [resultsEmbed(done, rowsDone, players, deltas)] });
+      // The call is over and the result lives elsewhere - leaving it would just
+      // silt up the queue channel.
+      await i.message.delete().catch(() => {});
+    } else {
+      await i.editReply({
+        embeds: [resultsEmbed(done, rowsDone, players, deltas)],
+        components: [],
+      });
+    }
   }
+}
+
+async function onOpen(i: import('discord.js').ButtonInteraction, format: Format) {
+  if (!FORMATS[format] || !i.guildId) {
+    await i.reply({ content: 'Unknown format.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const name = await kovaaksNameForDiscordId(i.user.id);
+  if (!name) {
+    await i.reply({ content: NO_LINK, flags: MessageFlags.Ephemeral });
+    return;
+  }
+  ensurePlayer(i.user.id, name);
+
+  const { lastInsertRowid } = db
+    .prepare('insert into match (guild_id, channel_id, host_id, format) values (?, ?, ?, ?)')
+    .run(i.guildId, i.channelId, i.user.id, format);
+  const matchId = Number(lastInsertRowid);
+  db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(
+    matchId,
+    i.user.id,
+  );
+
+  await i.reply(render(getMatch(matchId)!));
+  const msg = await i.fetchReply();
+  db.prepare('update match set message_id = ? where id = ?').run(msg.id, matchId);
 }
 
 async function editMatchMessage(match: Match) {

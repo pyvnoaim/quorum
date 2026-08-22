@@ -25,13 +25,13 @@ db.exec(`
     status     text not null default 'lobby',
     scenarios  text not null default '[]',
     started_at integer,
-    ended_at   integer
+    ended_at   integer,
+    voice_channel_id text
   );
   create table if not exists match_player (
     match_id   integer not null,
     discord_id text not null,
     team       integer not null default 0,
-    accepted   integer not null default 0,
     scores     text not null default '{}',
     placing    integer,
     elo_before integer,
@@ -59,12 +59,12 @@ export interface Match {
   scenarios: string;
   started_at: number | null;
   ended_at: number | null;
+  voice_channel_id: string | null;
 }
 export interface MatchPlayer {
   match_id: number;
   discord_id: string;
   team: number;
-  accepted: number;
   scores: string;
   placing: number | null;
   elo_before: number | null;
