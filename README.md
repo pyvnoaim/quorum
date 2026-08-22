@@ -90,8 +90,12 @@ SSL tab: request a new Let's Encrypt certificate, **Force SSL** and HTTP/2 on.
 https://quorum.example.com/callback
 ```
 
-Discord matches it character for character, so no trailing slash. The bot needs
-the **Server Members** intent left OFF and **Server Voice States** ON.
+Discord matches it character for character, so no trailing slash.
+
+On the **Bot** page, leave all three privileged intents OFF - the bot asks for
+`Guilds` and `GuildVoiceStates`, and neither is privileged. Turn **Public Bot**
+off too while you're there: with `ALLOWED_GUILD_IDS` set, nobody else can
+usefully add it anyway.
 
 ### When it doesn't come up
 
