@@ -1238,6 +1238,10 @@ async function renderGuild(guild) {
       \${selectField('ping', NONE.concat(data.roles), data.config.ping_role_id)}
     </div>
     <div class="field">
+      <label>Announcements <span class="hint">- Quorum posts here whenever staff change the format, the pool or the ladder</span></label>
+      \${selectField('announce', NONE.concat(data.channels), data.config.announce_channel_id)}
+    </div>
+    <div class="field">
       <label>Auto-cancel <span class="hint">- drop calls nobody takes, so the channel only shows live ones</span></label>
       <div class="opt boxed">
         <label class="opt-hit">
@@ -1800,6 +1804,7 @@ async function renderGuild(guild) {
         : 0,
       category_id: document.getElementById('category').dataset.value || null,
       ping_role_id: document.getElementById('ping').dataset.value || null,
+      announce_channel_id: document.getElementById('announce').dataset.value || null,
     };
     const res = await fetch('/api/guild/' + guild.id, {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),

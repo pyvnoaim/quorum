@@ -122,6 +122,9 @@ for (const stmt of [
   'alter table guild_config add column format_cfg text',
   // Where the queue panels are, so the tick can keep their counts honest.
   'alter table guild_config add column panel_msgs text',
+  // Optional: where the bot says what staff changed, so players hear about a
+  // new scenario pool from the server rather than from losing a match on it.
+  'alter table guild_config add column announce_channel_id text',
 ]) {
   try {
     db.exec(stmt);
@@ -216,6 +219,8 @@ export interface GuildConfig {
   format_cfg: string | null;
   /** JSON: the panels this server has up - see getPanels(). */
   panel_msgs: string | null;
+  /** Where setup changes are announced. Null = don't announce. */
+  announce_channel_id: string | null;
 }
 
 export const getSeedMode = (guildId: string): SeedMode => {
@@ -402,6 +407,7 @@ export function getConfig(guildId: string): GuildConfig {
       call_ttl_min: null,
       format_cfg: null,
       panel_msgs: null,
+      announce_channel_id: null,
     }
   );
 }
@@ -412,8 +418,8 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     `insert into guild_config
        (guild_id, panel_channel_id, results_channel_id, ping_role_id,
         rank_spread, split_channels, seed_mode, call_ttl_min,
-        split_category_id, split_results_id, format_cfg, panel_msgs)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        split_category_id, split_results_id, format_cfg, panel_msgs, announce_channel_id)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
@@ -425,7 +431,8 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
        split_category_id = excluded.split_category_id,
        split_results_id = excluded.split_results_id,
        format_cfg = excluded.format_cfg,
-       panel_msgs = excluded.panel_msgs`,
+       panel_msgs = excluded.panel_msgs,
+       announce_channel_id = excluded.announce_channel_id`,
   ).run(
     guildId,
     next.panel_channel_id,
@@ -439,6 +446,7 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.split_results_id,
     next.format_cfg,
     next.panel_msgs,
+    next.announce_channel_id,
   );
   return next;
 }

@@ -40,7 +40,7 @@ import {
   type Rank,
   type RankChannels,
 } from './db.js';
-import { panelMessage } from './embeds.js';
+import { changeEmbed, panelMessage } from './embeds.js';
 import { bandsInReach } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
 import { PAGE } from './page.js';
@@ -391,6 +391,35 @@ async function postPanel(channel: GuildBasedChannel | undefined, formats: readon
   return !!posted;
 }
 
+/** Says what staff just changed, if the server asked to be told.
+ *
+ *  Never throws and never blocks a save: a missing channel or a missing Send
+ *  Messages means the change still happened, and a settings page that fails
+ *  because it could not gossip about itself would be worse than a quiet one.
+ *  Nothing to say is also common - a save that changed nothing announces
+ *  nothing. */
+async function announce(guild: Guild, byId: string, lines: string[]) {
+  if (!lines.length) return;
+  const channelId = getConfig(guild.id).announce_channel_id;
+  if (!channelId) return;
+  const channel = guild.channels.cache.get(channelId);
+  if (!channel?.isSendable()) return;
+  await channel.send({ embeds: [changeEmbed(lines, byId)] }).catch(() => {});
+}
+
+/** What is different between two lists, said the way a player would say it. */
+function listDiff(before: string[], after: string[]) {
+  const added = after.filter((x) => !before.includes(x));
+  const gone = before.filter((x) => !after.includes(x));
+  const say = (verb: string, items: string[]) =>
+    items.length <= 3
+      ? `${verb} ${items.map((i) => `**${i}**`).join(', ')}`
+      : `${verb} **${items.length}**: ${items.slice(0, 3).map((i) => `**${i}**`).join(', ')} and ${items.length - 3} more`;
+  return [added.length ? say('added', added) : '', gone.length ? say('removed', gone) : ''].filter(
+    Boolean,
+  );
+}
+
 /** The bot owns match lifecycle; the dashboard only asks it to act. Passing the
  *  two hooks in beats importing index.ts back into here. */
 interface Hooks {
@@ -689,12 +718,19 @@ export function startWeb(client: Client, hooks: Hooks) {
             ? v
             : null;
         const role = (v: unknown) => (typeof v === 'string' && guild.roles.cache.has(v) ? v : null);
+        // Same reasoning as the category: checked against THIS guild's channels,
+        // so a well-formed id from another server cannot be announced into.
+        const textChannel = (v: unknown) =>
+          typeof v === 'string' && guild.channels.cache.get(v)?.type === ChannelType.GuildText
+            ? v
+            : null;
         const ttl = (v: unknown) => {
           if (v == null) return null;
           const n = Math.round(Number(v));
           if (!Number.isFinite(n) || n <= 0) return 0;
           return Math.min(Math.max(n, 5), 1440);
         };
+        const wasAnnounce = getConfig(guildId).announce_channel_id;
         setConfig(guildId, {
           // Naming no category keeps the one already in use, and only falls
           // through to null - "make one" - when there is none, or when the one
@@ -704,11 +740,20 @@ export function startWeb(client: Client, hooks: Hooks) {
           split_category_id:
             category(body.category_id) ?? category(getConfig(guildId).split_category_id),
           ping_role_id: role(body.ping_role_id),
+          announce_channel_id: textChannel(body.announce_channel_id),
           // 0 is off and null is "use the default", so both have to survive the
           // trip. Anything else is clamped: a one-minute window bins calls
           // before anyone sees them, and a one-year one is off with extra steps.
           call_ttl_min: ttl(body.call_ttl_min),
         });
+        // Said in the new channel itself, so whoever set it can see it works -
+        // and the room knows it is now the place changes get posted.
+        if (
+          getConfig(guildId).announce_channel_id &&
+          getConfig(guildId).announce_channel_id !== wasAnnounce
+        ) {
+          await announce(guild, session.user.id, ['This channel now gets every setup change.']);
+        }
         // A different category means the channels move into it, so the save has
         // to reach Discord and not just the database. Awaited, so a failure is
         // reported rather than swallowed into a background promise, and so two
@@ -739,7 +784,14 @@ export function startWeb(client: Client, hooks: Hooks) {
           json(res, 400, { error: 'a ladder tops out at 50 ranks' });
           return;
         }
+        const wasLadder = getRanks(guildId).map((r) => `${r.name} (${r.min_elo})`);
         const { ranks, orphaned } = setRanks(guildId, clean);
+        const ladderDiff = listDiff(wasLadder, ranks.map((r) => `${r.name} (${r.min_elo})`));
+        await announce(
+          guild,
+          session.user.id,
+          ladderDiff.length ? [`Ladder: ${ladderDiff.join(', ')}`] : [],
+        );
         // Roles first, always: the channels below are locked to them.
         await syncRankRolesToDiscord(guild, ranks, orphaned);
         const built = await syncRankChannelsToDiscord(guild, getRanks(guildId), orphaned);
@@ -753,7 +805,13 @@ export function startWeb(client: Client, hooks: Hooks) {
           json(res, 400, { error: 'unknown seed mode' });
           return;
         }
+        const wasMode = getSeedMode(guildId);
         setConfig(guildId, { seed_mode: mode });
+        await announce(
+          guild,
+          session.user.id,
+          wasMode === mode ? [] : [`New players now start from **${mode}**, not **${wasMode}**`],
+        );
         json(res, 200, { mode });
         return;
       }
@@ -763,7 +821,23 @@ export function startWeb(client: Client, hooks: Hooks) {
       // match nobody can finish.
       if (action === '/format' && req.method === 'PUT') {
         const body = await readJson(req);
-        json(res, 200, { format: setFormat(guildId, body.format ?? {}) });
+        const before = getFormat(guildId);
+        const after = setFormat(guildId, body.format ?? {});
+        const label: Record<keyof typeof after, string> = {
+          rounds: 'Scenarios per match',
+          runs: 'Runs per scenario',
+          pickPool: 'Candidates per pick',
+          pickTtlS: 'Ban or pick timer (seconds)',
+          matchTtlMin: 'Match time limit (minutes)',
+        };
+        await announce(
+          guild,
+          session.user.id,
+          (Object.keys(after) as (keyof typeof after)[])
+            .filter((k) => before[k] !== after[k])
+            .map((k) => `${label[k]}: **${before[k]}** → **${after[k]}**`),
+        );
+        json(res, 200, { format: after });
         return;
       }
 
@@ -776,7 +850,20 @@ export function startWeb(client: Client, hooks: Hooks) {
           // to the default rather than silently inventing a gate.
           if (Number.isFinite(n) && n >= 0 && n <= 6) clean[format] = n;
         }
-        json(res, 200, { spread: setRankSpread(guildId, clean) });
+        const wasSpread = getRankSpread(guildId);
+        const nowSpread = setRankSpread(guildId, clean);
+        await announce(
+          guild,
+          session.user.id,
+          (Object.keys(nowSpread) as Format[])
+            .filter((f) => wasSpread[f] !== nowSpread[f])
+            .map((f) => {
+              const say = (n: number) =>
+                n === 0 ? 'same rank only' : `${n} rank${n === 1 ? '' : 's'} either side`;
+              return `${f} queues with **${say(wasSpread[f])}** → **${say(nowSpread[f])}**`;
+            }),
+        );
+        json(res, 200, { spread: nowSpread });
         return;
       }
 
@@ -799,7 +886,15 @@ export function startWeb(client: Client, hooks: Hooks) {
           json(res, 400, { error: 'the pool tops out at 500 scenarios' });
           return;
         }
-        json(res, 200, { scenarios: setScenarios(guildId, clean) });
+        const was = getScenarios(guildId).map((r) => r.name);
+        const now = setScenarios(guildId, clean);
+        const poolDiff = listDiff(was, now.map((r) => r.name));
+        await announce(
+          guild,
+          session.user.id,
+          poolDiff.length ? [`Scenario pool: ${poolDiff.join(', ')}`] : [],
+        );
+        json(res, 200, { scenarios: now });
         return;
       }
 

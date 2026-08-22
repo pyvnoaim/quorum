@@ -102,6 +102,20 @@ export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string
     .setFooter(footer());
 }
 
+/** What staff just changed, for the announcements channel.
+ *
+ *  Names the change rather than saying "settings were updated": a player who
+ *  cannot see what moved has learned nothing, and will find out by losing a
+ *  match on a scenario nobody told them about. Attributed, because a rule
+ *  change with a name on it is one people can ask about. */
+export function changeEmbed(lines: string[], byId: string) {
+  return new EmbedBuilder()
+    .setTitle('Setup changed')
+    .setColor(BLURPLE)
+    .setDescription(`${lines.map((l) => `· ${l}`).join('\n')}\n\nChanged by <@${byId}>.`)
+    .setFooter(footer());
+}
+
 /** The queue panel: three beats, because that is the whole game - press the
  *  button, play in the thread, the scores arrive on their own.
  *

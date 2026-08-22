@@ -1,6 +1,7 @@
 /** Dev harness: runs the real dashboard against a fake Discord.
  *  `npm run dev:web`, then open http://localhost:3011 to land signed in
- *  (the dashboard itself is on :3010; :3011 is the one-hit fake login).
+ *  (the dashboard itself is on :3010; :3011 is the one-hit fake login, and
+ *  PORT=3020 moves both if you already have one up).
  *  ponytail: no OAuth app, no bot, no gateway - global fetch is stubbed for
  *  discord.com and the Client is a couple of Collections. Delete this file if
  *  you'd rather test against real credentials. */
@@ -9,8 +10,10 @@ import { Collection } from 'discord.js';
 
 process.env.DISCORD_CLIENT_ID = 'dev';
 process.env.DISCORD_CLIENT_SECRET = 'dev';
-process.env.WEB_URL = 'http://localhost:3010';
-process.env.PORT = '3010';
+// Overridable, so a second copy can run beside one you already have up:
+// `PORT=3020 npm run dev:web`. The fake login sits on the next port up.
+process.env.PORT ??= '3010';
+process.env.WEB_URL = `http://localhost:${process.env.PORT}`;
 process.env.DB_PATH = process.env.DB_PATH ?? '/tmp/pug-dev.db';
 // mirrors a locked-down deploy: only the dev guild is allowed through.
 process.env.ALLOWED_GUILD_IDS = process.env.ALLOWED_GUILD_IDS ?? '111111111111111111';
@@ -44,9 +47,11 @@ const channel = (id: string, name: string, type: number, parentId: string | null
   type,
   parentId,
   isSendable: () => true,
-  send: (msg: unknown) => {
-    console.log(`  #${name} <- panel`);
-    return Promise.resolve({ id: '1' });
+  send: (msg: any) => {
+    const embed = msg?.embeds?.[0]?.data ?? msg?.embeds?.[0];
+    console.log(`  #${name} <- ${embed?.title ?? 'message'}`);
+    if (embed?.description) console.log(`     ${embed.description.replace(/\n/g, '\n     ')}`);
+    return Promise.resolve({ id: String(nextId++) });
   },
   edit: async (patch: any) => {
     console.log(`  edit ${name} -> ${JSON.stringify(patch)}`);
@@ -66,9 +71,11 @@ const role = (id: string, name: string, color = 0) => ({
   delete: async () => console.log(`role ${name} deleted`),
 });
 
+let nextId = 400;
 const channels = new Collection<string, any>([
   ['201', channel('201', 'queue', 0)],
   ['202', channel('202', 'results', 0)],
+  ['204', channel('204', 'announcements', 0)],
   ['203', channel('203', 'Quorum', 4)],
 ]);
 const roles = new Collection<string, any>([
@@ -76,7 +83,6 @@ const roles = new Collection<string, any>([
   ['301', role('301', 'Pug Ping')],
 ]);
 
-let nextId = 400;
 const guild: any = {
   id: GUILD_ID,
   name: 'Dev Server',
@@ -213,7 +219,9 @@ startWeb(client, {
 // /login's state is single-use and expires, so mint a fresh one per visit
 // instead of printing one URL that goes stale.
 createServer(async (_req, res) => {
-  const login = await realFetch('http://localhost:3010/login', { redirect: 'manual' });
+  const login = await realFetch(`${process.env.WEB_URL}/login`, { redirect: 'manual' });
   const state = new URL(login.headers.get('location')!).searchParams.get('state');
-  res.writeHead(302, { location: `http://localhost:3010/callback?code=dev&state=${state}` }).end();
-}).listen(3011, () => console.log('dev login: http://localhost:3011'));
+  res.writeHead(302, { location: `${process.env.WEB_URL}/callback?code=dev&state=${state}` }).end();
+}).listen(Number(process.env.PORT) + 1, () =>
+  console.log(`dev login: http://localhost:${Number(process.env.PORT) + 1}`),
+);
