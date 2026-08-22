@@ -11,6 +11,8 @@ process.env.DISCORD_CLIENT_SECRET = 'dev';
 process.env.WEB_URL = 'http://localhost:3010';
 process.env.PORT = '3010';
 process.env.DB_PATH = process.env.DB_PATH ?? '/tmp/pug-dev.db';
+// mirrors a locked-down deploy: only the dev guild is allowed through.
+process.env.ALLOWED_GUILD_IDS = process.env.ALLOWED_GUILD_IDS ?? '111111111111111111';
 
 const GUILD_ID = '111111111111111111';
 

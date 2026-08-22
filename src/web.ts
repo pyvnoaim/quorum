@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { ChannelType, PermissionFlagsBits, type Client, type Guild } from 'discord.js';
-import { FORMATS, TIERS, type Format, type Tier } from './config.js';
+import { FORMATS, TIERS, guildAllowed, type Format, type Tier } from './config.js';
 import {
   getConfig,
   getMatch,
@@ -225,9 +225,13 @@ export function startWeb(client: Client, hooks: Hooks) {
         // adding a bot. Anything below it has no business editing these.
         const manageable = guilds.filter(
           (g) =>
-            g.owner ||
-            (BigInt(g.permissions) & PermissionFlagsBits.ManageGuild) ===
-              PermissionFlagsBits.ManageGuild,
+            // the allowlist is enforced here too, not just in the bot: otherwise
+            // the dashboard would offer an invite link for a server the bot
+            // leaves the moment it arrives.
+            guildAllowed(g.id) &&
+            (g.owner ||
+              (BigInt(g.permissions) & PermissionFlagsBits.ManageGuild) ===
+                PermissionFlagsBits.ManageGuild),
         );
         // opportunistic sweep: without it a long-running bot keeps every
         // session it ever issued, since sessionOf only drops the one it is asked for.

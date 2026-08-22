@@ -13,6 +13,7 @@ import {
   type Interaction,
 } from 'discord.js';
 import {
+  guildAllowed,
   BAN_POOL,
   BAN_TTL_MS,
   CALL_TTL_MS,
@@ -458,7 +459,19 @@ async function tick() {
   }
 }
 
+/** Leaves anywhere it isn't wanted. Checked on join AND on boot: the bot can
+ *  be added while it is offline, and it can be added back after being removed. */
+async function leaveIfNotAllowed(guild: Guild) {
+  if (guildAllowed(guild.id)) return false;
+  console.log(`leaving ${guild.name} (${guild.id}): not in ALLOWED_GUILD_IDS`);
+  await guild.leave().catch(() => {});
+  return true;
+}
+
+client.on('guildCreate', (guild) => void leaveIfNotAllowed(guild).catch(console.error));
+
 client.once('clientReady', async (c) => {
+  for (const guild of c.guilds.cache.values()) await leaveIfNotAllowed(guild);
   await c.application.commands.set([command.toJSON()]);
   startWeb(c, { concludeMatch, cancelMatch });
   setInterval(() => void tick().catch(console.error), TICK_MS).unref();

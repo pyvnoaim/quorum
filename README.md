@@ -53,7 +53,13 @@ DISCORD_CLIENT_ID=…
 DISCORD_CLIENT_SECRET=…
 WEB_URL=https://quorum.example.com
 PROXY_NETWORK=npm_default
+ALLOWED_GUILD_IDS=1540423662753288192
 ```
+
+`ALLOWED_GUILD_IDS` pins the bot to one server (comma-separate for more). It
+leaves anywhere else the moment it is added - and on boot, since it can be added
+while offline - and the dashboard won't list those servers either, so a leaked
+invite link can't park it somewhere quietly. Leave it empty for no limit.
 
 `WEB_URL` must be the public **https** URL: it is what the OAuth redirect is
 built from, and it is what puts `Secure` on the session cookie.

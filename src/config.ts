@@ -1,5 +1,17 @@
 /** Everything you'd want to tune without reading the rest of the bot. */
 
+/** Servers this bot will run in. Set it and the bot leaves anywhere else the
+ *  moment it is added, and the dashboard won't list those servers either -
+ *  a public invite link can't be used to quietly park it somewhere.
+ *  Empty (the default) means no restriction. */
+export const ALLOWED_GUILDS = new Set(
+  (process.env.ALLOWED_GUILD_IDS ?? '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => /^\d{1,32}$/.test(id)),
+);
+export const guildAllowed = (id: string) => !ALLOWED_GUILDS.size || ALLOWED_GUILDS.has(id);
+
 export const FORMATS = {
   '1v1': { min: 2, max: 2, teamSize: 1 },
   '2v2': { min: 4, max: 4, teamSize: 2 },
