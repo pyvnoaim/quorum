@@ -134,8 +134,15 @@ without the bot link straight to the invite; the rest open a settings page:
 Then hit **Post panel** and the queue message goes up. That's the whole setup;
 there are no configuration commands.
 
-Add `WEB_URL/callback` to the OAuth redirects on your Discord application, and
-give the bot **Manage Channels** + **Move Members** for the voice half.
+Add `WEB_URL/callback` to the OAuth redirects on your Discord application. The
+dashboard's invite link already asks for everything the bot needs - Manage
+Channels and Manage Roles for the ladder, Move Members for the voice half, and
+View Channel, Send Messages, Embed Links and Read Message History held in its
+own right, because a locked rank category is the moment @everyone stops
+supplying them. **Never give it Administrator.**
+
+If the bot was invited before this was fixed it is still holding the old, wrong
+set: re-run the invite from the dashboard, which updates the role in place.
 
 ## Who decides a division
 

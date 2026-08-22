@@ -45,6 +45,18 @@ const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET ?? '';
 const BASE_URL = (process.env.WEB_URL ?? 'http://localhost:3000').replace(/\/$/, '');
 const PORT = Number(process.env.PORT ?? 3000);
 const REDIRECT = `${BASE_URL}/callback`;
+/** What the dashboard's invite link asks for, built from the flags rather than
+ *  written as a number - the old hand-typed one asked for Stream (bit 9) where
+ *  it meant ViewChannel (bit 10), and nothing noticed for months. */
+const INVITE_PERMISSIONS = [
+  PermissionFlagsBits.ManageChannels,
+  PermissionFlagsBits.ManageRoles,
+  PermissionFlagsBits.MoveMembers,
+  PermissionFlagsBits.ViewChannel,
+  PermissionFlagsBits.SendMessages,
+  PermissionFlagsBits.EmbedLinks,
+  PermissionFlagsBits.ReadMessageHistory,
+].reduce((all, flag) => all | flag, 0n).toString();
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
 interface Session {
@@ -444,7 +456,11 @@ export function startWeb(client: Client, hooks: Hooks) {
             members: client.guilds.cache.get(g.id)?.memberCount ?? null,
             // guild is pinned and the picker disabled - the dashboard already
             // asked which server, so Discord shouldn't ask again.
-            invite: `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=285213200&guild_id=${g.id}&disable_guild_select=true`,
+            // ManageChannels + ManageRoles for the ladder's roles and channels,
+            // MoveMembers for the voice half, and View/Send/Embed/History so the
+            // bot holds those itself. It cannot lean on @everyone for them: the
+            // first thing a locked rank category does is take them away.
+            invite: `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=${INVITE_PERMISSIONS}&guild_id=${g.id}&disable_guild_select=true`,
           })),
         });
         return;
