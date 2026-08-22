@@ -17,8 +17,14 @@ export const TIER_SEED: Record<Tier, number> = {
   advanced: 1150,
   elite: 1275,
 };
-/** Your tier or one either side. Set to 0 to lock people to their own tier. */
-export const TIER_SPREAD = 1;
+/** How many rank bands apart two players may be, per format. 0 locks a queue
+ *  to one rank; 1 lets the band either side in. Seeded into a server's config
+ *  on first read and owned by the dashboard after that. */
+export const DEFAULT_RANK_SPREAD: Record<Format, number> = {
+  '1v1': 0,
+  '2v2': 1,
+  group: 1,
+};
 
 /** Seeds a server's rank ladder the first time it's read. After that the rows
  *  in the db are the truth - names, colors and thresholds are edited in the
@@ -63,6 +69,14 @@ export const DEFAULT_CATEGORIES: Record<string, string[]> = {
   ],
 };
 export const ROUNDS = 3;
+
+/** Candidates rolled for the ban phase. The two sides alternate bans until
+ *  ROUNDS are left, so this must exceed ROUNDS - and by an even number, or one
+ *  side gets the last ban and a free advantage. Set it to ROUNDS to skip
+ *  banning entirely and go straight to a random roll. */
+export const BAN_POOL = 7;
+/** A side that won't ban holds the whole lobby, so the sweep bans for them. */
+export const BAN_TTL_MS = 90 * 1000;
 
 /** Which formats get a button on the queue panel. */
 export const PANEL_FORMATS: Format[] = ['1v1', '2v2'];

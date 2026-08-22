@@ -8,6 +8,9 @@ const {
   getPlayer,
   getRanks,
   getScenarios,
+  guildStats,
+  leaderboard,
+  playersInGuild,
   setRankRole,
   setRanks,
   setScenarios,
@@ -67,5 +70,32 @@ db.prepare('update player set wins = 3, elo = 1400 where discord_id = ?').run('u
 setTier('u1', 'novice');
 assert.equal(getPlayer('u1')!.elo, 1400, 'a played record survives a tier change');
 assert.equal(getPlayer('u1')!.tier, 'novice');
+
+// Ratings are global, the player LIST is not. Without the guild filter an
+// admin of one server could read - and through setTier rewrite - the record of
+// players who have never been in it.
+ensurePlayer('inA', 'playerA');
+ensurePlayer('inB', 'playerB');
+db.prepare(
+  "insert into match (id, guild_id, channel_id, host_id, format, status) values (91,'gA','c','inA','1v1','done')",
+).run();
+db.prepare(
+  "insert into match (id, guild_id, channel_id, host_id, format, status) values (92,'gB','c','inB','1v1','done')",
+).run();
+db.prepare("insert into match_player (match_id, discord_id) values (91,'inA')").run();
+db.prepare("insert into match_player (match_id, discord_id) values (92,'inB')").run();
+db.prepare("update player set wins = 1 where discord_id in ('inA','inB')").run();
+
+assert.deepEqual(
+  playersInGuild('gA').map((p) => p.discord_id),
+  ['inA'],
+  'a server sees only players who have been in it',
+);
+assert.deepEqual(
+  leaderboard('gB').map((p) => p.discord_id),
+  ['inB'],
+  'the ladder is scoped too',
+);
+assert.equal(guildStats('gA').rated, 1, 'and so is the rated count');
 
 console.log('db ok');

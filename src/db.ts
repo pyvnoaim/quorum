@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_CATEGORIES,
+  DEFAULT_RANK_SPREAD,
   DEFAULT_RANKS,
   TIER_SEED,
   type Format,
@@ -51,7 +52,8 @@ db.exec(`
     panel_channel_id   text,
     results_channel_id text,
     voice_category_id  text,
-    ping_role_id       text
+    ping_role_id       text,
+    rank_spread        text
   );
   create table if not exists rank (
     id       integer primary key autoincrement,
@@ -69,13 +71,49 @@ db.exec(`
   );
 `);
 
+db.exec(`
+  create index if not exists idx_match_player_discord on match_player (discord_id);
+  create index if not exists idx_match_guild_status on match (guild_id, status);
+`);
+
+// ponytail: one ALTER guarded by a try beats pulling in a migration tool for
+// a single added column. Drop this once no old database is left anywhere.
+for (const stmt of [
+  'alter table guild_config add column rank_spread text',
+  'alter table player add column steam_id text',
+  'alter table player add column voltaic text',
+  'alter table player add column voltaic_at integer',
+]) {
+  try {
+    db.exec(stmt);
+  } catch {
+    /* already there */
+  }
+}
+
 export interface Player {
   discord_id: string;
   kovaaks_username: string;
+  /** From the same KovaaK's lookup as the username - it is what the benchmark
+   *  index is keyed by. Null for anyone linked before this was stored. */
+  steam_id: string | null;
+  /** JSON {rank, difficulty} for their Voltaic S5 standing, or null for none. */
+  voltaic: string | null;
+  /** Stamped even when the answer was null, so "no benchmark" isn't re-fetched
+   *  on every page load. */
+  voltaic_at: number | null;
   tier: Tier;
   elo: number;
   wins: number;
   losses: number;
+}
+
+export function setVoltaic(discordId: string, value: { rank: string } | null) {
+  db.prepare('update player set voltaic = ?, voltaic_at = ? where discord_id = ?').run(
+    value ? JSON.stringify(value) : null,
+    Date.now(),
+    discordId,
+  );
 }
 export interface Match {
   id: number;
@@ -84,7 +122,7 @@ export interface Match {
   message_id: string | null;
   host_id: string;
   format: Format;
-  status: 'lobby' | 'live' | 'done' | 'cancelled';
+  status: 'lobby' | 'banning' | 'live' | 'done' | 'cancelled';
   scenarios: string;
   created_at: number;
   started_at: number | null;
@@ -98,6 +136,30 @@ export interface GuildConfig {
   results_channel_id: string | null;
   voice_category_id: string | null;
   ping_role_id: string | null;
+  /** JSON: how many rank bands apart a queue lets people be, per format. */
+  rank_spread: string | null;
+}
+
+/** The parsed gate, falling back to the defaults for anything unset or junk. */
+export function getRankSpread(guildId: string): Record<Format, number> {
+  const raw = getConfig(guildId).rank_spread;
+  let saved: Record<string, unknown> = {};
+  try {
+    if (raw) saved = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    /* corrupt column falls back to the defaults rather than 500ing the page */
+  }
+  return Object.fromEntries(
+    Object.entries(DEFAULT_RANK_SPREAD).map(([format, fallback]) => {
+      const value = Math.trunc(Number(saved[format]));
+      return [format, Number.isFinite(value) && value >= 0 && value <= 6 ? value : fallback];
+    }),
+  ) as Record<Format, number>;
+}
+
+export function setRankSpread(guildId: string, spread: Record<string, number>) {
+  setConfig(guildId, { rank_spread: JSON.stringify(spread) });
+  return getRankSpread(guildId);
 }
 
 export interface Rank {
@@ -119,6 +181,7 @@ export function getConfig(guildId: string): GuildConfig {
       results_channel_id: null,
       voice_category_id: null,
       ping_role_id: null,
+      rank_spread: null,
     }
   );
 }
@@ -127,19 +190,21 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
   const next = { ...getConfig(guildId), ...patch };
   db.prepare(
     `insert into guild_config
-       (guild_id, panel_channel_id, results_channel_id, voice_category_id, ping_role_id)
-     values (?, ?, ?, ?, ?)
+       (guild_id, panel_channel_id, results_channel_id, voice_category_id, ping_role_id, rank_spread)
+     values (?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
        voice_category_id = excluded.voice_category_id,
-       ping_role_id = excluded.ping_role_id`,
+       ping_role_id = excluded.ping_role_id,
+       rank_spread = excluded.rank_spread`,
   ).run(
     guildId,
     next.panel_channel_id,
     next.results_channel_id,
     next.voice_category_id,
     next.ping_role_id,
+    next.rank_spread,
   );
   return next;
 }
@@ -225,15 +290,29 @@ export function setScenarios(guildId: string, rows: { category: string; name: st
 export function listOpenMatches(guildId: string) {
   return db
     .prepare(
-      "select * from match where guild_id = ? and status in ('lobby', 'live') order by id desc",
+      "select * from match where guild_id = ? and status in ('lobby', 'banning', 'live') order by id desc",
     )
     .all(guildId) as unknown as Match[];
 }
 
-export function listPlayers() {
+/** Everyone who has been in a match in THIS server.
+ *
+ *  Ratings are global by design - one Elo across every server - but the list
+ *  is not: without the guild filter, an admin of one server could read, and
+ *  through setTier rewrite, the record of players who have never set foot in
+ *  it. Anyone linked but not yet queued here is reachable via `/pug tier`,
+ *  which Discord already scopes to the server it was run in. */
+export function playersInGuild(guildId: string) {
   return db
-    .prepare('select * from player order by elo desc')
-    .all() as unknown as Player[];
+    .prepare(
+      `select p.* from player p
+       where exists (
+         select 1 from match_player mp join match m on m.id = mp.match_id
+         where mp.discord_id = p.discord_id and m.guild_id = ?
+       )
+       order by p.elo desc`,
+    )
+    .all(guildId) as unknown as Player[];
 }
 
 export function setTier(discordId: string, tier: Tier) {
@@ -270,21 +349,29 @@ export function getPlayer(discordId: string) {
 
 /** Upserts on first sighting, seeding Elo from the tier. Later calls only
  *  refresh the KovaaK's name (it can be renamed) - never the Elo. */
-export function ensurePlayer(discordId: string, kovaaksUsername: string, tier: Tier = 'intermediate') {
+export function ensurePlayer(
+  discordId: string,
+  kovaaksUsername: string,
+  steamId: string | null = null,
+  tier: Tier = 'intermediate',
+) {
   const existing = getPlayer(discordId);
   if (existing) {
-    if (existing.kovaaks_username !== kovaaksUsername) {
-      db.prepare('update player set kovaaks_username = ? where discord_id = ?').run(
+    // Both can change under us - a rename, or a steam id we only learned later
+    // - but never the Elo.
+    if (existing.kovaaks_username !== kovaaksUsername || (steamId && existing.steam_id !== steamId)) {
+      db.prepare('update player set kovaaks_username = ?, steam_id = ? where discord_id = ?').run(
         kovaaksUsername,
+        steamId ?? existing.steam_id,
         discordId,
       );
-      existing.kovaaks_username = kovaaksUsername;
+      return getPlayer(discordId)!;
     }
     return existing;
   }
   db.prepare(
-    'insert into player (discord_id, kovaaks_username, tier, elo) values (?, ?, ?, ?)',
-  ).run(discordId, kovaaksUsername, tier, TIER_SEED[tier]);
+    'insert into player (discord_id, kovaaks_username, steam_id, tier, elo) values (?, ?, ?, ?, ?)',
+  ).run(discordId, kovaaksUsername, steamId, tier, TIER_SEED[tier]);
   return getPlayer(discordId)!;
 }
 
@@ -298,10 +385,38 @@ export function matchPlayers(matchId: number) {
     .all(matchId) as unknown as MatchPlayer[];
 }
 
-export function leaderboard(limit = 20) {
+/** The overview page's numbers. Two counts here; everything else it shows the
+ *  dashboard already has on the wire. */
+export function guildStats(guildId: string) {
+  const one = (sql: string, ...args: (string | number)[]) =>
+    (db.prepare(sql).get(...args) as { n: number }).n;
+  return {
+    played: one("select count(*) as n from match where guild_id = ? and status = 'done'", guildId),
+    week: one(
+      "select count(*) as n from match where guild_id = ? and status = 'done' and ended_at > ?",
+      guildId,
+      Date.now() - 7 * 24 * 60 * 60 * 1000,
+    ),
+    rated: one(
+      `select count(*) as n from player p
+       where p.wins + p.losses > 0 and exists (
+         select 1 from match_player mp join match m on m.id = mp.match_id
+         where mp.discord_id = p.discord_id and m.guild_id = ?
+       )`,
+      guildId,
+    ),
+  };
+}
+
+export function leaderboard(guildId: string, limit = 20) {
   return db
     .prepare(
-      'select * from player where wins + losses > 0 order by elo desc, wins desc limit ?',
+      `select p.* from player p
+       where p.wins + p.losses > 0 and exists (
+         select 1 from match_player mp join match m on m.id = mp.match_id
+         where mp.discord_id = p.discord_id and m.guild_id = ?
+       )
+       order by p.elo desc, p.wins desc limit ?`,
     )
-    .all(limit) as unknown as Player[];
+    .all(guildId, limit) as unknown as Player[];
 }

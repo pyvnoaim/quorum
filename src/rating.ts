@@ -1,4 +1,4 @@
-import { K_FACTOR, TIERS, TIER_SPREAD, type Tier } from './config.js';
+import { K_FACTOR } from './config.js';
 
 /** Whatever ladder the caller holds - a server's rows, or DEFAULT_RANKS. */
 export interface Band {
@@ -17,10 +17,23 @@ export function rankName(ranks: Band[], elo: number) {
   return rankFor(ranks, elo)?.name ?? '';
 }
 
-/** Tier gate: your tier or one either side, so a Champion can slum it one down
- *  but can't farm the bottom queue. */
-export function canPlay(a: Tier, b: Tier) {
-  return Math.abs(TIERS.indexOf(a) - TIERS.indexOf(b)) <= TIER_SPREAD;
+/** Rank gate. `spread` is how many bands apart the two may be: 0 means the
+ *  same rank only, 1 means the band either side. Measured in bands rather than
+ *  raw Elo so the gate moves with the ladder a server actually edited.
+ *  Off the ladder entirely (no band clears) can't be matched at all. */
+export function canPlay(ranks: Band[], eloA: number, eloB: number, spread: number) {
+  const order = [...ranks].sort((a, b) => b.min_elo - a.min_elo);
+  const a = order.findIndex((r) => eloA >= r.min_elo);
+  const b = order.findIndex((r) => eloB >= r.min_elo);
+  if (a < 0 || b < 0) return false;
+  return Math.abs(a - b) <= spread;
+}
+
+/** Whose turn it is and how many bans are left, from nothing but how much of
+ *  the pool is gone. Deriving both is what keeps a ban phase to one column and
+ *  makes it impossible for the turn to drift out of sync with the pool. */
+export function banTurn(remaining: number, poolSize: number, rounds: number) {
+  return { turn: (poolSize - remaining) % 2, left: remaining - rounds };
 }
 
 export interface Entrant {

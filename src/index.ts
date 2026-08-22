@@ -13,6 +13,8 @@ import {
   type Interaction,
 } from 'discord.js';
 import {
+  BAN_POOL,
+  BAN_TTL_MS,
   CALL_TTL_MS,
   FORMATS,
   MATCH_TTL_MS,
@@ -28,6 +30,7 @@ import {
   getConfig,
   getMatch,
   getPlayer,
+  getRankSpread,
   getRanks,
   getScenarios,
   leaderboard,
@@ -36,10 +39,10 @@ import {
   type Match,
   type MatchPlayer,
 } from './db.js';
-import { liveEmbed, openEmbed, resultsEmbed } from './embeds.js';
+import { banEmbed, liveEmbed, openEmbed, resultsEmbed } from './embeds.js';
 import { startWeb } from './web.js';
-import { kovaaksNameForDiscordId, scoreInWindow } from './kovaaks.js';
-import { canPlay, eloDeltas, placings, rankFor, rankName } from './rating.js';
+import { kovaaksAccountForDiscordId, scoreInWindow } from './kovaaks.js';
+import { banTurn, canPlay, eloDeltas, placings, rankFor, rankName } from './rating.js';
 
 const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set');
@@ -51,7 +54,14 @@ const client = new Client({
 });
 
 const NO_LINK =
-  "That account has no KovaaK's on file. Link your Discord inside KovaaK's (Settings → Discord) and try again — it's the only setup this bot needs.";
+  "That account has no KovaaK's on file. Link your Discord inside KovaaK's (Settings → Discord) and try again - it's the only setup this bot needs.";
+const KOVAAKS_DOWN =
+  "Couldn't reach KovaaK's just now, so I can't check the account. Nothing is wrong on your end - try again in a moment.";
+
+/** Which of the two failures it was. Telling someone to go link an account
+ *  they already linked is worse than saying nothing. */
+const lookupError = (kind: 'not-linked' | 'unreachable') =>
+  kind === 'unreachable' ? KOVAAKS_DOWN : NO_LINK;
 
 const command = new SlashCommandBuilder()
   .setName('pug')
@@ -80,17 +90,26 @@ const command = new SlashCommandBuilder()
 
 /** One scenario per category, cycling, so a match is never three of the same
  *  thing. Falls back to whatever is left if the pool is smaller than ROUNDS. */
-function rollScenarios(guildId: string) {
+function rollScenarios(guildId: string, want = ROUNDS) {
   const pool = getScenarios(guildId);
   const cats = [...new Set(pool.map((s) => s.category))].map((c) =>
     pool.filter((s) => s.category === c).map((s) => s.name),
   );
   const out: string[] = [];
-  for (let i = 0; out.length < ROUNDS && i < ROUNDS * cats.length; i++) {
+  // round-robin over categories so the roll spreads across them, however many
+  // are asked for. Stops early when the pool runs dry rather than looping.
+  for (let i = 0; out.length < want && i < want * cats.length; i++) {
     const pool = cats[i % cats.length].filter((s) => !out.includes(s));
     if (pool.length) out.push(pool[Math.floor(Math.random() * pool.length)]);
   }
   return out;
+}
+
+/** Whose turn it is, and how many bans are left. Both fall out of how much of
+ *  the pool is gone, so a ban phase stores nothing beyond the pool itself. */
+function banState(match: Match) {
+  const pool: string[] = JSON.parse(match.scenarios);
+  return { pool, ...banTurn(pool.length, BAN_POOL, ROUNDS) };
 }
 
 function render(match: Match) {
@@ -104,7 +123,7 @@ function render(match: Match) {
         new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder()
             .setCustomId(`pug:join:${match.id}`)
-            .setLabel('Scrim')
+            .setLabel('Join')
             .setStyle(ButtonStyle.Success),
           new ButtonBuilder()
             .setCustomId(`pug:cancel:${match.id}`)
@@ -114,6 +133,31 @@ function render(match: Match) {
       ],
     };
   }
+  if (match.status === 'banning') {
+    const { pool, turn, left } = banState(match);
+    // Discord allows five buttons a row, and BAN_POOL is small.
+    const rowsOfFive = pool.reduce<string[][]>((acc, name, n) => {
+      if (n % 5 === 0) acc.push([]);
+      acc[acc.length - 1].push(name);
+      return acc;
+    }, []);
+    return {
+      embeds: [banEmbed(match, rows, players, turn, left)],
+      components: rowsOfFive.map((group, groupIdx) =>
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          group.map((name, n) =>
+            new ButtonBuilder()
+              // the index into the pool, not the name - a scenario name is
+              // longer than a custom id is allowed to be.
+              .setCustomId(`pug:ban:${match.id}:${groupIdx * 5 + n}`)
+              .setLabel(name.length > 78 ? name.slice(0, 77) + '…' : name)
+              .setStyle(ButtonStyle.Secondary),
+          ),
+        ),
+      ),
+    };
+  }
+
   return {
     embeds: [liveEmbed(match, rows, players)],
     components:
@@ -171,10 +215,45 @@ async function startMatch(guild: Guild, match: Match) {
     );
   });
   const voiceId = await openVoice(guild, match, rows);
+  db.prepare('update match set voice_channel_id = ? where id = ?').run(voiceId, match.id);
+
+  // Group has no two sides to alternate between, and a pool no bigger than the
+  // round count has nothing to ban - either way, roll and play.
+  // A short pool can't fill BAN_POOL, and whose turn it is is derived from how
+  // much of BAN_POOL is gone - so anything less just plays a plain roll.
+  const pool = rollScenarios(guild.id, BAN_POOL);
+  if (match.format === 'group' || pool.length < BAN_POOL) {
+    return beginPlay(getMatch(match.id)!, rollScenarios(guild.id));
+  }
+  // created_at is reused as "when the current pre-game phase began": the lobby
+  // sweep only ever reads it for status 'lobby', and the ban sweep wants
+  // exactly this. Without the bump, a call that sat open an hour would have
+  // every ban auto-fired the instant it filled.
   db.prepare(
-    `update match set status = 'live', scenarios = ?, started_at = ?, voice_channel_id = ?
-     where id = ?`,
-  ).run(JSON.stringify(rollScenarios(guild.id)), Date.now(), voiceId, match.id);
+    "update match set status = 'banning', scenarios = ?, created_at = ? where id = ?",
+  ).run(JSON.stringify(pool), Date.now(), match.id);
+  return getMatch(match.id)!;
+}
+
+/** Locks the scenarios in and starts the clock. started_at is what the score
+ *  lookup measures from, so it is stamped here and nowhere earlier - a run
+ *  during the ban phase must not count. */
+function beginPlay(match: Match, scenarios: string[]) {
+  db.prepare("update match set status = 'live', scenarios = ?, started_at = ? where id = ?").run(
+    JSON.stringify(scenarios),
+    Date.now(),
+    match.id,
+  );
+  return getMatch(match.id)!;
+}
+
+/** Removes one scenario and, if that was the last ban, starts the match. */
+function applyBan(match: Match, index: number) {
+  const { pool } = banState(match);
+  if (index < 0 || index >= pool.length) return match;
+  pool.splice(index, 1);
+  if (pool.length <= ROUNDS) return beginPlay(match, pool);
+  db.prepare('update match set scenarios = ? where id = ?').run(JSON.stringify(pool), match.id);
   return getMatch(match.id)!;
 }
 
@@ -346,8 +425,26 @@ async function expireStaleCalls() {
   }
 }
 
+/** A side that walks away would hold the lobby forever, so the bot bans for
+ *  them. Random, not "first in the list" - a predictable auto-ban is a strategy. */
+async function expireStaleBans() {
+  const stalled = db
+    .prepare("select * from match where status = 'banning' and created_at < ?")
+    .all(Date.now() - BAN_TTL_MS) as unknown as Match[];
+  for (const match of stalled) {
+    const { pool } = banState(match);
+    const next = applyBan(match, Math.floor(Math.random() * pool.length));
+    // reset the clock so the next side gets its own full window
+    if (next.status === 'banning') {
+      db.prepare('update match set created_at = ? where id = ?').run(Date.now(), match.id);
+    }
+    await editMatchMessage(getMatch(match.id)!);
+  }
+}
+
 async function tick() {
   await expireStaleCalls();
+  await expireStaleBans();
   const live = db
     .prepare("select * from match where status = 'live'")
     .all() as unknown as Match[];
@@ -386,7 +483,9 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const sub = i.options.getSubcommand();
 
   if (sub === 'leaderboard') {
-    const rows = leaderboard();
+    // this server's ladder, not every server's - the rank names below come
+    // from this guild's ranks, so the rows must too.
+    const rows = leaderboard(i.guildId!);
     const ranks = getRanks(i.guildId!);
     await i.reply({
       embeds: [
@@ -398,7 +497,7 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
               ? rows
                   .map(
                     (p, n) =>
-                      `**${n + 1}.** <@${p.discord_id}> — **${p.elo}** ${rankName(ranks, p.elo)} · ${p.wins}W ${p.losses}L (${Math.round((p.wins / (p.wins + p.losses)) * 100)}%)`,
+                      `**${n + 1}.** <@${p.discord_id}> - **${p.elo}** ${rankName(ranks, p.elo)} · ${p.wins}W ${p.losses}L (${Math.round((p.wins / (p.wins + p.losses)) * 100)}%)`,
                   )
                   .join('\n')
               : '_no games played yet_',
@@ -436,12 +535,12 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
     }
     const target = i.options.getUser('player', true);
     const tier = i.options.getString('tier', true) as Tier;
-    const name = await kovaaksNameForDiscordId(target.id);
-    if (!name) {
-      await i.reply({ content: NO_LINK, flags: MessageFlags.Ephemeral });
+    const account = await kovaaksAccountForDiscordId(target.id);
+    if (account.kind !== 'found') {
+      await i.reply({ content: lookupError(account.kind), flags: MessageFlags.Ephemeral });
       return;
     }
-    ensurePlayer(target.id, name, tier);
+    ensurePlayer(target.id, account.username, account.steamId, tier);
     setTier(target.id, tier);
     await i.reply(`<@${target.id}> is now **${tier}** tier.`);
     return;
@@ -461,7 +560,7 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
 }
 
 async function onButton(i: import('discord.js').ButtonInteraction) {
-  const [, action, arg] = i.customId.split(':');
+  const [, action, arg, extra] = i.customId.split(':');
 
   if (action === 'open') return onOpen(i, arg as Format);
 
@@ -473,6 +572,26 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
   const rows = matchPlayers(match.id);
   const isOpener = i.user.id === match.host_id;
 
+  if (action === 'ban') {
+    if (match.status !== 'banning') {
+      await i.reply({ content: 'Banning is over for that one.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const mine = rows.find((r) => r.discord_id === i.user.id);
+    if (!mine) {
+      await i.reply({ content: "You're not in that match.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const { turn } = banState(match);
+    if (mine.team !== turn) {
+      await i.reply({ content: "Not your side's ban.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    await i.deferUpdate();
+    await editMatchMessage(applyBan(match, Number(extra)));
+    return;
+  }
+
   if (action === 'join') {
     if (match.status !== 'lobby') {
       await i.reply({ content: 'That one already started.', flags: MessageFlags.Ephemeral });
@@ -482,20 +601,24 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       await i.reply({ content: "You're already in it.", flags: MessageFlags.Ephemeral });
       return;
     }
-    const name = await kovaaksNameForDiscordId(i.user.id);
-    if (!name) {
-      await i.reply({ content: NO_LINK, flags: MessageFlags.Ephemeral });
+    const account = await kovaaksAccountForDiscordId(i.user.id);
+    if (account.kind !== 'found') {
+      await i.reply({ content: lookupError(account.kind), flags: MessageFlags.Ephemeral });
       return;
     }
-    const player = ensurePlayer(i.user.id, name);
-    // Tier gate against everyone already in, not just the opener - otherwise a
-    // novice and an elite meet in the middle through an intermediate.
+    const player = ensurePlayer(i.user.id, account.username, account.steamId);
+    // Rank gate against everyone already in, not just the opener - otherwise
+    // two people a band apart each meet in the middle through a third.
+    const ranks = getRanks(match.guild_id);
+    const spread = getRankSpread(match.guild_id)[match.format];
     const clash = rows
       .map((r) => getPlayer(r.discord_id)!)
-      .find((other) => !canPlay(player.tier, other.tier));
+      .find((other) => !canPlay(ranks, player.elo, other.elo, spread));
     if (clash) {
       await i.reply({
-        content: `You're ${player.tier}, this one's ${clash.tier} — too far apart.`,
+        content:
+          `This queue is ${spread === 0 ? 'one rank only' : `within ${spread} rank${spread > 1 ? 's' : ''}`}` +
+          `. You're ${rankName(ranks, player.elo)}, they're ${rankName(ranks, clash.elo)}.`,
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -560,12 +683,12 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
     await i.reply({ content: 'Unknown format.', flags: MessageFlags.Ephemeral });
     return;
   }
-  const name = await kovaaksNameForDiscordId(i.user.id);
-  if (!name) {
-    await i.reply({ content: NO_LINK, flags: MessageFlags.Ephemeral });
+  const account = await kovaaksAccountForDiscordId(i.user.id);
+  if (account.kind !== 'found') {
+    await i.reply({ content: lookupError(account.kind), flags: MessageFlags.Ephemeral });
     return;
   }
-  ensurePlayer(i.user.id, name);
+  ensurePlayer(i.user.id, account.username, account.steamId);
 
   const { lastInsertRowid } = db
     .prepare(

@@ -1,25 +1,32 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { ChannelType, PermissionFlagsBits, type Client, type Guild } from 'discord.js';
-import { TIERS, type Tier } from './config.js';
+import { FORMATS, TIERS, type Format, type Tier } from './config.js';
 import {
   getConfig,
   getMatch,
+  getRankSpread,
   getRanks,
   getScenarios,
+  guildStats,
+  leaderboard,
   listOpenMatches,
-  listPlayers,
+  playersInGuild,
   matchPlayers,
   getPlayer,
   setConfig,
   setRankRole,
+  setRankSpread,
+  setVoltaic,
   setRanks,
   setScenarios,
   setTier,
   type Match,
+  type Player,
   type Rank,
 } from './db.js';
 import { panelMessage } from './embeds.js';
+import { searchScenarios, voltaicS5 } from './kovaaks.js';
 import { PAGE } from './page.js';
 
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID ?? '';
@@ -30,7 +37,7 @@ const REDIRECT = `${BASE_URL}/callback`;
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
 interface Session {
-  user: { id: string; username: string; avatar: string | null };
+  user: { id: string; username: string; global_name: string | null; avatar: string | null };
   /** guild ids this user may configure - the ONLY thing the API trusts. */
   guildIds: Set<string>;
   guilds: { id: string; name: string; icon: string | null }[];
@@ -101,6 +108,40 @@ async function syncRankRolesToDiscord(guild: Guild, ranks: Rank[], orphaned: Ran
   }
 }
 
+const VOLTAIC_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Tops up Voltaic standings that have gone stale.
+ *  ponytail: bounded to a handful per request - a benchmark rank moves maybe
+ *  once a month, so a big server catches up over a few page loads instead of
+ *  making one of them wait on two hundred lookups. Raise the slice, or move it
+ *  onto the tick loop, if that ever feels slow. */
+async function refreshVoltaic(players: Player[]) {
+  const stale = players
+    .filter((p) => p.steam_id && Date.now() - (p.voltaic_at ?? 0) > VOLTAIC_TTL_MS)
+    .slice(0, 8);
+  // Bounded in wall time as well as count: eight lookups that each time out
+  // would hold the dashboard for sixteen seconds. Whatever misses the budget
+  // still lands in the database and shows up on the next load.
+  await Promise.race([
+    Promise.all(
+      stale.map(async (p) => {
+        const got = await voltaicS5(p.steam_id!);
+        setVoltaic(p.discord_id, got);
+        p.voltaic = got ? JSON.stringify(got) : null;
+      }),
+    ),
+    new Promise((done) => setTimeout(done, 2500).unref()),
+  ]);
+}
+
+function readVoltaic(raw: string | null) {
+  try {
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The bot owns match lifecycle; the dashboard only asks it to act. Passing the
  *  two hooks in beats importing index.ts back into here. */
 interface Hooks {
@@ -119,7 +160,9 @@ export function startWeb(client: Client, hooks: Hooks) {
     const path = url.pathname;
 
     try {
-      if (path === '/' && req.method === 'GET') {
+      // Every server gets its own url. Same page either way - the client reads
+      // the path and decides, so there's no routing to keep in sync.
+      if ((path === '/' || /^\/g\/\d{1,32}$/.test(path)) && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(PAGE);
         return;
@@ -184,9 +227,17 @@ export function startWeb(client: Client, hooks: Hooks) {
             (BigInt(g.permissions) & PermissionFlagsBits.ManageGuild) ===
               PermissionFlagsBits.ManageGuild,
         );
+        // opportunistic sweep: without it a long-running bot keeps every
+        // session it ever issued, since sessionOf only drops the one it is asked for.
+        for (const [key, value] of sessions) if (value.expires < Date.now()) sessions.delete(key);
         const sid = randomUUID();
         sessions.set(sid, {
-          user: { id: user.id, username: user.username, avatar: user.avatar },
+          user: {
+            id: user.id,
+            username: user.username,
+            global_name: user.global_name ?? null,
+            avatar: user.avatar,
+          },
           guildIds: new Set(manageable.map((g) => g.id)),
           guilds: manageable.map((g) => ({ id: g.id, name: g.name, icon: g.icon })),
           expires: Date.now() + SESSION_MS,
@@ -213,13 +264,26 @@ export function startWeb(client: Client, hooks: Hooks) {
         return;
       }
 
+      // KovaaK's scenario search, so the pool can only ever hold names the
+      // score lookup will actually find. Session-gated: it is our rate limit.
+      if (path === '/api/scenarios' && req.method === 'GET') {
+        const q = (url.searchParams.get('q') ?? '').trim().slice(0, 80);
+        json(res, 200, { scenarios: q.length < 2 ? [] : await searchScenarios(q) });
+        return;
+      }
+
       if (path === '/api/me') {
         json(res, 200, {
           user: session.user,
           guilds: session.guilds.map((g) => ({
             ...g,
             installed: client.guilds.cache.has(g.id),
-            invite: `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=285213200&guild_id=${g.id}`,
+            // off the gateway's GUILD_CREATE, so it costs nothing and needs no
+            // privileged intent. Null until the bot is in there to count.
+            members: client.guilds.cache.get(g.id)?.memberCount ?? null,
+            // guild is pinned and the picker disabled - the dashboard already
+            // asked which server, so Discord shouldn't ask again.
+            invite: `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=285213200&guild_id=${g.id}&disable_guild_select=true`,
           })),
         });
         return;
@@ -239,7 +303,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           json(res, 404, { error: 'no such match' });
           return;
         }
-        if (target.status !== 'lobby' && target.status !== 'live') {
+        if (target.status !== 'lobby' && target.status !== 'banning' && target.status !== 'live') {
           json(res, 409, { error: 'that match is already over' });
           return;
         }
@@ -273,6 +337,8 @@ export function startWeb(client: Client, hooks: Hooks) {
       }
 
       if (!action && req.method === 'GET') {
+        const players = playersInGuild(guildId);
+        await refreshVoltaic(players);
         json(res, 200, {
           config: getConfig(guildId),
           channels: guild.channels.cache
@@ -286,8 +352,16 @@ export function startWeb(client: Client, hooks: Hooks) {
             .map((r) => ({ id: r.id, name: r.name })),
           ranks: getRanks(guildId),
           scenarios: getScenarios(guildId),
-          players: listPlayers(),
+          players: players.map((p) => ({
+            ...p,
+            avatar: client.users.cache.get(p.discord_id)?.avatar ?? null,
+            voltaic: readVoltaic(p.voltaic),
+          })),
           tiers: TIERS,
+          formats: Object.keys(FORMATS),
+          spread: getRankSpread(guildId),
+          stats: guildStats(guildId),
+          top: leaderboard(guildId, 5),
           matches: listOpenMatches(guildId).map((m) => ({
             id: m.id,
             format: m.format,
@@ -296,7 +370,11 @@ export function startWeb(client: Client, hooks: Hooks) {
             created_at: m.created_at,
             scenarios: JSON.parse(m.scenarios),
             players: matchPlayers(m.id).map((r) => ({
+              id: r.discord_id,
               name: getPlayer(r.discord_id)?.kovaaks_username ?? r.discord_id,
+              // whatever the gateway already cached; the page falls back to
+              // Discord's default avatar rather than us fetching anyone.
+              avatar: client.users.cache.get(r.discord_id)?.avatar ?? null,
               done: !!r.done,
             })),
           })),
@@ -335,9 +413,28 @@ export function startWeb(client: Client, hooks: Hooks) {
           json(res, 400, { error: 'a ladder needs at least one rank' });
           return;
         }
+        // every rank becomes a Discord role, and a guild caps at 250 - without
+        // this, one request could ask the bot to hammer the role API forever.
+        if (clean.length > 50) {
+          json(res, 400, { error: 'a ladder tops out at 50 ranks' });
+          return;
+        }
         const { ranks, orphaned } = setRanks(guildId, clean);
         await syncRankRolesToDiscord(guild, ranks, orphaned);
         json(res, 200, { ranks: getRanks(guildId) });
+        return;
+      }
+
+      if (action === '/queues' && req.method === 'PUT') {
+        const body = await readJson(req);
+        const clean: Record<string, number> = {};
+        for (const format of Object.keys(FORMATS)) {
+          const n = Math.trunc(Number(body.spread?.[format]));
+          // out-of-range is dropped, not clamped, so getRankSpread falls back
+          // to the default rather than silently inventing a gate.
+          if (Number.isFinite(n) && n >= 0 && n <= 6) clean[format] = n;
+        }
+        json(res, 200, { spread: setRankSpread(guildId, clean) });
         return;
       }
 
@@ -356,18 +453,25 @@ export function startWeb(client: Client, hooks: Hooks) {
           json(res, 400, { error: 'the pool needs at least one scenario' });
           return;
         }
+        if (clean.length > 500) {
+          json(res, 400, { error: 'the pool tops out at 500 scenarios' });
+          return;
+        }
         json(res, 200, { scenarios: setScenarios(guildId, clean) });
         return;
       }
 
       if (action === '/tiers' && req.method === 'PUT') {
         const body = await readJson(req);
+        // setTier reseeds the rating of anyone who hasn't played, so an id from
+        // the request is not enough - it has to be someone this server has.
+        const mine = new Set(playersInGuild(guildId).map((p) => p.discord_id));
         for (const row of Array.isArray(body.tiers) ? body.tiers : []) {
           const id = String(row.discord_id ?? '');
           const tier = String(row.tier ?? '') as Tier;
-          if (/^\d{1,32}$/.test(id) && TIERS.includes(tier)) setTier(id, tier);
+          if (mine.has(id) && TIERS.includes(tier)) setTier(id, tier);
         }
-        json(res, 200, { players: listPlayers() });
+        json(res, 200, { players: playersInGuild(guildId) });
         return;
       }
 

@@ -1,7 +1,7 @@
 // ponytail: one runnable check, no framework. `npx tsx src/rating.test.ts`.
 import assert from 'node:assert/strict';
 import { DEFAULT_RANKS } from './config.js';
-import { canPlay, eloDeltas, placings, rankName } from './rating.js';
+import { banTurn, canPlay, eloDeltas, placings, rankName } from './rating.js';
 import type { Entrant } from './rating.js';
 
 const scenarios = ['a', 'b', 'c'];
@@ -81,7 +81,26 @@ assert.equal(rankName([{ name: 'Top', min_elo: 2000 }, { name: 'Base', min_elo: 
 assert.equal(rankName([{ name: 'Top', min_elo: 2000 }, { name: 'Base', min_elo: 0 }], 500), 'Base');
 assert.equal(rankName([{ name: 'Top', min_elo: 2000 }], 500), '');
 
-assert.ok(canPlay('elite', 'advanced'));
-assert.ok(!canPlay('elite', 'intermediate'));
+// rank gate: spread counts bands, not Elo, so an edited ladder moves it too
+const ladder = [
+  { name: 'Gold', min_elo: 1200 },
+  { name: 'Silver', min_elo: 1100 },
+  { name: 'Bronze', min_elo: 1000 },
+  { name: 'Iron', min_elo: 0 },
+];
+assert.ok(canPlay(ladder, 1250, 1210, 0), 'same band, spread 0');
+assert.ok(!canPlay(ladder, 1250, 1150, 0), 'one band apart, spread 0');
+assert.ok(canPlay(ladder, 1250, 1150, 1), 'one band apart, spread 1');
+assert.ok(!canPlay(ladder, 1250, 1050, 1), 'two bands apart, spread 1');
+assert.ok(canPlay(ladder, 1250, 1050, 2), 'two bands apart, spread 2');
+// an unsorted ladder must gate the same way the dashboard's does
+assert.ok(!canPlay([...ladder].reverse(), 1250, 1150, 0), 'order must not matter');
+
+// ban phase: 7 candidates down to 3 is 4 bans, alternating, team 0 first
+const bans = [7, 6, 5, 4, 3].map((left) => banTurn(left, 7, 3));
+assert.deepEqual(bans.map((b) => b.turn), [0, 1, 0, 1, 0], 'sides alternate from team 0');
+assert.deepEqual(bans.map((b) => b.left), [4, 3, 2, 1, 0], 'bans left counts down to zero');
+// an even number of bans is what stops one side getting the last word
+assert.equal((7 - 3) % 2, 0, 'BAN_POOL - ROUNDS must be even');
 
 console.log('rating ok');

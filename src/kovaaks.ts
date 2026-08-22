@@ -1,19 +1,33 @@
 const BASE = 'https://kovaaks.com/webapp-backend';
+/** Community benchmark index. Not KovaaK's, and not required - a server that
+ *  can't reach it just shows no Voltaic ranks. */
+const EVXL = 'https://api.evxl.app';
 
-async function get<T>(path: string): Promise<T | null> {
+/** "they have no link" and "we couldn't ask" must never collapse into one
+ *  answer: telling someone to go link an account that is already linked sends
+ *  them off to fix something that isn't broken. A 4xx is the service answering
+ *  "no"; anything else is us failing to reach it. */
+export type Fetched<T> = { ok: true; data: T } | { ok: false; reachable: boolean };
+
+async function get<T>(path: string, base = BASE): Promise<Fetched<T>> {
   // ponytail: one retry, no cache, no concurrency gate - a lobby is 8 players
   // times 3 scenarios, nowhere near KovaaK's 5000/hour ceiling.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await fetch(BASE + path, { signal: AbortSignal.timeout(8000) });
-      if (res.status >= 400 && res.status < 500) return null;
+      const res = await fetch(base + path, {
+        // identity encoding dodges an undici decompression-teardown crash, and
+        // an honest user-agent is the polite way to use someone's open api.
+        headers: { accept: 'application/json', 'accept-encoding': 'identity', 'user-agent': 'quorum/1.0' },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.status >= 400 && res.status < 500) return { ok: false, reachable: true };
       if (!res.ok) continue;
-      return (await res.json()) as T;
+      return { ok: true, data: (await res.json()) as T };
     } catch {
       /* timeout or network - fall through to the retry */
     }
   }
-  return null;
+  return { ok: false, reachable: false };
 }
 
 interface DiscordSearchEntry {
@@ -27,12 +41,81 @@ interface DiscordSearchEntry {
  * there is nothing for a player to type. No link on file = they can't be added
  * to a match.
  */
-export async function kovaaksNameForDiscordId(discordId: string): Promise<string | null> {
-  if (!/^\d{1,32}$/.test(discordId)) return null;
-  const rows = await get<DiscordSearchEntry[]>(
+export type Lookup =
+  | { kind: 'found'; username: string; steamId: string | null }
+  | { kind: 'not-linked' }
+  | { kind: 'unreachable' };
+
+export async function kovaaksAccountForDiscordId(discordId: string): Promise<Lookup> {
+  if (!/^\d{1,32}$/.test(discordId)) return { kind: 'not-linked' };
+  const res = await get<DiscordSearchEntry[]>(
     `/user/search/discord-id?discordId=${encodeURIComponent(discordId)}`,
   );
-  return rows?.find((r) => r.username)?.username ?? null;
+  if (!res.ok) return res.reachable ? { kind: 'not-linked' } : { kind: 'unreachable' };
+  const row = res.data.find((r) => r.username);
+  // an empty list IS the answer: KovaaK's has no link for that discord id.
+  return row
+    ? { kind: 'found', username: row.username!, steamId: row.steamId ?? null }
+    : { kind: 'not-linked' };
+}
+
+interface RankRow {
+  benchmarkName?: string;
+  difficultyName?: string;
+  rank?: number;
+  rankName?: string;
+}
+
+/** The index answers in mixed case, ALL CAPS included, and marks completion
+ *  with a " Complete" suffix rather than a field. */
+function tidyRank(name: string) {
+  return name
+    .replace(/\s+complete$/i, '')
+    .toLowerCase()
+    .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Voltaic S5 standing, by Steam id. Null covers both "no S5 entry" and "the
+ * index didn't answer" on purpose - neither is an error worth surfacing, and
+ * plenty of players have never run the benchmark.
+ */
+export async function voltaicS5(steamId: string) {
+  const res = await get<{ results?: RankRow[] }>(
+    `/profile-ranks?steamId=${encodeURIComponent(steamId)}&mode=kovaaks`,
+    EVXL,
+  );
+  if (!res.ok) return null;
+  // One row per benchmark, already the highest difficulty they reached.
+  const row = (res.data.results ?? []).find((r) => r.benchmarkName === 'Voltaic S5' && r.rankName);
+  if (!row || (row.rank ?? 0) <= 0) return null;
+  const rank = tidyRank(row.rankName!);
+  // unranked is not a rank - showing "S5 Unranked" is worse than showing nothing
+  if (rank === 'Unranked' || rank === 'No Rank') return null;
+  return { rank, difficulty: row.difficultyName ?? '', complete: / complete$/i.test(row.rankName!) };
+}
+
+interface PopularRow {
+  scenarioName?: string;
+  scenario?: { aimType?: string | null };
+  counts?: { plays?: number };
+}
+
+/**
+ * Scenario name search. The pool has to hold names KovaaK's recognises exactly
+ * or the score lookup silently finds nothing, so the dashboard offers real ones
+ * instead of asking anyone to type them.
+ */
+export async function searchScenarios(term: string) {
+  const params = new URLSearchParams({ page: '0', max: '12', scenarioNameSearch: term });
+  const res = await get<{ data?: PopularRow[] }>(`/scenario/popular?${params}`);
+  return (res.ok ? (res.data.data ?? []) : [])
+    .filter((r) => r.scenarioName)
+    .map((r) => ({
+      name: r.scenarioName!,
+      aimType: r.scenario?.aimType ?? '',
+      plays: r.counts?.plays ?? 0,
+    }));
 }
 
 interface RunRow {
@@ -60,11 +143,14 @@ export async function scoreInWindow(
     page: '0',
     max: '50',
   });
-  const rows = await get<RunRow[]>(`/user/scenario/last-scores/by-name?${params}`);
-  if (rows === null) return { ok: false };
+  const res = await get<RunRow[]>(`/user/scenario/last-scores/by-name?${params}`);
+  // A 4xx here is KovaaK's answering "no runs for that user and scenario",
+  // which is a real null score. Only an unreachable service must leave what is
+  // already recorded alone.
+  if (!res.ok) return res.reachable ? { ok: true, score: null } : { ok: false };
 
   let best: number | null = null;
-  for (const row of Array.isArray(rows) ? rows : []) {
+  for (const row of Array.isArray(res.data) ? res.data : []) {
     const epoch = Number(row.attributes?.epoch); // KovaaK's sends ms as a string
     if (row.score == null || !Number.isFinite(epoch)) continue;
     if (epoch < start || epoch > end) continue;

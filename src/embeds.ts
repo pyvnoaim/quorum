@@ -1,10 +1,34 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
-import { FORMATS, MATCH_TTL_MS, PANEL_FORMATS, type Format } from './config.js';
+import { BAN_TTL_MS, FORMATS, MATCH_TTL_MS, PANEL_FORMATS, type Format } from './config.js';
 import { getRanks, type Match, type MatchPlayer, type Player } from './db.js';
 import { rankName } from './rating.js';
 
 const BLURPLE = 0x5865f2;
 const GREEN = 0x57f287;
+
+/** The ban phase. The pool shrinks in place, so the embed only ever needs the
+ *  match row - there is nothing else to read. */
+export function banEmbed(
+  match: Match,
+  rows: MatchPlayer[],
+  players: Map<string, Player>,
+  turn: number,
+  left: number,
+) {
+  const pool: string[] = JSON.parse(match.scenarios);
+  const side = rows.filter((r) => r.team === turn).map((r) => `<@${r.discord_id}>`);
+  return new EmbedBuilder()
+    .setTitle(`${match.format} · banning`)
+    .setColor(BLURPLE)
+    .setDescription(
+      `${side.join(' and ')} ${side.length > 1 ? 'ban' : 'bans'} one. ` +
+        `${left} ban${left === 1 ? '' : 's'} to go.\n\n` +
+        pool.map((s) => `\`${s}\``).join('\n'),
+    )
+    .setFooter({
+      text: `nobody bans within ${Math.round(BAN_TTL_MS / 1000)}s and the bot bans at random`,
+    });
+}
 
 /** The open call: "someone is looking for a 1v1". Fills up, then starts itself. */
 export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
@@ -34,10 +58,10 @@ export function panelMessage() {
   return {
     embeds: [
       new EmbedBuilder()
-        .setTitle('Scrims')
+        .setTitle('Quorum')
         .setColor(BLURPLE)
         .setDescription(
-          "Pick a format and the bot posts your call in this channel. When someone takes it you'll be pulled into a voice channel and your scenarios go up.\n\nScores are read from KovaaK's — there's nothing to submit.",
+          "Pick a format and the bot posts your call in this channel. When someone takes it you'll be pulled into a voice channel and your scenarios go up.\n\nScores are read from KovaaK's - there's nothing to submit.",
         ),
     ],
     components: [
@@ -62,7 +86,7 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
     .setTitle(`${match.format} · ongoing`)
     .setColor(BLURPLE)
     .setDescription(
-      `Play these in any order — scores update on their own. Hit **Done** when you've finished; results post once everyone has, or <t:${deadline}:R> either way.${voice}\n\n${scenarios
+      `Play these in any order - scores update on their own. Hit **Done** when you've finished; results post once everyone has, or <t:${deadline}:R> either way.${voice}\n\n${scenarios
         .map((s, i) => `**${i + 1}.** ${s}`)
         .join('\n')}`,
     );
