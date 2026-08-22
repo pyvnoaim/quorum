@@ -4,7 +4,14 @@ import { getRanks, type Match, type MatchPlayer, type Player } from './db.js';
 import { rankName } from './rating.js';
 
 const BLURPLE = 0x5865f2;
+
+/** Every embed ends the same way. Where an embed already had a footer, the
+ *  credit joins it rather than replacing it - Discord gives an embed one
+ *  footer, so a second setFooter would silently drop the first. */
+const CREDIT = 'Powered by kova';
+const footer = (text?: string) => ({ text: text ? `${text} · ${CREDIT}` : CREDIT });
 const GREEN = 0x57f287;
+const GREY = 0x99aab5;
 
 /** The ban phase. The pool shrinks in place, so the embed only ever needs the
  *  match row - there is nothing else to read. */
@@ -25,9 +32,9 @@ export function banEmbed(
         `${left} ban${left === 1 ? '' : 's'} to go.\n\n` +
         pool.map((s) => `\`${s}\``).join('\n'),
     )
-    .setFooter({
-      text: `nobody bans within ${Math.round(BAN_TTL_MS / 1000)}s and the bot bans at random`,
-    });
+    .setFooter(
+      footer(`nobody bans within ${Math.round(BAN_TTL_MS / 1000)}s and the bot bans at random`),
+    );
 }
 
 /** The open call: "someone is looking for a 1v1". Fills up, then starts itself. */
@@ -47,9 +54,7 @@ export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string
         })
         .join('\n'),
     )
-    .setFooter({
-      text: `${rows.length}/${max} · ${opener?.tier ?? ''} tier · starts the moment it fills`,
-    });
+    .setFooter(footer(`${rows.length}/${max} · starts the moment it fills`));
 }
 
 /** The panel is one static message that never changes - its buttons carry the
@@ -62,7 +67,8 @@ export function panelMessage(formats: readonly Format[] = PANEL_FORMATS) {
         .setColor(BLURPLE)
         .setDescription(
           "Pick a format and the bot posts your call in this channel. When someone takes it you both get a private thread to play in, and your scenarios go up there.\n\nScores are read from KovaaK's - there's nothing to submit.",
-        ),
+        )
+        .setFooter(footer()),
     ],
     components: [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -104,7 +110,20 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
       inline: true,
     });
   }
-  return embed;
+  return embed.setFooter(footer());
+}
+
+/** Nobody posted a score. Said plainly, because the alternative - a results
+ *  embed full of dashes - reads as a game that was played and lost. */
+export function noContestEmbed(match: Match, rows: MatchPlayer[]) {
+  return new EmbedBuilder()
+    .setTitle(`${match.format} · no result`)
+    .setColor(GREY)
+    .setDescription(
+      `${rows.map((r) => `<@${r.discord_id}>`).join(' and ')} - nobody ran a scenario, ` +
+        "so nothing was rated. No Elo moved and the match is not on anyone's record.",
+    )
+    .setFooter(footer());
 }
 
 export function resultsEmbed(
@@ -134,5 +153,6 @@ export function resultsEmbed(
             .join(' · ')}\``,
         };
       }),
-    );
+    )
+    .setFooter(footer());
 }

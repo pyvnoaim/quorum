@@ -20,7 +20,7 @@ const {
   setRankRole,
   setRanks,
   setScenarios,
-  setTier,
+  seedPlayer,
   db,
 } = await import('./db.js');
 const { rankFor } = await import('./rating.js');
@@ -67,18 +67,26 @@ assert.equal(pool.length, 1);
 assert.equal(pool[0].category, 'Clicking');
 assert.equal(pool[0].name, '1w4ts');
 
-// Tier sets the starting rating - but only for someone who hasn't played, or a
-// promotion would wipe a real record.
+// Seeding sets the starting rating - but only for someone who hasn't played,
+// or it would wipe a real record.
 ensurePlayer('u1', 'fresh');
-setTier('u1', 'elite');
+assert.equal(getPlayer('u1')!.elo, 1050, 'a new player starts flat');
+assert.equal(seedPlayer('u1', 1275, 'Diamond'), true);
 assert.equal(getPlayer('u1')!.elo, 1275);
+assert.equal(getPlayer('u1')!.seeded_from, 'Diamond');
 db.prepare('update player set wins = 3, elo = 1400 where discord_id = ?').run('u1');
-setTier('u1', 'novice');
-assert.equal(getPlayer('u1')!.elo, 1400, 'a played record survives a tier change');
-assert.equal(getPlayer('u1')!.tier, 'novice');
+assert.equal(seedPlayer('u1', 950, 'Silver'), false, 'a played record refuses a re-seed');
+assert.equal(getPlayer('u1')!.elo, 1400, 'and keeps its rating');
+
+// A seed at creation is honoured, and never moved by a later sighting.
+ensurePlayer('u2', 'seeded', null, { elo: 1190, from: 'Voltaic Master' });
+assert.equal(getPlayer('u2')!.elo, 1190);
+ensurePlayer('u2', 'seeded-renamed', null, { elo: 850, from: 'flat' });
+assert.equal(getPlayer('u2')!.elo, 1190, 'ensurePlayer never re-seeds someone it has seen');
+assert.equal(getPlayer('u2')!.kovaaks_username, 'seeded-renamed', 'but it does track a rename');
 
 // Ratings are global, the player LIST is not. Without the guild filter an
-// admin of one server could read - and through setTier rewrite - the record of
+// admin of one server could read - and through seedPlayer rewrite - the record of
 // players who have never been in it.
 ensurePlayer('inA', 'playerA');
 ensurePlayer('inB', 'playerB');
@@ -107,32 +115,31 @@ assert.equal(guildStats('gA').rated, 1, 'and so is the rated count');
 // Channels follow the ladder exactly as roles do: a surviving rank keeps its
 // channels across a rewrite, a removed one hands them back to be deleted.
 const [keepId, dropId] = getRanks('gc').slice(0, 2).map((r) => r.id);
-setRankChannels(keepId, { category: 'cat-keep', results: 'res-keep' });
-setRankChannels(dropId, { category: 'cat-drop', results: 'res-drop' });
+setRankChannels(keepId, { queue: 'ch-keep' });
+setRankChannels(dropId, { queue: 'ch-drop' });
 const rewritten = setRanks('gc', [
   { id: keepId, name: 'Renamed', min_elo: 1400, color: '#ffffff' },
   { name: 'Brand New', min_elo: 0, color: '#000000' },
 ]);
 const kept = rewritten.ranks.find((r) => r.name === 'Renamed')!;
-assert.equal(rankChannels(kept).category, 'cat-keep', 'a renamed rank keeps its channels');
+assert.equal(rankChannels(kept).queue, 'ch-keep', 'a renamed rank keeps its channel');
 assert.deepEqual(
   rankChannels(rewritten.ranks.find((r) => r.name === 'Brand New')!),
   {},
   'a new rank starts with none',
 );
 assert.ok(
-  rewritten.orphaned.some((r) => rankChannels(r).category === 'cat-drop'),
+  rewritten.orphaned.some((r) => rankChannels(r).queue === 'ch-drop'),
   'a deleted rank hands its channels back for cleanup',
 );
 
-// Split mode forces the gate to zero however the spread was saved - the channel
-// name is the promise, so nothing may quietly widen it.
+// The saved spread is the only thing that decides the gate: a rank channel is
+// made visible to exactly the roles it admits, so the two cannot disagree.
 setRankSpread('gc', { '1v1': 2, '2v2': 2, group: 2 });
-assert.equal(getRankSpread('gc')['2v2'], 2, 'stored spread applies while sharing one channel');
-setConfig('gc', { split_channels: 1 });
-assert.deepEqual(getRankSpread('gc'), { '1v1': 0, '2v2': 0, group: 0 }, 'split forces same-rank');
-setConfig('gc', { split_channels: 0 });
-assert.equal(getRankSpread('gc')['2v2'], 2, 'and the saved spread survives being turned off');
+assert.deepEqual(getRankSpread('gc'), { '1v1': 2, '2v2': 2, group: 2 }, 'stored spread applies');
+setRankSpread('gc', { '1v1': 0, '2v2': 1, group: 1 });
+assert.equal(getRankSpread('gc')['1v1'], 0, 'and a per-format spread is kept per format');
+assert.equal(getRankSpread('gc')['2v2'], 1);
 
 // The claim behind startMatch and finishMatch. Force-finish, the last Done and
 // the clock can all reach the same match, each holding a row that went stale

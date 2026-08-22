@@ -1,7 +1,7 @@
 // ponytail: one runnable check, no framework. `npx tsx src/rating.test.ts`.
 import assert from 'node:assert/strict';
 import { DEFAULT_RANKS } from './config.js';
-import { bandsInReach, banTurn, canPlay, divisionFor, eloDeltas, placings, rankName } from './rating.js';
+import { bandsInReach, banTurn, canPlay, eloDeltas, placings, rankName } from './rating.js';
 import type { Entrant } from './rating.js';
 
 const scenarios = ['a', 'b', 'c'];
@@ -21,6 +21,19 @@ const p = (id: string, elo: number, team: number, s: (number | null)[]): Entrant
   const d = eloDeltas(e, placing);
   assert.equal(d.get('win'), 16); // even ratings, K/2
   assert.equal(d.get('lose'), -16);
+}
+
+// Nobody ran anything: every side ties at 0 and a tie shares the better
+// placing, so scoring this hands EVERYONE first place - and a win each. That
+// is why finishMatch voids a match with no scores instead of rating it.
+{
+  const e = [p('a', 1000, 0, [null, null, null]), p('b', 1000, 1, [null, null, null])];
+  const placing = placings(e, scenarios);
+  assert.equal(placing.get(0), 1);
+  assert.equal(placing.get(1), 1, 'an unplayed match ties at first - it must never be scored');
+  const d = eloDeltas(e, placing);
+  assert.equal(d.get('a'), 0);
+  assert.equal(d.get('b'), 0);
 }
 
 // Beating someone above you pays more than beating a peer, and losing to them
@@ -95,30 +108,6 @@ assert.ok(!canPlay(ladder, 1250, 1050, 1), 'two bands apart, spread 1');
 assert.ok(canPlay(ladder, 1250, 1050, 2), 'two bands apart, spread 2');
 // an unsorted ladder must gate the same way the dashboard's does
 assert.ok(!canPlay([...ladder].reverse(), 1250, 1150, 0), 'order must not matter');
-
-// Manual divisions: the role decides, not the rating.
-const roled = [
-  { name: 'Elite', min_elo: 1200, discord_role_id: 'r-elite' },
-  { name: 'Advanced', min_elo: 1100, discord_role_id: 'r-adv' },
-  { name: 'Novice', min_elo: 0, discord_role_id: 'r-nov' },
-];
-assert.equal(divisionFor(roled, ['r-adv'])?.name, 'Advanced', 'the role held is the division');
-assert.equal(divisionFor(roled, [])?.name, undefined, 'no role means no division');
-assert.equal(divisionFor(roled, ['other'])?.name, undefined, 'unrelated roles do not count');
-// a promotion must work the moment the new role lands, before staff strip the old
-assert.equal(
-  divisionFor(roled, ['r-nov', 'r-elite'])?.name,
-  'Elite',
-  'holding two divisions resolves to the highest',
-);
-// order in, order out: the ladder arrives however the dashboard sent it
-assert.equal(divisionFor([...roled].reverse(), ['r-nov', 'r-adv'])?.name, 'Advanced');
-// a rank whose role was never created cannot be a division
-assert.equal(
-  divisionFor([{ name: 'Ghost', min_elo: 9999, discord_role_id: null }, ...roled], ['r-elite'])?.name,
-  'Elite',
-  'a rank with no role is skipped',
-);
 
 // Pinged bands and admitted bands must be the same set. If they drift, a call
 // either pings people it will turn away or hides itself from people it wants.

@@ -89,8 +89,14 @@ const guild: any = {
       return c;
     },
   },
+  // the bot's own member, named in every locked channel's overwrite so it does
+  // not hide the channel from itself.
+  members: { me: { id: '999000000000000001' } },
   roles: {
     cache: roles,
+    // discord.js always has this; the sync reads it to build permission
+    // overwrites, so the fake guild needs it too.
+    everyone: roles.get(GUILD_ID),
     create: async ({ name, color }: any) => {
       const r = role(String(++nextId), name, color);
       roles.set(r.id, r);
@@ -109,8 +115,8 @@ const client: any = {
 };
 
 // something to look at: two players and one live match.
-ensurePlayer('900000000000000001', 'devadmin', '76561199174645837', 'advanced');
-ensurePlayer('900000000000000002', 'challenger', null, 'novice');
+ensurePlayer('900000000000000001', 'devadmin', '76561199174645837', { elo: 1150, from: 'Platinum' });
+ensurePlayer('900000000000000002', 'challenger', null, { elo: 950, from: 'flat' });
 if (!db.prepare('select 1 from match').get()) {
   db.prepare(
     `insert into match (guild_id, channel_id, host_id, format, status, scenarios, created_at, started_at)
@@ -120,12 +126,47 @@ if (!db.prepare('select 1 from match').get()) {
   for (const p of ['900000000000000001', '900000000000000002'])
     db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(id, p);
 
-  // finished history, so the overview has stats and a ladder to draw.
+  // finished history, so the overview has stats and a ladder to draw - and so
+  // the history table has rows with players, placings and deltas in them.
   for (let n = 0; n < 7; n++) {
+    // a full ban pool and the three that survived it, so history has something
+    // to expand onto.
+    const pool = ['poleTS', 'CircleTS', 'darkSwitch', 'domiSwitch Harder',
+      'FloatTS Angelic', 'popcorn v2', 'Ground Plaza'];
+    const play = pool.slice(0, 3);
     db.prepare(
-      `insert into match (guild_id, channel_id, host_id, format, status, created_at, ended_at)
-       values (?, '201', '900000000000000001', '1v1', 'done', 0, ?)`,
-    ).run(GUILD_ID, Date.now() - n * 36 * 60 * 60 * 1000);
+      `insert into match (guild_id, channel_id, host_id, format, status, scenarios, ban_pool, created_at, ended_at)
+       values (?, '201', '900000000000000001', '1v1', 'done', ?, ?, 0, ?)`,
+    ).run(
+      GUILD_ID,
+      JSON.stringify(play),
+      JSON.stringify(pool),
+      Date.now() - n * 36 * 60 * 60 * 1000,
+    );
+    const doneId = (db.prepare('select max(id) as id from match').get() as any).id;
+    // devadmin took five of the seven, which is the 5W-2L the ladder shows.
+    const adminWon = n < 5;
+    for (const [discordId, won, elo] of [
+      ['900000000000000001', adminWon, 1312],
+      ['900000000000000002', !adminWon, 1188],
+    ] as const) {
+      const delta = won ? 16 : -16;
+      const scores = Object.fromEntries(
+        play.map((sc, i) => [sc, Math.round((won ? 900 : 820) + i * 37 + n * 5)]),
+      );
+      db.prepare(
+        `insert into match_player (match_id, discord_id, team, done, scores, placing, elo_before, elo_after)
+         values (?, ?, ?, 1, ?, ?, ?, ?)`,
+      ).run(
+        doneId,
+        discordId,
+        discordId.endsWith('1') ? 0 : 1,
+        JSON.stringify(scores),
+        won ? 1 : 2,
+        elo - delta,
+        elo,
+      );
+    }
   }
   db.prepare(
     `insert into match (guild_id, channel_id, host_id, format, status, scenarios, created_at)

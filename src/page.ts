@@ -25,28 +25,66 @@ export const PAGE = /* html */ `<!doctype html>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
     --bg: #0a0a0a; --fg: #ededed; --muted: #8a8a8a; --line: #262626; --panel: #111;
+    --bad: #f0666b;
   }
   @media (prefers-color-scheme: light) {
-    :root { --bg: #fafafa; --fg: #111; --muted: #6b6b6b; --line: #e2e2e2; --panel: #fff; }
+    :root { --bg: #fafafa; --fg: #111; --muted: #6b6b6b; --line: #e2e2e2; --panel: #fff; --bad: #c0392b; }
   }
   body {
     background: var(--bg); color: var(--fg); font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased; min-height: 100vh;
+    /* A flex container also stops main's margins collapsing out through body,
+       which is what made a 100vh page 100vh+26 and scroll with nothing to
+       scroll to. safe-centring keeps a pane taller than the viewport reachable -
+       plain centring would push its top off the top edge. */
+    display: flex; flex-direction: column; align-items: center; justify-content: safe center;
   }
-  main { max-width: 720px; margin: 0 auto; padding: 64px 24px 96px; position: relative; }
+  main { width: 100%; max-width: 720px; padding: 64px 24px 96px; position: relative; }
+  /* Glass over the dither: the texture stays sharp around the page and goes
+     soft under it, which is what makes text on a moving background readable
+     without covering the background up. Not on the sign-in page - there the
+     card is the content and a full-height slab behind it has nothing to hold.
+     ponytail: a backdrop blur over an animated canvas re-blurs every frame.
+     It is one fixed rect at dpr 1, so it is cheap - but it is the first thing
+     to drop if the page ever feels heavy on a weak GPU. */
+  main:not(:has(.login)) {
+    margin: 26px 0; border: 1px solid var(--line); border-radius: 18px;
+    background: color-mix(in srgb, var(--bg) 55%, transparent);
+    backdrop-filter: blur(20px) saturate(115%);
+    -webkit-backdrop-filter: blur(20px) saturate(115%);
+    padding: 40px 32px 64px;
+  }
+  @media (max-width: 760px) {
+    main:not(:has(.login)) { margin: 0; border: 0; border-radius: 0; padding: 32px 20px 64px; }
+  }
   #bg { position: fixed; inset: 0; width: 100%; height: 100%; display: none; }
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 48px; }
   h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.025em; }
   h1 a, h1 > span { display: flex; align-items: center; gap: 9px; }
   .mark { width: 17px; height: 17px; }
   .login .mark { width: 42px; height: 42px; margin: 0 auto 20px; }
-  h2 { font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 12px; letter-spacing: 0.02em; text-transform: lowercase; }
+  h2 { font-size: 14px; font-weight: 600; color: var(--fg); margin-bottom: 12px; letter-spacing: -0.01em; }
   /* stacked sections need air between them; the first one already sits under the header. */
   #lists h2:not(:first-child) { margin-top: 36px; }
   /* here it reads as a line under its heading, not as a standalone panel. */
   #lists .empty { padding: 0; }
   /* a server's own page is two columns and wants more room than the home list. */
   main:has(.dash) { max-width: 1040px; }
+  /* One size, whatever the pane. Overview is short and History is 25 rows, so
+     a container sized to its contents resizes under you on every tab change.
+     The pane scrolls inside a fixed frame instead. */
+  main:has(.dash) { height: min(900px, calc(100dvh - 52px)); display: flex; flex-direction: column; }
+  main:has(.dash) .dash { flex: 1; min-height: 0; align-items: stretch; }
+  /* The frame no longer scrolls, so there is nothing for the sidebar to stick
+     to - and its rows have to be told to keep their own height, or a grid
+     stretched down a 900px frame shares all that space out between them. */
+  main:has(.dash) #side { position: static; align-content: start; }
+  #pane {
+    min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    /* the gutter is reserved whether or not this pane needs a scrollbar, so
+       the bar never lands on the content and switching panes never shifts it */
+    scrollbar-gutter: stable; padding-right: 14px;
+  }
   .dash { display: grid; grid-template-columns: 190px 1fr; gap: 48px; align-items: start; }
   #side { position: sticky; top: 32px; display: grid; gap: 2px; }
   #side .server { cursor: default; margin-bottom: 14px; padding: 10px 12px; }
@@ -60,7 +98,13 @@ export const PAGE = /* html */ `<!doctype html>
   #side .back { margin-top: 14px; font-size: 13px; }
   #pane > section > :first-child { margin-top: 0; }
   @media (max-width: 760px) {
+    /* full-bleed on a phone: a fixed frame with its own scrollbar inside the
+       page's scrollbar is two scrollbars for one column of content. */
+    main:has(.dash) { height: auto; }
+    #pane { overflow: visible; }
     .dash { grid-template-columns: 1fr; gap: 28px; }
+    /* narrow enough that five across squeezes the labels - let them wrap here. */
+    .stats { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
     #side { position: static; grid-auto-flow: column; justify-content: start; overflow-x: auto; }
     #side .server, #side .back { display: none; }
   }
@@ -70,7 +114,8 @@ export const PAGE = /* html */ `<!doctype html>
   .who .name { display: grid; line-height: 1.35; margin-right: 4px; }
   .who .name strong { color: var(--fg); font-weight: 500; font-size: 13px; }
   .who .name span { font-size: 12px; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 10px; }
+  /* one row, always - five cards that wrap read as two ragged groups, not an overview. */
+  .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
   .stat {
     border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
     padding: 14px 15px; text-align: left; width: 100%; color: inherit;
@@ -86,9 +131,26 @@ export const PAGE = /* html */ `<!doctype html>
     display: flex; align-items: center; gap: 7px; font-size: 12px;
     color: var(--muted); margin-top: 5px; white-space: nowrap;
   }
-  .check { display: grid; gap: 7px; font-size: 14px; }
-  .check > div { display: flex; align-items: center; gap: 9px; color: var(--muted); }
-  .check > div.ok { color: var(--fg); }
+  /* how far off being able to run a match this server is, in one glance. */
+  .progress { height: 3px; border-radius: 999px; background: var(--line); margin: -4px 0 14px; }
+  .progress i { display: block; height: 100%; border-radius: 999px; background: var(--fg); transition: width .3s; }
+  .check {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    overflow: hidden; font-size: 14px;
+  }
+  .check > * {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 11px 14px; font: inherit; text-align: left;
+    color: var(--fg); background: none; border: 0;
+  }
+  .check > * + * { border-top: 1px solid var(--line); }
+  /* done recedes and outstanding leads: the jobs left are the only reason to
+     read this block, so they must not be the quiet half of it. */
+  .check > .ok { color: var(--muted); }
+  .check .todo { cursor: pointer; transition: background .15s; }
+  .check .todo:hover { background: var(--bg); }
+  .check .go { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .check .todo:hover .go { color: var(--fg); }
   .check svg { width: 14px; }
   .link {
     background: none; border: none; padding: 0; color: inherit; cursor: pointer; font-size: inherit;
@@ -112,6 +174,9 @@ export const PAGE = /* html */ `<!doctype html>
     display: inline-block; transition: border-color .15s, background .15s;
   }
   .btn:hover { border-color: var(--fg); }
+  .btn:has(svg) { display: inline-flex; align-items: center; gap: 8px; }
+  /* the mark is wider than it is tall, so it cannot take the square svg size */
+  .btn svg[viewBox^="0 0 127"] { width: 18px; height: auto; }
   .btn:disabled { opacity: .4; cursor: default; border-color: var(--line); }
   .btn.solid { background: var(--fg); color: var(--bg); border-color: var(--fg); }
   .servers { display: grid; gap: 8px; }
@@ -138,9 +203,14 @@ export const PAGE = /* html */ `<!doctype html>
   .volt img { width: 18px; height: 18px; object-fit: contain; }
   .volt .done { color: var(--muted); }
   h1 a { text-decoration: none; }
-  /* the overview stacks headed blocks, same as the home list does. */
-  #overview h2:not(:first-child) { margin-top: 32px; }
+  /* Panes stack headed blocks, same as the home list does - a second heading
+     needs air above it wherever it appears, Matches included. */
+  #pane h2:not(:first-child) { margin-top: 32px; }
   .field { margin-bottom: 22px; }
+  /* A field's own bottom margin stacks on the action bar's top margin, which
+     made Setup's Save sit 54px down while every other pane's sat at 32. The
+     bar owns that gap. */
+  .field:has(+ .bar) { margin-bottom: 0; }
   label { display: block; font-size: 13px; margin-bottom: 6px; }
   label .hint { color: var(--muted); }
   input[type=text], input[type=number] {
@@ -200,7 +270,60 @@ export const PAGE = /* html */ `<!doctype html>
   .match-act { display: flex; gap: 8px; margin-top: 15px; }
   /* the scenario pool, one block per category */
   .cat { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px 15px; }
-  .cat + .cat { margin-top: 10px; }
+  .cat + .cat, #queuebox { margin-top: 10px; }
+  /* the one corner of the dashboard that destroys things, and it should look
+     like it long before anyone reaches the button. */
+  /* the whole card carries the warning, not just the button */
+  .cat.danger {
+    border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
+    background: color-mix(in srgb, var(--bad) 12%, var(--panel));
+  }
+  .cat.danger .cat-top strong { color: var(--bad); }
+  .cat.danger .bar { margin-top: 16px; flex-wrap: wrap; }
+  .cat.danger .bar .opt { margin-right: auto; }
+  /* a radio list where every option carries its own description */
+  .opts { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
+  .opts button {
+    display: flex; align-items: baseline; gap: 11px; width: 100%; padding: 11px 14px;
+    background: none; border: 0; color: var(--muted); font: inherit; text-align: left; cursor: pointer;
+  }
+  .opts button + button { border-top: 1px solid var(--line); }
+  .opts button:hover { background: var(--panel); }
+  .opts .mark {
+    width: 13px; height: 13px; flex: none; position: relative; top: 2px;
+    border: 1px solid var(--line); border-radius: 999px;
+  }
+  .opts [aria-checked="true"] .mark {
+    border-color: var(--fg);
+    background: radial-gradient(circle, var(--fg) 0 42%, transparent 46%);
+  }
+  .opts .oname { font-size: 14px; min-width: 88px; }
+  .opts [aria-checked="true"] .oname { color: var(--fg); }
+  .opts .odesc { font-size: 13px; }
+  .btn.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
+  .btn.bad:hover { border-color: var(--bad); }
+  .btn.bad.solid { background: var(--bad); border-color: var(--bad); color: #fff; }
+  .btn.bad.solid:disabled { opacity: .35; }
+  /* the native checkbox is the last unstyled control here; accent-color is
+     enough to stop it arriving as a stock blue in a red card. */
+  .opt { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--muted); }
+  .opt input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--fg); cursor: pointer; }
+  /* boxed so it sits level with the select fields above it rather than reading
+     as a loose checkbox someone left under them. */
+  .opt.boxed {
+    border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+    padding: 8px 11px; font-size: 14px; color: var(--fg); gap: 0;
+  }
+  .opt-hit { display: flex; align-items: center; gap: 9px; margin: 0; cursor: pointer; font-size: 14px; }
+  .opt input[type=number] { width: 62px; margin: 0 9px; padding: 4px 8px; text-align: center; }
+  .opt .unit { color: var(--muted); font-size: 13px; }
+  /* Off replaces the sentence rather than trailing it: "Bin an untaken call
+     after" says nothing once there is no number to follow it. */
+  .off-note { display: none; }
+  .opt.boxed:has(#autocancel:not(:checked)) .off-note { display: inline; color: var(--muted); }
+  .opt.boxed:has(#autocancel:not(:checked)) .on-note,
+  .opt.boxed:has(#autocancel:not(:checked)) .unit,
+  .opt.boxed:has(#autocancel:not(:checked)) input[type=number] { display: none; }
   .cat-top { display: flex; align-items: center; gap: 9px; font-size: 14px; margin-bottom: 11px; }
   .cat-top .icon-btn { margin-left: auto; }
   .chip .icon-btn { padding: 0 0 0 3px; }
@@ -225,7 +348,53 @@ export const PAGE = /* html */ `<!doctype html>
   .seg button + button { border-left: 1px solid var(--line); }
   .seg button:hover { color: var(--fg); }
   .seg button[aria-checked="true"] { color: var(--bg); background: var(--fg); }
-  .reach { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 11px; font-size: 13px; color: var(--muted); }
+  .reach { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  /* a panel whose children are rows, divided rather than boxed */
+  .cat.rows { padding: 0; }
+  .qrow {
+    display: grid; grid-template-columns: 68px 210px 1fr; align-items: center; gap: 14px;
+    padding: 12px 15px;
+  }
+  .qrow + .qrow { border-top: 1px solid var(--line); }
+  .qrow > strong { font-size: 14px; }
+  @media (max-width: 620px) {
+    .qrow { grid-template-columns: 1fr; gap: 8px; }
+  }
+  /* Seven ranks means seven of every control here, so they are sized for a
+     list rather than for a form with three fields in it. */
+  #ranklist td { padding: 3px 8px 3px 0; }
+  #ranks table { margin-top: 20px; }
+  #ranklist input { padding: 6px 10px; }
+  #ranklist input[type=number] { width: 88px; }
+  #ranklist .col-btn { width: 28px; height: 28px; }
+  .th td { font-size: 12px; color: var(--muted); padding-bottom: 6px; }
+  /* history: one match per line, so the row has to stay a line - names run
+     inline and the placing is carried by order and weight, not by a column. */
+  .hist td { padding: 9px 12px 9px 0; font-size: 13px; }
+  .hist tr + tr { border-top: 1px solid var(--line); }
+  .hp { color: var(--muted); white-space: nowrap; }
+  .hp + .hp::before { content: '·'; margin: 0 7px; color: var(--line); }
+  .hp.won { color: var(--fg); font-weight: 500; }
+  .hp em { font-style: normal; margin-left: 5px; font-size: 12px; color: var(--muted); }
+  .hrow { cursor: pointer; outline: none; }
+  .hrow:hover td, .hrow:focus-visible td { color: var(--fg); }
+  .hrow td:last-child { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+  .hrow svg { width: 13px; transition: transform .15s; }
+  .hrow[aria-expanded="true"] svg { transform: rotate(180deg); }
+  /* the detail row is always in the table and always empty-until-open, so
+     nothing has to be built or fetched when it is clicked. */
+  .hx > td { padding: 0; border: 0; }
+  .hx:not(.open) { display: none; }
+  .hx.open > td { padding: 4px 0 16px; }
+  /* not the full-width table the pane's other tables are: this one is a small
+     block of numbers and should sit against the left edge, not be stretched
+     across the pane with the name column soaking up every spare pixel. */
+  .hgrid { width: auto; }
+  .hgrid td { padding: 4px 0 4px 22px; font-size: 12px; white-space: nowrap; text-align: right; }
+  .hgrid td:first-child { padding-left: 0; text-align: left; color: var(--muted); }
+  .hgrid .won { color: var(--fg); font-weight: 500; }
+  .banned { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+  .chip.out { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
   .sel { position: relative; }
   .sel-btn {
     width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -258,9 +427,12 @@ export const PAGE = /* html */ `<!doctype html>
   dialog::backdrop { background: rgb(0 0 0 / .6); }
   dialog .bar { margin-top: 20px; justify-content: flex-end; }
   dialog label { color: var(--muted); }
+  dialog .dlg-title { display: block; font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+  dialog .dlg-body { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  dialog label b { color: var(--fg); font-weight: 500; }
   .row { display: flex; gap: 8px; }
   .row > :first-child { flex: 1; }
-  .bar { display: flex; align-items: center; gap: 12px; margin-top: 32px; }
+  .bar { display: flex; align-items: center; gap: 12px; margin-top: 24px; }
   .status { font-size: 13px; color: var(--muted); }
   .empty { color: var(--muted); font-size: 14px; padding: 32px 0; }
   hr { border: none; border-top: 1px solid var(--line); margin: 36px 0; }
@@ -388,82 +560,114 @@ void main() {
   fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
 </script>
-<script id="fs2" type="x-shader/x-fragment">
+<script id="fs3" type="x-shader/x-fragment">
 #version 300 es
 precision highp float;
 
-// SideRays. Knobs are the component's props; INTENSITY and OPACITY are well
-// under its defaults because this sits behind a dashboard you have to read.
-#define SPEED       1.6
-#define INTENSITY   1.35
-// a wider fan and a slower falloff are what make the shafts read as long
-// throws of light rather than a glow stuck in the corner
-#define SPREAD      3.4
-#define FLIP_X      0.0
-#define FLIP_Y      0.0
-#define TILT        0.0
-// real sunlight is close to white with the colour only in the falloff, so the
-// saturation stays low and the two layers stay near each other in hue
-#define SATURATION  0.55
-#define BLEND       0.6
-#define FALLOFF     0.95
-#define OPACITY     0.42
+// Dither (React Bits), as one pass. The original is a wave shader plus a
+// postprocessing pass that reads the wave's buffer back and pixelates it. With
+// nothing else on screen that read-back is just the wave evaluated at the
+// pixelated coordinate - so the EffectComposer, and with it three, r3f and
+// postprocessing, collapses into the two lines at the bottom of main().
+#define SPEED       0.05
+#define FREQUENCY   3.0
+#define AMPLITUDE   0.3
+#define COLOR_NUM   4.0
+#define PIXEL_SIZE  2.0
+#define OCTAVES     4
 
 uniform vec2 iResolution;
 uniform float iTime;
 uniform vec3 uHorizon;
-uniform vec3 uRay1;
-uniform vec3 uRay2;
+uniform vec3 uWave;
 out vec4 fragColor;
 
-float rayStrength(vec2 src, vec2 dir, vec2 coord, float seedA, float seedB, float speed) {
-  vec2 toCoord = coord - src;
-  float cosAngle = dot(normalize(toCoord), dir);
-  return clamp(
-    (0.45 + 0.15 * sin(cosAngle * seedA + iTime * speed)) +
-    (0.3 + 0.2 * cos(-cosAngle * seedB + iTime * speed)),
-    0.0, 1.0) *
-    // the original clamps this at 0.5, which crops every shaft the same distance
-    // out. Reaching further keeps them running to the far edge.
-    clamp((iResolution.x * 2.2 - length(toCoord)) / (iResolution.x * 2.2), 0.25, 1.0);
+vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+vec2 fade(vec2 t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+
+// Stefan Gustavson's classic Perlin noise, exactly as the component ships it.
+float cnoise(vec2 P) {
+  vec4 Pi = floor(P.xyxy) + vec4(0.0, 0.0, 1.0, 1.0);
+  vec4 Pf = fract(P.xyxy) - vec4(0.0, 0.0, 1.0, 1.0);
+  Pi = mod289(Pi);
+  vec4 ix = Pi.xzxz;
+  vec4 iy = Pi.yyww;
+  vec4 fx = Pf.xzxz;
+  vec4 fy = Pf.yyww;
+  vec4 i = permute(permute(ix) + iy);
+  vec4 gx = fract(i * (1.0 / 41.0)) * 2.0 - 1.0;
+  vec4 gy = abs(gx) - 0.5;
+  vec4 tx = floor(gx + 0.5);
+  gx = gx - tx;
+  vec2 g00 = vec2(gx.x, gy.x);
+  vec2 g10 = vec2(gx.y, gy.y);
+  vec2 g01 = vec2(gx.z, gy.z);
+  vec2 g11 = vec2(gx.w, gy.w);
+  vec4 norm = taylorInvSqrt(vec4(dot(g00, g00), dot(g01, g01), dot(g10, g10), dot(g11, g11)));
+  g00 *= norm.x; g01 *= norm.y; g10 *= norm.z; g11 *= norm.w;
+  float n00 = dot(g00, vec2(fx.x, fy.x));
+  float n10 = dot(g10, vec2(fx.y, fy.y));
+  float n01 = dot(g01, vec2(fx.z, fy.z));
+  float n11 = dot(g11, vec2(fx.w, fy.w));
+  vec2 fade_xy = fade(Pf.xy);
+  vec2 n_x = mix(vec2(n00, n01), vec2(n10, n11), fade_xy.x);
+  return 2.3 * mix(n_x.x, n_x.y, fade_xy.y);
+}
+
+float fbm(vec2 p) {
+  float value = 0.0;
+  float amp = 1.0;
+  for (int i = 0; i < OCTAVES; i++) {
+    value += amp * abs(cnoise(p));
+    p *= FREQUENCY;
+    amp *= AMPLITUDE;
+  }
+  return value;
+}
+
+float pattern(vec2 p) {
+  vec2 p2 = p - iTime * SPEED;
+  return fbm(p + fbm(p2));
+}
+
+const float bayer[64] = float[64](
+   0.0/64.0, 48.0/64.0, 12.0/64.0, 60.0/64.0,  3.0/64.0, 51.0/64.0, 15.0/64.0, 63.0/64.0,
+  32.0/64.0, 16.0/64.0, 44.0/64.0, 28.0/64.0, 35.0/64.0, 19.0/64.0, 47.0/64.0, 31.0/64.0,
+   8.0/64.0, 56.0/64.0,  4.0/64.0, 52.0/64.0, 11.0/64.0, 59.0/64.0,  7.0/64.0, 55.0/64.0,
+  40.0/64.0, 24.0/64.0, 36.0/64.0, 20.0/64.0, 43.0/64.0, 27.0/64.0, 39.0/64.0, 23.0/64.0,
+   2.0/64.0, 50.0/64.0, 14.0/64.0, 62.0/64.0,  1.0/64.0, 49.0/64.0, 13.0/64.0, 61.0/64.0,
+  34.0/64.0, 18.0/64.0, 46.0/64.0, 30.0/64.0, 33.0/64.0, 17.0/64.0, 45.0/64.0, 29.0/64.0,
+  10.0/64.0, 58.0/64.0,  6.0/64.0, 54.0/64.0,  9.0/64.0, 57.0/64.0,  5.0/64.0, 53.0/64.0,
+  42.0/64.0, 26.0/64.0, 38.0/64.0, 22.0/64.0, 41.0/64.0, 25.0/64.0, 37.0/64.0, 21.0/64.0
+);
+
+/** Ordered dither, then posterize to COLOR_NUM levels - the 8x8 crosshatch and
+ *  the flat bands are the whole look. Done on the wave's scalar rather than on
+ *  RGB: the component ramps a single colour, so the two are the same picture,
+ *  and this one has no black floor to subtract from a light theme. */
+float banded(vec2 block, float f) {
+  int x = int(mod(block.x, 8.0));
+  int y = int(mod(block.y, 8.0));
+  float threshold = bayer[y * 8 + x] - 0.25;
+  float lvl = 1.0 / (COLOR_NUM - 1.0);
+  f = clamp(f + threshold * lvl - 0.2, 0.0, 1.0);
+  return floor(f * (COLOR_NUM - 1.0) + 0.5) * lvl;
 }
 
 void main() {
-  vec2 frag = gl_FragCoord.xy;
-  if (FLIP_X > 0.5) frag.x = iResolution.x - frag.x;
-  if (FLIP_Y > 0.5) frag.y = iResolution.y - frag.y;
-
-  vec2 coord = vec2(frag.x, iResolution.y - frag.y);
-  // pushed further out than the component's default: a distant source throws
-  // longer, straighter shafts instead of a fan blooming out of the corner.
-  vec2 rayPos = vec2(iResolution.x * 1.45, -1.15 * iResolution.y);
-
-  float tiltRad = TILT * 3.14159265 / 180.0;
-  float cs = cos(tiltRad), sn = sin(tiltRad);
-  vec2 rel = coord - rayPos;
-  vec2 tilted = vec2(rel.x * cs - rel.y * sn, rel.x * sn + rel.y * cs) + rayPos;
-
-  float half_ = SPREAD * 0.275;
-  vec2 dir1 = normalize(vec2(cos(0.785398 + half_), sin(0.785398 + half_)));
-  vec2 dir2 = normalize(vec2(cos(0.785398 - half_), sin(0.785398 - half_)));
-
-  vec4 rays1 = vec4(uRay1, 1.0) * rayStrength(rayPos, dir1, tilted, 36.2214, 21.11349, SPEED);
-  vec4 rays2 = vec4(uRay2, 1.0) * rayStrength(rayPos, dir2, tilted, 22.3991, 18.0234, SPEED * 0.2);
-  vec4 color = rays1 * (1.0 - BLEND) * 0.9 + rays2 * BLEND * 0.9;
-
-  float dist = length(frag - vec2(rayPos.x, iResolution.y - rayPos.y)) / iResolution.y;
-  color.rgb *= INTENSITY * 0.4 / pow(max(dist, 0.001), FALLOFF);
-
-  float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-  color.rgb = mix(vec3(gray), color.rgb, SATURATION);
-
-  // Composited here rather than blended by the canvas: the page background is
-  // the only thing behind us, and an opaque canvas needs no alpha plumbing.
-  float a = clamp(max(color.r, max(color.g, color.b)), 0.0, 1.0) * OPACITY;
-  fragColor = vec4(mix(uHorizon, clamp(color.rgb, 0.0, 1.0), a), 1.0);
+  // one sample per PIXEL_SIZE block, which is what makes it read as pixels
+  vec2 block = floor(gl_FragCoord.xy / PIXEL_SIZE);
+  vec2 uv = (block * PIXEL_SIZE) / iResolution;
+  uv -= 0.5;
+  uv.x *= iResolution.x / iResolution.y;
+  // The page background is the floor rather than black, so one shader is
+  // texture under both themes instead of a dark slab punched into the light one.
+  fragColor = vec4(mix(uHorizon, uWave, banded(block, pattern(uv))), 1.0);
 }
 </script>
-<main id="app"><div class="empty">loading…</div></main>
+<main id="app"><div class="empty">Loading…</div></main>
 <script>
 const RANK_ICONS = ${JSON.stringify(RANK_ICONS)};
 const app = document.getElementById('app');
@@ -484,6 +688,8 @@ const ICONS = {
   back: '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   dash: '<path d="M5 12h14"/>',
+  circle: '<circle cx="12" cy="12" r="8"/>',
+  arrow: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   layers: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
@@ -494,12 +700,17 @@ const num = (n) => (n == null ? null : n.toLocaleString('en-US'));
 
 const ago = (ts) => {
   const m = Math.round((Date.now() - ts) / 60000);
-  return m < 1 ? 'just now' : m < 60 ? m + 'm ago' : Math.round(m / 60) + 'h ago';
+  return m < 1 ? 'Just now' : m < 60 ? m + 'm ago' : Math.round(m / 60) + 'h ago';
 };
 
 const mark = () =>
   '<svg class="mark" viewBox="12 12 90 90" fill="currentColor" aria-hidden="true">' +
   ${JSON.stringify(MARK)} + '</svg>';
+
+/** Discord's wordless mark. Filled, so it cannot go through icon() - that
+ *  wraps everything in the stroke-only preset the lucide set needs. */
+const discordMark = () =>
+  \`<svg viewBox="0 0 127.14 96.36" fill="currentColor" aria-hidden="true"><path d="M107.7 8.07A105.15 105.15 0 0 0 81.47 0a72.06 72.06 0 0 0-3.36 6.83 97.68 97.68 0 0 0-29.11 0A72.37 72.37 0 0 0 45.64 0a105.89 105.89 0 0 0-26.25 8.09C2.79 32.65-1.71 56.6.54 80.21a105.73 105.73 0 0 0 32.17 16.15 77.7 77.7 0 0 0 6.89-11.11 68.42 68.42 0 0 1-10.85-5.18c.91-.66 1.8-1.34 2.66-2a75.57 75.57 0 0 0 64.32 0c.87.71 1.76 1.39 2.66 2a68.68 68.68 0 0 1-10.87 5.19 77 77 0 0 0 6.89 11.1 105.25 105.25 0 0 0 32.19-16.14c2.64-27.38-4.51-51.11-18.9-72.15ZM42.45 65.69C36.18 65.69 31 60 31 53s5-12.74 11.43-12.74S54 46 53.89 53s-5.05 12.69-11.44 12.69Zm42.24 0C78.41 65.69 73.25 60 73.25 53s5-12.74 11.44-12.74S96.23 46 96.12 53s-5.04 12.69-11.43 12.69Z"/></svg>\`;
 
 const icon = (name) =>
   \`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -665,6 +876,35 @@ function ask(label, value = '') {
   });
 }
 
+/** Type-the-name confirmation for something destructive. The button stays
+ *  dead until the name matches, so the guard is visible rather than a rejection
+ *  after the fact - and an "are you sure" nobody reads guards nothing. */
+function confirmDanger({ title, body, name, confirm }) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement('dialog');
+    dlg.innerHTML = \`<form method="dialog">
+      <strong class="dlg-title">\${h(title)}</strong>
+      <p class="dlg-body">\${body}</p>
+      <label>Type <b>\${h(name)}</b> to confirm</label>
+      <input type="text" name="v" autocomplete="off" spellcheck="false" />
+      <div class="bar">
+        <button class="btn bad solid" value="ok" disabled>\${h(confirm)}</button>
+        <button class="btn" value="">Cancel</button>
+      </div>
+    </form>\`;
+    document.body.append(dlg);
+    const input = dlg.querySelector('input');
+    const go = dlg.querySelector('button[value="ok"]');
+    input.oninput = () => (go.disabled = input.value.trim() !== name);
+    dlg.onclose = () => {
+      resolve(dlg.returnValue === 'ok');
+      dlg.remove();
+    };
+    dlg.showModal();
+    input.focus();
+  });
+}
+
 /** Voltaic standing as its own badge. An unknown rank name still renders - the
  *  icon just falls away rather than the whole chip disappearing. */
 const voltaicChip = (v) => {
@@ -705,24 +945,37 @@ function renderLogin() {
     \${mark()}
     <h1>Quorum</h1>
     <p>Sign in to set up your server.</p>
-    <a class="btn solid" href="/login">Continue with Discord</a>
+    <a class="btn solid" href="/login">\${discordMark()}Continue with Discord</a>
   </div>\`;
   startWaves();
 }
 
 const startWaves = () =>
   startShader('fs', { uWave: [0.322, 0.153, 1], uCrest: [1, 0.624, 0.988], dpr: 1.5 });
-// Rays are a cheap two-sample shader, so they can have the full pixel ratio.
-// warm white and a cool white, the way daylight actually splits: colour lives
-// in the falloff, not in the beam.
-const startRays = () =>
-  startShader('fs2', { uRay1: [1, 0.925, 0.78], uRay2: [0.82, 0.88, 1], dpr: 2 });
 
-/** Draws one of the background shaders full-bleed behind the page. No WebGL2,
+// Dither everywhere you are signed in. The wave mixes up from the page
+// background, so the one shader reads as texture in either theme - which is
+// why the colour is picked here rather than baked into the shader.
+// dpr 1 on purpose: the component's own Canvas pins it there, and pixel blocks
+// that track the device ratio stop being pixels.
+const startDither = () =>
+  startShader('fs3', {
+    uWave: matchMedia('(prefers-color-scheme: dark)').matches
+      ? [0.30, 0.30, 0.34]
+      : [0.62, 0.62, 0.66],
+    dpr: 1,
+  });
+/** Draws the background shader full-bleed behind the sign-in page. No WebGL2,
  *  no background - the page just stays its background colour, which is what
- *  both shaders fade to anyway. Every view here is a full navigation, so this
+ *  the shader fades to anyway. Every view here is a full navigation, so this
  *  runs once and never needs tearing down. */
+/** Which background is on the canvas, so navigating home -> a server doesn't
+ *  stack a second draw loop on top of the first. */
+let liveShader = null;
+
 function startShader(fsId, opts) {
+  if (liveShader?.id === fsId) return;
+  liveShader?.stop();
   const cv = document.getElementById('bg');
   const gl = cv.getContext('webgl2', { alpha: false, antialias: false });
   if (!gl) return;
@@ -758,7 +1011,9 @@ function startShader(fsId, opts) {
       raf = requestAnimationFrame(draw);
     }
   };
-  const kick = () => { if (!raf && !document.hidden) raf = requestAnimationFrame(draw); };
+  let stopped = false;
+  const kick = () => { if (!raf && !stopped && !document.hidden) raf = requestAnimationFrame(draw); };
+  liveShader = { id: fsId, stop: () => { stopped = true; cancelAnimationFrame(raf); raf = 0; } };
   const size = () => {
     // ponytail: dpr is capped per shader - a 70-step raymarch at retina 2x
     // cooks laptop GPUs. Lower STEPS in the shader before raising it.
@@ -779,7 +1034,7 @@ function renderHome() {
   app.innerHTML = \`
     <header><h1><span>\${mark()}Quorum</span></h1>\${whoBar()}</header>
     <div id="lists"></div>\`;
-  startRays();
+  startDither();
 
   const running = me.guilds.filter((g) => g.installed);
   const missing = me.guilds.filter((g) => !g.installed);
@@ -801,11 +1056,11 @@ function renderHome() {
       ? \`<div class="empty">You don't manage any Discord servers. Quorum can only be added
          by someone with <strong>Manage Server</strong>.</div>\`
       : (running.length
-          ? section('running quorum', running.map((g) => card(g, members(g))).join(''))
-          : \`<h2>running quorum</h2>
+          ? section('Running Quorum', running.map((g) => card(g, members(g))).join(''))
+          : \`<h2>Running Quorum</h2>
              <div class="empty">No server has Quorum yet - pick one below to add it.</div>\`) +
         (missing.length
-          ? section('add quorum to', missing.map((g) => card(g, icon('plus') + 'add')).join(''))
+          ? section('Add Quorum to', missing.map((g) => card(g, icon('plus') + 'Add')).join(''))
           : '');
 
   document.getElementById('lists').onclick = (e) => {
@@ -839,13 +1094,13 @@ function watchForInvites() {
 }
 
 const PANES = [
-  ['overview', 'overview', 'gauge'],
-  ['setup', 'setup', 'sliders'],
-  ['queues', 'queues', 'layers'],
-  ['matches', 'matches', 'swords'],
-  ['ranks', 'ranks', 'trophy'],
-  ['pool', 'scenarios', 'crosshair'],
-  ['players', 'players', 'users'],
+  ['overview', 'Overview', 'gauge'],
+  ['setup', 'Setup', 'sliders'],
+  ['queues', 'Queues', 'layers'],
+  ['matches', 'Matches', 'swords'],
+  ['ranks', 'Ranks', 'trophy'],
+  ['pool', 'Scenarios', 'crosshair'],
+  ['players', 'Players', 'users'],
 ];
 
 async function renderGuild(guild) {
@@ -860,16 +1115,16 @@ async function renderGuild(guild) {
           <span class="name">\${h(guild.name)}</span>
         </div>
         \${PANES.map(([id, label, ic]) => \`<a href="#\${id}">\${icon(ic)}\${label}</a>\`).join('')}
-        <a class="back" href="/">\${icon('back')}all servers</a>
+        <a class="back" href="/">\${icon('back')}All servers</a>
       </aside>
-      <div id="pane"><div class="empty">loading…</div></div>
+      <div id="pane"><div class="empty">Loading…</div></div>
     </div>\`;
-  startRays();
+  startDither();
 
   const box = document.getElementById('pane');
   const data = await (await fetch('/api/guild/' + guild.id)).json();
 
-  const NONE = [{ id: '', name: 'none' }];
+  const NONE = [{ id: '', name: 'None' }];
 
   // A tile with somewhere to go is a button; the rest are plain.
   // Every tile is one line of label. A wrapped label makes the icon float
@@ -886,44 +1141,46 @@ async function renderGuild(guild) {
   // Anything unticked is a job, so it links to the pane that fixes it. The ping
   // role is left out - a match runs fine without one.
   const step = (ok, label, to) =>
-    \`<div class="\${ok ? 'ok' : ''}">\${icon(ok ? 'check' : 'dash')}\${
-      ok ? h(label) : \`<button type="button" class="link" data-go="\${to}">\${h(label)}</button>\`}</div>\`;
+    ok
+      ? \`<div class="ok">\${icon('check')}\${h(label)}</div>\`
+      : \`<button type="button" class="todo" data-go="\${to}">\${icon('circle')}\${h(label)}
+           <span class="go">Set up\${icon('arrow')}</span></button>\`;
   const live = data.matches.filter((m) => m.status === 'live').length;
   // ranks come back highest-first, so the first one you clear is yours.
   const rankOf = (elo) => data.ranks.find((r) => elo >= r.min_elo);
+  const STEPS = 3;
   const todo = [
-    !data.config.panel_channel_id,
-    !data.config.results_channel_id,
+    !data.config.split_category_id,
     !data.scenarios.length,
-    !data.ranks.length,
+    !data.ranks.some((r) => r.discord_role_id),
   ].filter(Boolean).length;
 
   box.innerHTML = \`
     <section id="overview">
-    <h2>overview</h2>
+    <h2>Overview</h2>
     <div class="stats">
-      \${stat(num(guild.members) ?? '-', 'members', 'users')}
-      \${stat(data.matches.length, 'in play', 'swords', 'matches',
+      \${stat(num(guild.members) ?? '-', 'Members', 'users')}
+      \${stat(data.matches.length, 'In play', 'swords', 'matches',
               live ? live + ' running' : '', 'open or running right now')}
-      \${stat(num(data.stats.played), 'played', 'check', null, '', 'matches finished all time')}
-      \${stat(num(data.stats.week), 'last 7 days', 'gauge', null, '', 'matches finished this week')}
-      \${stat(num(data.stats.rated), 'rated', 'trophy', 'players', '', 'players with a record')}
+      \${stat(num(data.stats.played), 'Played', 'check', null, '', 'matches finished all time')}
+      \${stat(num(data.stats.week), 'Last 7 days', 'gauge', null, '', 'matches finished this week')}
+      \${stat(num(data.stats.rated), 'Rated', 'trophy', 'players', '', 'players with a record')}
     </div>
 
-    <h2>ready to run</h2>
+    <h2>Ready to run</h2>
     <p class="muted">\${todo
       ? \`\${todo} thing\${todo > 1 ? 's' : ''} left before Quorum can run a match here.\`
       : 'Everything is set. Post the queue panel and you are live.'}</p>
+    <div class="progress"><i style="width:\${((STEPS - todo) / STEPS) * 100}%"></i></div>
     <div class="check">
-      \${step(!!data.config.panel_channel_id, 'queue channel', 'setup')}
-      \${step(!!data.config.results_channel_id, 'results channel', 'setup')}
-      \${step(data.scenarios.length > 0, \`scenario pool (\${data.scenarios.length})\`, 'pool')}
+      \${step(!!data.config.split_category_id, 'Queue channels', 'setup')}
+      \${step(data.scenarios.length > 0, \`Scenario pool (\${data.scenarios.length})\`, 'pool')}
       \${step(data.ranks.some((r) => r.discord_role_id),
-              \`rank roles (\${data.ranks.filter((r) => r.discord_role_id).length}/\${data.ranks.length})\`,
+              \`Rank roles (\${data.ranks.filter((r) => r.discord_role_id).length}/\${data.ranks.length})\`,
               'ranks')}
     </div>
 
-    <h2>top of the ladder</h2>
+    <h2>Top of the ladder</h2>
     \${data.top.length
       ? '<table class="ladder"><tbody>' + data.top.map((p, n) => {
           const rank = rankOf(p.elo);
@@ -931,6 +1188,7 @@ async function renderGuild(guild) {
           <tr>
             <td class="hint" style="width:1px">\${n + 1}</td>
             <td style="width:100%">\${h(p.kovaaks_username)}</td>
+            <td style="white-space:nowrap">\${voltaicChip(p.voltaic)}</td>
             <td style="white-space:nowrap">\${rank
               ? \`<span class="rank" style="--c:\${h(rank.color)}"><span class="dot"></span>\${h(rank.name)}</span>\`
               : ''}</td>
@@ -942,18 +1200,28 @@ async function renderGuild(guild) {
     </section>
 
     <section id="setup">
-    <h2>setup</h2>
+    <h2>Setup</h2>
     <div class="field">
-      <label>Queue channel <span class="hint">- where the panel and open calls live</span></label>
-      \${selectField('panel', NONE.concat(data.channels), data.config.panel_channel_id)}
+      <label>Category <span class="hint">- Quorum fills it with a results channel and one queue channel per rank</span></label>
+      \${selectField('category', [{ id: '', name: 'Create one for me' }].concat(data.categories),
+                     data.config.split_category_id)}
     </div>
     <div class="field">
-      <label>Results channel <span class="hint">- where finished matches get posted</span></label>
-      \${selectField('results', NONE.concat(data.channels), data.config.results_channel_id)}
-    </div>
-    <div class="field">
-      <label>Extra ping role <span class="hint">- for people who want every call. The ranks a call can admit are already pinged.</span></label>
+      <label>Extra ping role <span class="hint">- for people who want every call, on top of the ranks already pinged</span></label>
       \${selectField('ping', NONE.concat(data.roles), data.config.ping_role_id)}
+    </div>
+    <div class="field">
+      <label>Auto-cancel <span class="hint">- drop calls nobody takes, so the channel only shows live ones</span></label>
+      <div class="opt boxed">
+        <label class="opt-hit">
+          <input type="checkbox" id="autocancel"\${data.config.call_ttl_min === 0 ? '' : ' checked'} />
+          <span class="on-note">Cancel a call after</span>
+          <span class="off-note">Off - calls stay up until taken or cancelled</span>
+        </label>
+        <input type="number" id="ttlmin" min="5" max="1440" step="5"
+               value="\${data.config.call_ttl_min || 60}" />
+        <span class="unit">minutes without a taker</span>
+      </div>
     </div>
     <div class="bar">
       <button class="btn solid" id="save">Save</button>
@@ -961,29 +1229,24 @@ async function renderGuild(guild) {
       <span class="status" id="status"></span>
     </div>
 
-    <div class="cat" style="margin-top:32px">
-      <div class="cat-top"><strong>remove Quorum</strong></div>
-      <p class="muted" style="margin:0 0 12px">Quorum leaves the server. Do it here rather than kicking it from
-      Discord: a bot is told it has been removed, never asked first, so once it is out it cannot delete a single
-      thing it made. This is the only moment its roles and channels can go with it.</p>
-      <label class="muted" style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
-        <input type="checkbox" id="purge" checked />
-        also delete the roles, categories and channels it created, and this server's settings
-      </label>
-      <p class="muted" style="margin:0 0 12px">Ratings and match history stay either way - they are global, and
-      deleting them would rewrite other servers' ladders from here.</p>
+    <div class="cat danger" style="margin-top:32px">
+      <div class="cat-top"><strong>Remove Quorum</strong></div>
+      <p class="muted" style="margin:0 0 12px">Leave here, not by kicking it - a kicked bot cannot delete what it
+      made. Ratings and history are global and stay.</p>
       <div class="bar">
-        <button class="btn" id="leavebtn">Remove Quorum</button>
+        <label class="opt">
+          <input type="checkbox" id="purge" checked />
+          Also delete its roles, categories and channels
+        </label>
         <span class="status" id="leavestatus"></span>
+        <button class="btn bad" id="leavebtn">Remove Quorum</button>
       </div>
     </div>
     </section>
 
     <section id="queues">
-    <h2>queues</h2>
-    <p class="muted">How far apart two people's ranks may be for a queue to let them in, checked against everyone already in the lobby rather than just whoever opened it. Opening a call pings exactly these ranks, so nobody is notified about a game they'd be turned away from.</p>
-
-    <div class="cat" id="splitbox"></div>
+    <h2>Queues</h2>
+    <p class="muted">How far apart two ranks may be for a queue to admit them. A call pings exactly the ranks it can let in.</p>
 
     <div id="queuebox"></div>
     <div class="bar">
@@ -993,14 +1256,18 @@ async function renderGuild(guild) {
     </section>
 
     <section id="matches">
-    <h2>matches in play</h2>
+    <h2>Matches in play</h2>
     <p class="muted">Force finish scores a match from whatever KovaaK's has right now; cancel bins it with no rating change.</p>
     <div id="matchlist"></div>
+
+    <h2>History</h2>
+    <p class="muted">Newest first. Click a match for its scores. Cancelled and unplayed ones are not here.</p>
+    <table class="hist"><tbody id="histlist"></tbody></table>
     </section>
 
     <section id="ranks">
-    <h2>ranks</h2>
-    <p class="muted">Each rank is a Discord role, named and coloured to match. Saving here creates them; a call then pings the ones it can admit, which is what keeps one shared queue channel workable.</p>
+    <h2>Ranks</h2>
+    <p class="muted">Each rank is a Discord role, named and coloured to match. Saving creates them, and Quorum moves people between them as ratings cross the floors.</p>
     <div class="cat" id="modebox"></div>
     <table><tbody id="ranklist"></tbody></table>
     <div class="bar">
@@ -1011,8 +1278,8 @@ async function renderGuild(guild) {
     </section>
 
     <section id="pool">
-    <h2>scenario pool</h2>
-    <p class="muted">A match rolls one scenario per category. Search pulls real names off KovaaK's, so a score lookup can't miss on a typo.</p>
+    <h2>Scenario pool</h2>
+    <p class="muted">A match rolls one scenario per category. Search pulls real names off KovaaK's, so a lookup can't miss on a typo.</p>
     <div id="poolbox"></div>
     <div class="bar">
       <button class="btn" id="addcat">Add category</button>
@@ -1022,11 +1289,11 @@ async function renderGuild(guild) {
     </section>
 
     <section id="players">
-    <h2>players</h2>
-    <p class="muted">Tier only seeds a starting rating, and only before someone has played - after that their record is the truth. Who may play whom is set per queue, not here.</p>
+    <h2>Players</h2>
+    <p class="muted">Where a rating starts, set in Ranks. Only until someone has played. Who plays whom is set in Queues.</p>
     <table class="ladder"><tbody id="playerlist"></tbody></table>
     <div class="bar">
-      <button class="btn solid" id="savetiers">Save tiers</button>
+      <button class="btn solid" id="savetiers">Save starting ranks</button>
       <span class="status" id="tierstatus"></span>
     </div>
     </section>\`;
@@ -1055,7 +1322,7 @@ async function renderGuild(guild) {
   const spread = { ...data.spread };
   const spreadOpts = ladder.map((_, n) => ({
     id: String(n),
-    name: n === 0 ? 'same rank only' : n === 1 ? 'one rank either side' : n + ' ranks either side',
+    name: n === 0 ? 'Same rank only' : n === 1 ? 'One rank either side' : n + ' ranks either side',
   }));
   const example = (n) => {
     if (!ladder.length) return 'Add a rank ladder first.';
@@ -1065,47 +1332,17 @@ async function renderGuild(guild) {
     return \`\${h(ladder[mid].name)} queues with \${reach.map((r) =>
       \`<span class="rank" style="--c:\${h(r.color)}"><span class="dot"></span>\${h(r.name)}</span>\`).join('')}\`;
   };
-  let split = !!data.split;
-  const drawSplit = () => {
-    document.getElementById('splitbox').innerHTML = \`
-      <div class="cat-top">
-        <strong>a channel per rank</strong>
-        <span class="tag">\${split ? 'on' : 'off'}</span>
-        <button class="btn\${split ? '' : ' solid'}" id="splitbtn" style="margin-left:auto">\${
-          split ? 'Turn off' : 'Turn on'}</button>
-      </div>
-      <p class="muted" style="margin:0">\${split
-        ? \`Quorum keeps a category per rank, each holding a channel per format plus results, and mirrors the ladder into them: rename a rank and its channels rename, delete one and its channels go with it. Turning this off deletes the \${data.ranks.length * 4} channels it made.\`
-        : \`One shared queue channel, with a call pinging the ranks it can admit. Turning this on makes \${data.ranks.length} categories and \${data.ranks.length * 4} channels, and splits your queue \${data.ranks.length * 3} ways - which is how a pick-up queue dies. Most servers want it off.\`}</p>
-      \${split ? '<p class="muted" style="margin:8px 0 0">The channel is the rule while this is on, so every queue below is locked to one rank.</p>' : ''}
-      <span class="status" id="splitstatus"></span>\`;
-
-    document.getElementById('splitbtn').onclick = async () => {
-      const el = document.getElementById('splitstatus');
-      el.textContent = split ? 'removing channels…' : 'creating channels…';
-      const res = await fetch(\`/api/guild/\${guild.id}/split\`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ on: !split }),
-      });
-      if (!res.ok) { el.textContent = 'failed'; return; }
-      split = (await res.json()).split;
-      // the gate is forced while split is on, so re-read rather than guess
-      const fresh = await (await fetch('/api/guild/' + guild.id)).json();
-      Object.assign(spread, fresh.spread);
-      drawSplit();
-      drawQueues();
-    };
-  };
-
+  let seedMode = data.seedMode ?? 'flat';
   const drawQueues = () => {
-    document.getElementById('queuebox').innerHTML = data.formats.map((f) => \`
-      <div class="cat">
-        <div class="cat-top"><strong>\${h(f)}</strong></div>
-        \${split
-          ? '<div class="muted" style="margin:0">same rank only - the channel decides</div>'
-          : selectField('sp-' + f, spreadOpts, String(spread[f] ?? 0), \`data-f="\${h(f)}"\`)}
+    // One row per format. Three cards for three dropdowns was three times the
+    // furniture for the same one decision each.
+    document.getElementById('queuebox').innerHTML =
+      '<div class="cat rows">' + data.formats.map((f) => \`
+      <div class="qrow">
+        <strong>\${h(f)}</strong>
+        \${selectField('sp-' + f, spreadOpts, String(spread[f] ?? 0), \`data-f="\${h(f)}"\`)}
         <div class="reach">\${example(spread[f] ?? 0)}</div>
-      </div>\`).join('');
+      </div>\`).join('') + '</div>';
     const scope = document.getElementById('queuebox');
     wireSelects(scope);
     scope.querySelectorAll('.sel').forEach((el) => (el.onchange = () => {
@@ -1113,18 +1350,68 @@ async function renderGuild(guild) {
       drawQueues();
     }));
   };
-  drawSplit();
   drawQueues();
 
   document.getElementById('savequeues').onclick = async () => {
     const el = document.getElementById('queuestatus');
-    el.textContent = 'saving…';
+    el.textContent = 'Saving…';
     const res = await fetch(\`/api/guild/\${guild.id}/queues\`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ spread }),
     });
-    el.textContent = res.ok ? 'saved' : 'save failed';
+    el.textContent = res.ok ? 'Saved' : 'Save failed';
   };
+
+  // A match is one line: the order players appear IS the result, so the winner
+  // needs no label and the row needs no second line.
+  // The scoreboard, only when asked for. A match is one line until you want to
+  // know how it was won - then the same row opens onto what was picked, what
+  // was banned, and what everyone actually scored.
+  const histDetail = (m) => \`
+    <tr class="hx"><td colspan="5">
+      <table class="hgrid"><tbody>
+        <tr class="th"><td></td>\${m.played.map((sc) => \`<td>\${h(sc)}</td>\`).join('')}</tr>
+        \${m.players.map((p) => \`<tr>
+          <td class="\${p.placing === 1 ? 'won' : 'hint'}">\${h(p.name)}</td>
+          \${m.played.map((sc) => \`<td>\${
+            p.scores?.[sc] == null ? '<span class="hint">–</span>' : Math.round(p.scores[sc])
+          }</td>\`).join('')}
+        </tr>\`).join('')}
+      </tbody></table>
+      \${m.banned.length
+        ? \`<div class="banned"><span class="hint">Banned</span>\${
+            m.banned.map((sc) => \`<span class="chip out">\${h(sc)}</span>\`).join('')}</div>\`
+        : ''}
+    </td></tr>\`;
+
+  const histBox = document.getElementById('histlist');
+  histBox.innerHTML = data.history.length
+    ? data.history.map((m) => \`
+      <tr class="hrow" data-m="\${m.id}" tabindex="0" role="button" aria-expanded="false">
+        <td class="hint" style="width:1px;white-space:nowrap">#\${m.id}</td>
+        <td style="width:1px;white-space:nowrap"><strong>\${h(m.format)}</strong></td>
+        <td style="width:100%">\${m.players.map((p) => \`<span class="hp\${
+          p.placing === 1 ? ' won' : ''}">\${h(p.name)}<em>\${
+          p.delta >= 0 ? '+' : ''}\${p.delta}</em></span>\`).join('')}</td>
+        <td class="hint" style="white-space:nowrap">\${m.played.length} scn</td>
+        <td class="hint" style="white-space:nowrap">\${
+          m.ended_at ? ago(m.ended_at) : ''}\${icon('chevron')}</td>
+      </tr>\` + histDetail(m)).join('')
+    : '<tr><td class="hint">Nothing has finished yet.</td></tr>';
+
+  histBox.querySelectorAll('.hrow').forEach((row) => {
+    const toggle = () => {
+      const open = row.getAttribute('aria-expanded') === 'true';
+      row.setAttribute('aria-expanded', String(!open));
+      row.nextElementSibling.classList.toggle('open', !open);
+    };
+    row.onclick = toggle;
+    row.onkeydown = (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      toggle();
+    };
+  });
 
   const status = (msg) => (document.getElementById('status').textContent = msg);
 
@@ -1140,9 +1427,9 @@ async function renderGuild(guild) {
           <strong>\${h(m.format)}</strong>
           <span class="hint">#\${m.id}</span>
           <span class="pill\${m.status === 'live' ? ' live' : ''}">\${
-            m.status === 'live' ? 'running'
-              : m.status === 'banning' ? 'banning scenarios'
-              : 'waiting for a taker'}</span>
+            m.status === 'live' ? 'Running'
+              : m.status === 'banning' ? 'Banning scenarios'
+              : 'Waiting for a taker'}</span>
           <span class="hint">\${ago(m.started_at ?? m.created_at)}</span>
         </div>
         <div class="roster">\${m.players.map((p) => \`
@@ -1159,7 +1446,7 @@ async function renderGuild(guild) {
       </div>\`).join('') + '</div>';
 
     const act = async (id, verb) => {
-      box.innerHTML = '<div class="hint">working…</div>';
+      box.innerHTML = '<div class="hint">Working…</div>';
       await fetch(\`/api/guild/\${guild.id}/match/\${id}/\${verb}\`, { method: 'POST' });
       const fresh = await (await fetch('/api/guild/' + guild.id)).json();
       drawMatches(fresh.matches);
@@ -1169,46 +1456,56 @@ async function renderGuild(guild) {
   };
   drawMatches(data.matches);
 
-  let mode = data.mode ?? 'auto';
+  // All three options on screen with what each does, rather than a segmented
+  // control plus a paragraph that changes under it: the choice is the content,
+  // so you should be able to compare them without clicking.
+  const SEED_OPTS = [
+    ['flat', 'Flat', 'Everyone starts at 1050.'],
+    ['staff', 'Staff', 'You pick a rank before their first match.'],
+    ['voltaic', 'Voltaic S5', 'From their S5 standing, or flat without one.'],
+  ];
   const drawMode = () => {
-    const manual = mode === 'manual';
+    const offered = data.seedModes ?? ['flat'];
     document.getElementById('modebox').innerHTML = \`
       <div class="cat-top">
-        <strong>who decides a division</strong>
-        <span class="tag">\${manual ? 'staff' : 'rating'}</span>
-        <button class="btn" id="modebtn" style="margin-left:auto">\${
-          manual ? 'Hand it back to ratings' : 'Let staff assign it'}</button>
+        <strong>Starting rank</strong>
+        <span class="status" id="modestatus" style="margin-left:auto"></span>
       </div>
-      <p class="muted" style="margin:0">\${manual
-        ? 'Staff give out the division roles and Quorum never touches them. You queue with the role you hold: no role, no queue. Ratings below are ignored, and a call is open only to the division its opener is in.'
-        : "Quorum hands out the division roles itself as ratings cross the thresholds below, and a queue admits whatever the queues pane allows."}</p>
-      \${manual ? '<p class="muted" style="margin:8px 0 0">Split channels are locked to their role while this is on, so people only see the queue they belong to.</p>' : ''}
-      <span class="status" id="modestatus"></span>\`;
+      <p class="muted" style="margin:0 0 12px">Only ever the first rating - after one match their record decides it, and Quorum moves the rank role to match.</p>
+      <div class="opts" id="seedseg" role="radiogroup" aria-label="Starting rank">\${
+        SEED_OPTS.filter(([m]) => offered.includes(m)).map(([m, name, desc]) => \`
+        <button type="button" role="radio" data-m="\${m}" aria-checked="\${m === seedMode}">
+          <span class="mark"></span>
+          <span class="oname">\${name}</span>
+          <span class="odesc">\${desc}</span>
+        </button>\`).join('')}</div>\`;
 
-    document.getElementById('modebtn').onclick = async () => {
+    document.getElementById('seedseg').onclick = async (e) => {
+      const b = e.target.closest('[data-m]');
+      if (!b || b.dataset.m === seedMode) return;
       const el = document.getElementById('modestatus');
-      el.textContent = 'saving…';
-      const res = await fetch(\`/api/guild/\${guild.id}/mode\`, {
+      el.textContent = 'Saving…';
+      const res = await fetch(\`/api/guild/\${guild.id}/seedmode\`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ mode: manual ? 'auto' : 'manual' }),
+        body: JSON.stringify({ mode: b.dataset.m }),
       });
-      if (!res.ok) { el.textContent = 'failed'; return; }
-      mode = (await res.json()).mode;
+      if (!res.ok) { el.textContent = 'Failed'; return; }
+      seedMode = (await res.json()).mode;
       drawMode();
-      drawRanks();
+      drawPlayers();
     };
   };
 
   let ranks = data.ranks.slice();
   const drawRanks = () => {
-    document.getElementById('ranklist').innerHTML = ranks.map((r, n) => \`
+    document.getElementById('ranklist').innerHTML =
+      \`<tr class="th"><td></td><td>Rank</td><td>Elo floor</td><td></td></tr>\` +
+      ranks.map((r, n) => \`
       <tr>
         <td>\${colorField(r.color, \`data-n="\${n}"\`)}</td>
         <td style="width:100%"><input type="text" value="\${h(r.name)}" data-n="\${n}" data-k="name" /></td>
-        <td>\${mode === 'manual'
-          ? '<span class="hint">rating ignored</span>'
-          : \`<input type="number" value="\${Number(r.min_elo)}" data-n="\${n}" data-k="min_elo" />\`}</td>
-        <td><button class="icon-btn" data-del="\${n}" title="remove">×</button></td>
+        <td><input type="number" value="\${Number(r.min_elo)}" data-n="\${n}" data-k="min_elo" /></td>
+        <td><button class="icon-btn" data-del="\${n}" title="Remove">×</button></td>
       </tr>\`).join('');
     wireColors(document.getElementById('ranklist'));
     document.querySelectorAll('#ranklist .col').forEach((el) => {
@@ -1232,14 +1529,14 @@ async function renderGuild(guild) {
   };
   document.getElementById('saveranks').onclick = async () => {
     const el = document.getElementById('rankstatus');
-    el.textContent = 'saving…';
+    el.textContent = 'Saving…';
     const res = await fetch(\`/api/guild/\${guild.id}/ranks\`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ ranks }),
     });
     const out = await res.json().catch(() => ({}));
-    if (res.ok) { ranks = out.ranks; drawRanks(); el.textContent = 'saved, roles synced'; }
-    else el.textContent = out.error ?? 'save failed';
+    if (res.ok) { ranks = out.ranks; drawRanks(); el.textContent = 'Saved, roles synced'; }
+    else el.textContent = out.error ?? 'Save failed';
   };
 
   // Categories live in their own list so a new, still-empty one survives until
@@ -1258,15 +1555,15 @@ async function renderGuild(guild) {
           <div class="cat-top">
             <strong>\${h(cat)}</strong>
             <span class="hint">\${rows.length} scenario\${rows.length === 1 ? '' : 's'}</span>
-            <button class="icon-btn" data-delcat="\${h(cat)}" title="remove category">\${icon('x')}</button>
+            <button class="icon-btn" data-delcat="\${h(cat)}" title="Remove category">\${icon('x')}</button>
           </div>
           <div class="chips">
             \${rows.map((r) => \`<span class="chip">\${h(r.name)}
-              <button class="icon-btn" data-del="\${r.i}" title="remove">\${icon('x')}</button></span>\`).join('')}
-            <button class="chip add" data-add="\${h(cat)}">\${icon('plus')}scenario</button>
+              <button class="icon-btn" data-del="\${r.i}" title="Remove">\${icon('x')}</button></span>\`).join('')}
+            <button class="chip add" data-add="\${h(cat)}">\${icon('plus')}Scenario</button>
           </div>
           \${openCat === cat ? \`<div class="scn">
-            <input type="text" class="scn-q" placeholder="search KovaaK's scenarios" spellcheck="false" />
+            <input type="text" class="scn-q" placeholder="Search KovaaK's scenarios" spellcheck="false" />
             <div class="scn-out hint">Type at least 2 characters.</div>
           </div>\` : ''}
         </div>\`;
@@ -1297,7 +1594,7 @@ async function renderGuild(guild) {
       clearTimeout(timer);
       const term = q.value.trim();
       if (term.length < 2) { out.textContent = 'Type at least 2 characters.'; return; }
-      out.textContent = 'searching…';
+      out.textContent = 'Searching…';
       timer = setTimeout(async () => {
         const res = await fetch('/api/scenarios?q=' + encodeURIComponent(term)).catch(() => null);
         const hits = res?.ok ? (await res.json()).scenarios : null;
@@ -1338,10 +1635,11 @@ async function renderGuild(guild) {
       body: JSON.stringify({ scenarios }),
     });
     const out = await res.json().catch(() => ({}));
-    el.textContent = res.ok ? \`saved \${out.scenarios.length} scenarios\` : out.error ?? 'save failed';
+    el.textContent = res.ok ? \`Saved \${out.scenarios.length} scenarios\` : out.error ?? 'Save failed';
   };
 
-  const tiers = {};
+  const seeds = {};
+  const drawPlayers = () => {
   document.getElementById('playerlist').innerHTML = data.players.length
     ? data.players.map((p) => {
         const rank = rankOf(p.elo);
@@ -1357,62 +1655,72 @@ async function renderGuild(guild) {
           ? \`<span class="rank" style="--c:\${h(rank.color)}"><span class="dot"></span>\${h(rank.name)}</span>\`
           : ''}</td>
         <td style="white-space:nowrap"><strong>\${p.elo}</strong></td>
-        <td style="white-space:nowrap">\${p.wins + p.losses
-          ? \`<span class="hint" title="tier only seeds a starting rating, and they have already played">\${h(p.tier)}</span>\`
-          : \`<div class="seg" data-id="\${h(p.discord_id)}" data-value="\${h(p.tier)}" role="radiogroup" aria-label="tier">\${
-              data.tiers.map((t) => \`<button type="button" role="radio" data-t="\${t}"
-                aria-checked="\${t === p.tier}">\${t}</button>\`).join('')}</div>\`}</td>
+        <td style="white-space:nowrap">\${seedMode !== 'staff'
+          ? \`<span class="hint">\${p.wins + p.losses ? '' : h(p.seeded_from ?? 'flat')}</span>\`
+          : p.wins + p.losses
+            ? '<span class="hint" title="they have played, so their record is their rating now">played</span>'
+            : selectField('sd-' + p.discord_id, data.ranks.map((r) => r.name),
+                seeds[p.discord_id] ?? p.seeded_from ?? '',
+                \`data-id="\${h(p.discord_id)}"\`)}</td>
       </tr>\`;
       }).join('')
     : '<tr><td class="hint">Nobody has played yet.</td></tr>';
-  // Four short, mutually exclusive values: a segmented control, not a popup.
-  // And only for players with no games - setTier refuses to reseed anyone else,
-  // so offering the control there would be a lie.
-  document.querySelectorAll('#playerlist .seg').forEach((seg) => {
-    seg.onclick = (e) => {
-      const b = e.target.closest('[data-t]');
-      if (!b) return;
-      seg.dataset.value = b.dataset.t;
-      tiers[seg.dataset.id] = b.dataset.t;
-      seg.querySelectorAll('[data-t]').forEach((n) => n.setAttribute('aria-checked', String(n === b)));
-    };
-  });
+  // Only offered to players with no games: seedPlayer refuses to move anyone
+  // else, so a control there would be a lie.
+  const scope = document.getElementById('playerlist');
+  wireSelects(scope);
+  scope.querySelectorAll('.sel').forEach((el) => (el.onchange = () => {
+    seeds[el.dataset.id] = el.dataset.value;
+  }));
+  };
+  drawPlayers();
+
   document.getElementById('savetiers').onclick = async () => {
     const el = document.getElementById('tierstatus');
-    const body = Object.entries(tiers).map(([discord_id, tier]) => ({ discord_id, tier }));
-    const res = await fetch(\`/api/guild/\${guild.id}/tiers\`, {
+    const body = Object.entries(seeds).map(([discord_id, rank]) => ({ discord_id, rank }));
+    const res = await fetch(\`/api/guild/\${guild.id}/seeds\`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ tiers: body }),
+      body: JSON.stringify({ seeds: body }),
     });
-    el.textContent = res.ok ? 'saved' : 'save failed';
+    el.textContent = res.ok ? 'Saved' : 'Save failed';
   };
 
   document.getElementById('save').onclick = async () => {
     const body = {
-      panel_channel_id: document.getElementById('panel').dataset.value || null,
-      results_channel_id: document.getElementById('results').dataset.value || null,
+      // off is 0, not null - null would hand the server back the default
+      call_ttl_min: document.getElementById('autocancel').checked
+        ? Number(document.getElementById('ttlmin').value)
+        : 0,
+      category_id: document.getElementById('category').dataset.value || null,
       ping_role_id: document.getElementById('ping').dataset.value || null,
     };
     const res = await fetch('/api/guild/' + guild.id, {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     });
-    status(res.ok ? 'saved' : 'save failed');
+    status(res.ok ? 'Saved' : 'Save failed');
   };
 
   document.getElementById('leavebtn').onclick = async () => {
     const el = document.getElementById('leavestatus');
-    // Typing the name, not an "are you sure" nobody reads. This deletes roles
-    // and channels in a live Discord server and there is no undo.
-    const typed = await ask('Type the server name to confirm', '');
-    if (typed === null) return;
-    if (typed !== guild.name) { el.textContent = "that isn't the server name"; return; }
-    el.textContent = 'removing…';
+    const purge = document.getElementById('purge').checked;
+    // This deletes roles and channels in a live Discord server and there is no
+    // undo, so the dialog spells out what goes and asks for the name.
+    const ok = await confirmDanger({
+      title: \`Remove Quorum from \${h(guild.name)}?\`,
+      body: purge
+        ? "Its rank roles, categories and channels are deleted with it, along with this server's settings. This cannot be undone."
+        : 'It leaves the server. The roles and channels it made stay behind, and it will not be able to delete them later.',
+      name: guild.name,
+      confirm: 'Remove Quorum',
+    });
+    if (!ok) return;
+    el.textContent = 'Removing…';
     const res = await fetch(\`/api/guild/\${guild.id}/leave\`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ purge: document.getElementById('purge').checked }),
+      body: JSON.stringify({ purge }),
     });
     if (!res.ok) {
-      el.textContent = (await res.json().catch(() => ({}))).error ?? 'failed';
+      el.textContent = (await res.json().catch(() => ({}))).error ?? 'Failed';
       return;
     }
     location.href = '/';
@@ -1422,7 +1730,7 @@ async function renderGuild(guild) {
     status('posting…');
     const res = await fetch(\`/api/guild/\${guild.id}/panel\`, { method: 'POST' });
     const out = await res.json().catch(() => ({}));
-    if (!res.ok) return status(out.error ?? 'failed');
+    if (!res.ok) return status(out.error ?? 'Failed');
     // split servers get one per rank per format, and "panel posted" would read
     // like it went to one channel. A refused channel is named, not swallowed -
     // it means the bot can't post there, and a silent one is a dead queue.
@@ -1431,7 +1739,7 @@ async function renderGuild(guild) {
         ? \`posted in \${out.posted}, refused by \${out.missed} - check the bot can send there\`
         : out.posted > 1
           ? \`panels posted in \${out.posted} channels\`
-          : 'panel posted',
+          : 'Panel posted',
     );
   };
 }

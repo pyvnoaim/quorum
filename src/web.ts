@@ -7,19 +7,19 @@ import {
   type Guild,
   type GuildBasedChannel,
 } from 'discord.js';
-import { FORMATS, PANEL_FORMATS, TIERS, guildAllowed, type Format, type Tier } from './config.js';
+import { FORMATS, PANEL_FORMATS, SEED_MODES, guildAllowed, type Format, type SeedMode } from './config.js';
 import {
   getConfig,
   getMatch,
-  getRankMode,
+  getSeedMode,
   getRankSpread,
   getRanks,
-  isSplit,
   rankChannels,
   getScenarios,
   guildStats,
   leaderboard,
   listOpenMatches,
+  matchHistory,
   playersInGuild,
   matchPlayers,
   getPlayer,
@@ -31,13 +31,14 @@ import {
   setVoltaic,
   setRanks,
   setScenarios,
-  setTier,
+  seedPlayer,
   type Match,
   type Player,
   type Rank,
   type RankChannels,
 } from './db.js';
 import { panelMessage } from './embeds.js';
+import { bandsInReach } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
 import { PAGE } from './page.js';
 
@@ -195,95 +196,159 @@ async function syncRankChannelsToDiscord(
   guild: Guild,
   ranks: Rank[],
   orphaned: Rank[],
-  split: boolean,
-  lockToRole: boolean,
-) {
+  teardown = false,
+): Promise<{ ok: boolean; error?: string }> {
+  const cfg = getConfig(guild.id);
+
+  // Everything a rank owns goes, whichever shape it was made in: `category` is
+  // from the old one-category-per-rank layout, everything else is a channel.
+  // Children first - deleting a Discord category does not delete what is inside
+  // it, it turns them loose at the root of the server.
   const drop = async (rank: Rank) => {
-    const { category, ...rest } = rankChannels(rank);
-    // children first: deleting a category in Discord does not delete what is
-    // inside it, it turns them loose at the root of the server.
-    for (const id of Object.values(rest)) {
+    const have = rankChannels(rank);
+    for (const [key, id] of Object.entries(have)) {
+      if (key === 'category') continue;
       await guild.channels.cache.get(id)?.delete().catch(() => {});
     }
-    if (category) await guild.channels.cache.get(category)?.delete().catch(() => {});
+    if (have.category) await guild.channels.cache.get(have.category)?.delete().catch(() => {});
     setRankChannels(rank.id, {});
   };
 
   for (const gone of orphaned) await drop(gone);
-  if (!split) {
+
+  if (teardown) {
     for (const rank of ranks) await drop(rank);
-    return;
+    if (cfg.split_results_id) {
+      await guild.channels.cache.get(cfg.split_results_id)?.delete().catch(() => {});
+    }
+    if (cfg.split_category_id) {
+      await guild.channels.cache.get(cfg.split_category_id)?.delete().catch(() => {});
+    }
+    setConfig(guild.id, { split_category_id: null, split_results_id: null });
+    return { ok: true };
+  }
+  if (!ranks.length) return { ok: true };
+
+  // Nothing is built until every rank has its Discord role. The channels are
+  // locked to those roles, so making them first would either publish a wall of
+  // channels to the whole server or leave them locked to nothing - and the
+  // panel in each is a message everyone in it gets pinged by. Roles first,
+  // then channels, then panels.
+  const roleless = ranks.filter((r) => !r.discord_role_id);
+  if (roleless.length) {
+    return {
+      ok: false,
+      error: `save the ladder first - ${roleless.map((r) => r.name).join(', ')} ${
+        roleless.length === 1 ? 'has' : 'have'
+      } no Discord role yet`,
+    };
   }
 
+  // The bot names itself in the overwrite. Denying @everyone would hide the
+  // channel from the bot too, and a channel the bot cannot see is one it cannot
+  // put a panel in - or find again to delete when the rank goes, which is how a
+  // server ends up with the old ladder's channels beside the new one's.
+  const open = [{ id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel] }];
+
+  // A rank channel is private to its rank. The bot names itself in the deny, or
+  // it loses sight of a channel it still has to post panels in and delete later.
+  const me = guild.members.me?.id;
+  const onlyRank = (roleIds: string[]) => [
+    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+    ...roleIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel] })),
+    ...(me
+      ? [
+          {
+            id: me,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ManageChannels,
+            ],
+          },
+        ]
+      : []),
+  ];
+
+  // One category for the whole thing, whichever the server picked - or one of
+  // ours if they picked none. Seven categories, one per rank, buried the
+  // server's own channels under a wall of Quorum.
+  const picked = cfg.split_category_id
+    ? guild.channels.cache.get(cfg.split_category_id)
+    : undefined;
+  const category =
+    (picked && picked.type === ChannelType.GuildCategory ? picked : null) ||
+    (await guild.channels
+      .create({ name: 'Quorum', type: ChannelType.GuildCategory, permissionOverwrites: open })
+      .catch(() => null));
+  if (!category) return { ok: false, error: 'could not create the Quorum category' };
+
+  // One results channel, first in the category: every rank's results land here,
+  // because a ladder is only a ladder if the whole server can read it.
+  const results =
+    (cfg.split_results_id && guild.channels.cache.get(cfg.split_results_id)) ||
+    (await guild.channels
+      .create({ name: 'results', type: ChannelType.GuildText, parent: category.id })
+      .catch(() => null));
+  if (results && 'parentId' in results && results.parentId !== category.id) {
+    await results.edit({ parent: category.id, lockPermissions: true }).catch(() => {});
+  }
+  setConfig(guild.id, {
+    split_category_id: category.id,
+    split_results_id: results?.id ?? null,
+  });
+
+  // One channel per rank, holding one panel with every format's button: the
+  // channel is the rank, the buttons are the format. A channel per rank PER
+  // format split a pick-up queue too many ways to ever fill.
   for (const rank of ranks) {
     const have = rankChannels(rank);
-    const next: RankChannels = {};
+    const name = slug(rank.name);
 
-    // Children inherit the category, so the lock is set once, here.
-    //
-    // The bot names itself in the lock. Denying @everyone hides the channel
-    // from the bot too unless it is granted back, and a channel the bot cannot
-    // see is one it cannot put a panel in - or find again to delete when the
-    // rank goes, which is how a server ends up with the old ladder's channels
-    // sitting next to the new one's.
-    const me = guild.members.me?.id;
-    const locked =
-      lockToRole && rank.discord_role_id
-        ? [
-            { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-            { id: rank.discord_role_id, allow: [PermissionFlagsBits.ViewChannel] },
-            ...(me
-              ? [
-                  {
-                    id: me,
-                    allow: [
-                      PermissionFlagsBits.ViewChannel,
-                      PermissionFlagsBits.SendMessages,
-                      PermissionFlagsBits.ManageChannels,
-                    ],
-                  },
-                ]
-              : []),
-          ]
-        : [{ id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel] }];
+    // anything from the old shape that is not the rank's one queue channel
+    for (const [key, id] of Object.entries(have)) {
+      if (key === 'queue') continue;
+      await guild.channels.cache.get(id)?.delete().catch(() => {});
+    }
 
-    const category =
-      (have.category && guild.channels.cache.get(have.category)) ||
-      (await guild.channels
-        .create({ name: rank.name, type: ChannelType.GuildCategory, permissionOverwrites: locked })
-        .catch(() => null));
-    if (!category) continue;
-    await category
-      .edit({ name: rank.name, permissionOverwrites: locked })
-      .catch(() => {});
-    next.category = category.id;
-
-    const kinds = [...(Object.keys(FORMATS) as Format[]), 'results' as const];
-    for (const kind of kinds) {
-      const name = `${slug(rank.name)}-${kind}`;
-      const existing = have[kind] && guild.channels.cache.get(have[kind]!);
-      if (existing) {
-        if (existing.name !== name || existing.parentId !== category.id) {
-          // lockPermissions re-inherits from the category, which is where the
-          // lock lives - so a mode change reaches the children too.
-          await existing.edit({ name, parent: category.id, lockPermissions: true }).catch(() => {});
-        }
-        next[kind] = existing.id;
-        continue;
-      }
-      const made = await guild.channels
-        .create({ name, type: ChannelType.GuildText, parent: category.id })
-        .catch(() => null);
-      if (!made) continue;
-      next[kind] = made.id;
-      // a queue channel is useless without its panel, and this is the only
-      // moment we know the channel is new.
-      if (kind !== 'results' && made.isSendable()) {
-        await made.send(panelMessage([kind])).catch(() => {});
+    // Every role this channel's queue can admit, not just its own rank: the
+    // admin already said who queues with whom, per format, in the queues pane -
+    // so the widest spread across the formats decides who can see it. The join
+    // gate is still per format, so a Platinum who can see #diamond joins the
+    // 2v2 there and is turned away from the 1v1.
+    const admits = new Set<string>();
+    for (const spread of Object.values(getRankSpread(guild.id))) {
+      for (const band of bandsInReach(ranks, rank.min_elo, spread)) {
+        if (band.discord_role_id) admits.add(band.discord_role_id);
       }
     }
-    setRankChannels(rank.id, next);
+    const perms = onlyRank([...admits]);
+    const existing = have.queue && guild.channels.cache.get(have.queue);
+    if (existing) {
+      // re-applied every sync: a renamed or recoloured rank keeps its channel,
+      // and a rank whose role was recreated needs the new id in the overwrite.
+      await existing
+        .edit({ name, parent: category.id, permissionOverwrites: perms })
+        .catch(() => {});
+      setRankChannels(rank.id, { queue: existing.id });
+      continue;
+    }
+
+    const made = await guild.channels
+      .create({
+        name,
+        type: ChannelType.GuildText,
+        parent: category.id,
+        permissionOverwrites: perms,
+      })
+      .catch(() => null);
+    if (!made) continue;
+    setRankChannels(rank.id, { queue: made.id });
+    // a queue channel is useless without its panel, and this is the only moment
+    // we know the channel is new.
+    if (made.isSendable()) await made.send(panelMessage()).catch(() => {});
   }
+  return { ok: true };
 }
 
 /** Puts a panel at the bottom of a channel, taking any older one with it.
@@ -320,6 +385,10 @@ async function postPanel(channel: GuildBasedChannel | undefined, formats: readon
 interface Hooks {
   concludeMatch: (match: Match) => Promise<void>;
   cancelMatch: (match: Match) => Promise<void>;
+  /** Put these players in the rank role their rating earns. Seeding calls it so
+   *  a staff-seeded player holds their role before their first match - which is
+   *  what makes locking a rank channel to its role safe. */
+  syncRankRoles: (guildId: string, discordIds: string[]) => Promise<void>;
 }
 
 export function startWeb(client: Client, hooks: Hooks) {
@@ -540,13 +609,37 @@ export function startWeb(client: Client, hooks: Hooks) {
             avatar: client.users.cache.get(p.discord_id)?.avatar ?? null,
             voltaic: readVoltaic(p.voltaic),
           })),
-          tiers: TIERS,
           formats: Object.keys(FORMATS),
           spread: getRankSpread(guildId),
-          split: isSplit(guildId),
-          mode: getRankMode(guildId),
+          categories: guild.channels.cache
+            .filter((c) => c.type === ChannelType.GuildCategory)
+            .map((c) => ({ id: c.id, name: c.name })),
+          seedMode: getSeedMode(guildId),
+          seedModes: SEED_MODES,
           stats: guildStats(guildId),
-          top: leaderboard(guildId, 5),
+          top: leaderboard(guildId, 5).map((p) => ({ ...p, voltaic: readVoltaic(p.voltaic) })),
+          // One line per finished match: who played, where they placed, what it
+          // cost them. Trimmed here because the page shows nothing else.
+          history: matchHistory(guildId, 25).map(({ match, players }) => {
+            const played: string[] = JSON.parse(match.scenarios);
+            const pool: string[] = match.ban_pool ? JSON.parse(match.ban_pool) : [];
+            return {
+              id: match.id,
+              format: match.format,
+              ended_at: match.ended_at,
+              played,
+              // What is in the pool but not in the end is exactly what was
+              // banned. Empty for group and for any match that never had a
+              // ban phase to record.
+              banned: pool.filter((s) => !played.includes(s)),
+              players: players.map((r) => ({
+                name: r.kovaaks_username,
+                placing: r.placing,
+                delta: (r.elo_after ?? 0) - (r.elo_before ?? 0),
+                scores: JSON.parse(r.scores) as Record<string, number | null>,
+              })),
+            };
+          }),
           matches: listOpenMatches(guildId).map((m) => ({
             id: m.id,
             format: m.format,
@@ -570,19 +663,40 @@ export function startWeb(client: Client, hooks: Hooks) {
       if (!action && req.method === 'PUT') {
         const body = await readJson(req);
         // Against this guild's own caches, not just the shape of a snowflake:
-        // results_channel_id is fetched by id when a match ends, so a well-formed
-        // id from another server would post this server's results into it.
-        const chan = (v: unknown) => (typeof v === 'string' && guild.channels.cache.has(v) ? v : null);
+        // the category is created into and fetched by id, so a well-formed id
+        // from another server would hang this server's channels off it.
+        const category = (v: unknown) =>
+          typeof v === 'string' &&
+          guild.channels.cache.get(v)?.type === ChannelType.GuildCategory
+            ? v
+            : null;
         const role = (v: unknown) => (typeof v === 'string' && guild.roles.cache.has(v) ? v : null);
-        json(
-          res,
-          200,
-          setConfig(guildId, {
-            panel_channel_id: chan(body.panel_channel_id),
-            results_channel_id: chan(body.results_channel_id),
-            ping_role_id: role(body.ping_role_id),
-          }),
-        );
+        const ttl = (v: unknown) => {
+          if (v == null) return null;
+          const n = Math.round(Number(v));
+          if (!Number.isFinite(n) || n <= 0) return 0;
+          return Math.min(Math.max(n, 5), 1440);
+        };
+        setConfig(guildId, {
+          // Naming no category keeps the one already in use, and only falls
+          // through to null - "make one" - when there is none, or when the one
+          // on file has since been deleted in Discord. Taking the body at its
+          // word would orphan the current category and build a second one on
+          // every save.
+          split_category_id:
+            category(body.category_id) ?? category(getConfig(guildId).split_category_id),
+          ping_role_id: role(body.ping_role_id),
+          // 0 is off and null is "use the default", so both have to survive the
+          // trip. Anything else is clamped: a one-minute window bins calls
+          // before anyone sees them, and a one-year one is off with extra steps.
+          call_ttl_min: ttl(body.call_ttl_min),
+        });
+        // A different category means the channels move into it, so the save has
+        // to reach Discord and not just the database. Awaited, so a failure is
+        // reported rather than swallowed into a background promise, and so two
+        // saves in a row cannot have their syncs interleave.
+        const built = await syncRankChannelsToDiscord(guild, getRanks(guildId), []);
+        json(res, 200, { ...getConfig(guildId), error: built.error });
         return;
       }
 
@@ -608,43 +722,21 @@ export function startWeb(client: Client, hooks: Hooks) {
           return;
         }
         const { ranks, orphaned } = setRanks(guildId, clean);
+        // Roles first, always: the channels below are locked to them.
         await syncRankRolesToDiscord(guild, ranks, orphaned);
-        await syncRankChannelsToDiscord(
-          guild,
-          getRanks(guildId),
-          orphaned,
-          isSplit(guildId),
-          getRankMode(guildId) === 'manual',
-        );
-        json(res, 200, { ranks: getRanks(guildId) });
+        const built = await syncRankChannelsToDiscord(guild, getRanks(guildId), orphaned);
+        json(res, 200, { ranks: getRanks(guildId), error: built.error });
         return;
       }
 
-      if (action === '/mode' && req.method === 'POST') {
-        const body = await readJson(req);
-        const manual = body.mode === 'manual';
-        setConfig(guildId, { rank_mode: manual ? 'manual' : 'auto' });
-        // Roles must exist for staff to hand out either way; only the locking
-        // of any split channels changes with the mode.
-        await syncRankChannelsToDiscord(guild, getRanks(guildId), [], isSplit(guildId), manual);
-        json(res, 200, { mode: manual ? 'manual' : 'auto' });
-        return;
-      }
-
-      if (action === '/split' && req.method === 'POST') {
-        const body = await readJson(req);
-        const on = !!body.on;
-        setConfig(guildId, { split_channels: on ? 1 : 0 });
-        // Turning it off deletes the channels it made. Everything it created is
-        // tracked, so nothing else in the server is touched.
-        await syncRankChannelsToDiscord(
-          guild,
-          getRanks(guildId),
-          [],
-          on,
-          getRankMode(guildId) === 'manual',
-        );
-        json(res, 200, { split: on, ranks: getRanks(guildId) });
+      if (action === '/seedmode' && req.method === 'POST') {
+        const mode = String((await readJson(req)).mode ?? '') as SeedMode;
+        if (!SEED_MODES.includes(mode)) {
+          json(res, 400, { error: 'unknown seed mode' });
+          return;
+        }
+        setConfig(guildId, { seed_mode: mode });
+        json(res, 200, { mode });
         return;
       }
 
@@ -684,36 +776,39 @@ export function startWeb(client: Client, hooks: Hooks) {
         return;
       }
 
-      if (action === '/tiers' && req.method === 'PUT') {
+      if (action === '/seeds' && req.method === 'PUT') {
         const body = await readJson(req);
-        // setTier reseeds the rating of anyone who hasn't played, so an id from
-        // the request is not enough - it has to be someone this server has.
+        // seedPlayer rewrites the rating of anyone who has not played, so an id
+        // from the request is not enough - it has to be someone this server has.
         const mine = new Set(playersInGuild(guildId).map((p) => p.discord_id));
-        for (const row of Array.isArray(body.tiers) ? body.tiers : []) {
+        const ranks = getRanks(guildId);
+        const moved: string[] = [];
+        for (const row of Array.isArray(body.seeds) ? body.seeds : []) {
           const id = String(row.discord_id ?? '');
-          const tier = String(row.tier ?? '') as Tier;
-          if (mine.has(id) && TIERS.includes(tier)) setTier(id, tier);
+          const rank = ranks.find((r) => r.name === String(row.rank ?? ''));
+          if (mine.has(id) && rank && seedPlayer(id, rank.min_elo, rank.name)) moved.push(id);
         }
+        // Hand out the roles now rather than after their first match: a rank
+        // channel is private to its role, so a seeded player who holds none
+        // would be seeded into a queue they cannot see.
+        if (moved.length) await hooks.syncRankRoles(guildId, moved);
         json(res, 200, { players: playersInGuild(guildId) });
         return;
       }
 
       if (action === '/panel' && req.method === 'POST') {
-        // A split server's queues live in a channel per rank per format, each
-        // with its own one-format panel - and those were only ever posted the
-        // moment the channel was created, so a deleted one had no way back.
-        // One button, every queue channel the server actually has.
-        if (isSplit(guildId)) {
+        // Queues live in a channel per rank, each with the same panel - and
+        // those were only ever posted the moment the channel was created, so a
+        // deleted one had no way back. One button, every queue channel the
+        // server actually has.
+        {
           let posted = 0;
           let missed = 0;
           for (const rank of getRanks(guildId)) {
-            const channels = rankChannels(rank);
-            for (const format of Object.keys(FORMATS) as Format[]) {
-              const id = channels[format];
-              if (!id) continue;
-              if (await postPanel(guild.channels.cache.get(id), [format])) posted++;
-              else missed++;
-            }
+            const id = rankChannels(rank).queue;
+            if (!id) continue;
+            if (await postPanel(guild.channels.cache.get(id), PANEL_FORMATS)) posted++;
+            else missed++;
           }
           if (!posted && !missed) {
             json(res, 400, { error: 'no rank channels yet - save the ladder first' });
@@ -722,14 +817,6 @@ export function startWeb(client: Client, hooks: Hooks) {
           json(res, 200, { ok: true, posted, missed });
           return;
         }
-        const channelId = getConfig(guildId).panel_channel_id;
-        const channel = channelId ? guild.channels.cache.get(channelId) : undefined;
-        if (!(await postPanel(channel, PANEL_FORMATS))) {
-          json(res, 400, { error: 'pick and save a queue channel first' });
-          return;
-        }
-        json(res, 200, { ok: true, posted: 1 });
-        return;
       }
 
       // Quorum leaves, optionally taking everything it made with it.
@@ -746,12 +833,10 @@ export function startWeb(client: Client, hooks: Hooks) {
           // neither of which the rank sweep below knows anything about.
           for (const open of listOpenMatches(guildId)) await hooks.cancelMatch(open);
           const ranks = getRanks(guildId);
-          await syncRankChannelsToDiscord(guild, [], ranks, false, false);
+          await syncRankChannelsToDiscord(guild, [], ranks, true);
           await syncRankRolesToDiscord(guild, [], ranks);
-          // A panel outlives the bot as a message with buttons that answer
-          // nobody. Split channels are gone wholesale, so this is the shared one.
-          const panel = getConfig(guildId).panel_channel_id;
-          await clearPanels(panel ? guild.channels.cache.get(panel) : undefined);
+          // Every channel holding a panel was Quorum's own and went with the
+          // category above, so there is no stray panel left to chase.
           purgeGuild(guildId);
         }
         const left = await guild.leave().then(() => true).catch(() => false);

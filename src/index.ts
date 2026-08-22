@@ -21,9 +21,9 @@ import {
   MATCH_TTL_MS,
   ROUNDS,
   TICK_MS,
-  TIERS,
+  BASE_ELO,
+  VOLTAIC_SEED,
   type Format,
-  type Tier,
 } from './config.js';
 import {
   db,
@@ -31,26 +31,23 @@ import {
   getConfig,
   getMatch,
   getPlayer,
-  getRankMode,
+  getSeedMode,
   getRankSpread,
   getRanks,
-  isSplit,
-  rankChannels,
   getScenarios,
   leaderboard,
   matchPlayers,
-  setTier,
+  seedPlayer,
   type Match,
   type MatchPlayer,
 } from './db.js';
-import { banEmbed, liveEmbed, openEmbed, resultsEmbed } from './embeds.js';
+import { banEmbed, liveEmbed, noContestEmbed, openEmbed, resultsEmbed } from './embeds.js';
 import { startWeb } from './web.js';
-import { kovaaksAccountForDiscordId, scoreInWindow } from './kovaaks.js';
+import { kovaaksAccountForDiscordId, scoreInWindow, voltaicS5 } from './kovaaks.js';
 import {
   bandsInReach,
   banTurn,
   canPlay,
-  divisionFor,
   eloDeltas,
   placings,
   rankFor,
@@ -89,15 +86,11 @@ const command = new SlashCommandBuilder()
   .addSubcommand((s) => s.setName('leaderboard').setDescription('show the ladder'))
   .addSubcommand((s) =>
     s
-      .setName('tier')
-      .setDescription('set a player’s tier (staff)')
+      .setName('seed')
+      .setDescription('set where a player rating starts (staff)')
       .addUserOption((o) => o.setName('player').setDescription('who').setRequired(true))
       .addStringOption((o) =>
-        o
-          .setName('tier')
-          .setDescription('their bracket')
-          .setRequired(true)
-          .addChoices(...TIERS.map((t) => ({ name: t, value: t }))),
+        o.setName('rank').setDescription('the rank to start them at').setRequired(true),
       ),
   );
 
@@ -191,22 +184,23 @@ function render(match: Match) {
   };
 }
 
-/** Where a finished match's result belongs when the server runs a channel per
- *  rank. Everyone in a split queue is the same rank (the gate is forced to 0),
- *  so the first player decides it. */
-function splitResultsChannel(match: Match) {
-  if (!isSplit(match.guild_id)) return null;
-  const ranks = getRanks(match.guild_id);
-  // The call already knows its division in manual mode. Otherwise everyone in
-  // it is the same rank (the gate is forced to 0), so the first player decides.
-  const rank = match.division_role_id
-    ? ranks.find((r) => r.discord_role_id === match.division_role_id)
-    : (() => {
-        const first = matchPlayers(match.id)[0];
-        const player = first && getPlayer(first.discord_id);
-        return player ? rankFor(ranks, player.elo) : undefined;
-      })();
-  return rank ? (rankChannels(rank).results ?? null) : null;
+/** Where a brand new player's rating starts, per the server's setting.
+ *
+ *  Only ever the FIRST rating: ensurePlayer never touches the Elo of someone it
+ *  has seen before, so nothing here can rewrite a record. 'staff' seeds flat
+ *  and waits - staff move them from the players pane before they play - and
+ *  'voltaic' falls back to flat when there is no S5 entry to read, which is
+ *  most people. */
+async function seedFor(discordId: string, guildId: string, steamId: string | null) {
+  // Nothing to work out for someone already on the books - ensurePlayer would
+  // ignore the answer, and asking the benchmark index anyway would put a second
+  // network round trip in front of every single button press.
+  if (getPlayer(discordId)) return undefined;
+  const mode = getSeedMode(guildId);
+  if (mode !== 'voltaic' || !steamId) return { elo: BASE_ELO, from: mode };
+  const s5 = await voltaicS5(steamId);
+  const seed = s5 ? VOLTAIC_SEED[s5.rank] : undefined;
+  return s5 && seed ? { elo: seed, from: `Voltaic ${s5.rank}` } : { elo: BASE_ELO, from: 'flat' };
 }
 
 /** A private thread per match, holding exactly its players, deleted when the
@@ -277,7 +271,13 @@ async function startMatch(guild: Guild, match: Match) {
   if (match.format === 'group' || pool.length < BAN_POOL) {
     return moveIntoThread(beginPlay(getMatch(match.id)!, rollScenarios(guild.id)));
   }
-  db.prepare('update match set scenarios = ? where id = ?').run(JSON.stringify(pool), match.id);
+  // ban_pool is written once and never touched again - `scenarios` is what the
+  // bans eat into, so this is the only record of what was on the table.
+  db.prepare('update match set scenarios = ?, ban_pool = ? where id = ?').run(
+    JSON.stringify(pool),
+    JSON.stringify(pool),
+    match.id,
+  );
   return moveIntoThread(getMatch(match.id)!);
 }
 
@@ -373,13 +373,24 @@ async function finishMatch(match: Match) {
   await refreshScores(done);
 
   const rows = matchPlayers(done.id);
+  const scenarios: string[] = JSON.parse(done.scenarios);
   const entrants = rows.map((r) => ({
     id: r.discord_id,
     elo: getPlayer(r.discord_id)!.elo,
     team: r.team,
     scores: JSON.parse(r.scores) as Record<string, number | null>,
   }));
-  const placing = placings(entrants, JSON.parse(done.scenarios));
+
+  // Nobody ran a single scenario, so there is nothing to score. Not-played
+  // counts as 0, every side ties at 0, and a tie shares the better placing -
+  // which would hand a win to everyone in a match that never happened.
+  // A no-contest is its own end state: no Elo, no W/L, and not a played match.
+  if (!entrants.some((e) => scenarios.some((s) => e.scores[s] != null))) {
+    db.prepare("update match set status = 'void' where id = ?").run(done.id);
+    return { match: getMatch(done.id)!, deltas: new Map<string, number>(), voided: true };
+  }
+
+  const placing = placings(entrants, scenarios);
   const deltas = eloDeltas(entrants, placing);
 
   for (const entrant of entrants) {
@@ -398,17 +409,14 @@ async function finishMatch(match: Match) {
 
   // The thread outlives this on purpose - concludeMatch still has to reach the
   // match message inside it if the result can't be posted anywhere else.
-  return { match: getMatch(done.id)!, deltas };
+  return { match: getMatch(done.id)!, deltas, voided: false };
 }
 
 /** One PATCH per member: keep every role that isn't a rank role, add the one
  *  they've earned. Never roles.set([rankRole]) - that would strip everything
  *  else they hold. */
 async function syncRankRoles(guildId: string, discordIds: string[]) {
-  // Manual mode means staff own division membership. The bot reassigning roles
-  // off Elo here would quietly undo their work after every match, which is the
-  // whole thing that mode exists to prevent.
-  if (getRankMode(guildId) === 'manual') return;
+
   const guild = client.guilds.cache.get(guildId);
   if (!guild) return;
   const ranks = getRanks(guildId).filter((r) => r.discord_role_id);
@@ -456,15 +464,18 @@ async function concludeMatch(match: Match) {
   const finished = await finishMatch(match);
   // somebody else already scored it
   if (!finished) return;
-  const { match: done, deltas } = finished;
+  const { match: done, deltas, voided } = finished;
   const rows = matchPlayers(done.id);
   const players = new Map(rows.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
-  const embed = resultsEmbed(done, rows, players, deltas);
+  const embed = voided ? noContestEmbed(done, rows) : resultsEmbed(done, rows, players, deltas);
 
-  // Split servers post a result in its own rank's results channel; everyone
-  // else has one. Falling back to the call's own channel either way means a
-  // result is never lost to a deleted or misconfigured target.
-  const channelId = splitResultsChannel(done) ?? getConfig(done.guild_id).results_channel_id ?? done.channel_id;
+  // One channel for every result, whatever the queues are split into. Split
+  // mode makes its own inside the Quorum category and uses that; the server's
+  // own choice is left alone so it comes back when the mode goes off. Falling
+  // back to the call's channel means a result is never lost to a deleted or
+  // misconfigured target.
+  const cfg = getConfig(done.guild_id);
+  const channelId = cfg.split_results_id ?? done.channel_id;
   const channel = await client.channels.fetch(channelId).catch(() => null);
   const posted = channel?.isSendable() ? await channel.send({ embeds: [embed] }).catch(() => null) : null;
 
@@ -484,7 +495,7 @@ async function concludeMatch(match: Match) {
     // sitting in the queue channel.
     if (!done.thread_id) await msg?.delete().catch(() => {});
   }
-  await syncRankRoles(done.guild_id, rows.map((r) => r.discord_id));
+  if (!voided) await syncRankRoles(done.guild_id, rows.map((r) => r.discord_id));
 }
 
 function activeMatchFor(discordId: string, guildId: string) {
@@ -497,12 +508,23 @@ function activeMatchFor(discordId: string, guildId: string) {
     .get(discordId, guildId) as Match | undefined;
 }
 
-/** An open call nobody took in an hour is stale - drop it and delete its
- *  message, so the queue channel only ever shows calls that are actually live. */
+/** An open call nobody took is stale - drop it and delete its message, so the
+ *  queue channel only ever shows calls that are actually live.
+ *
+ *  How long that takes is the server's call, so the cutoff cannot be one
+ *  subtraction in the query any more: every open call is read and measured
+ *  against its OWN guild's window. A guild that has turned it off keeps its
+ *  calls up until someone takes or cancels them. */
 async function expireStaleCalls() {
-  const stale = db
-    .prepare("select * from match where status = 'lobby' and created_at < ?")
-    .all(Date.now() - CALL_TTL_MS) as unknown as Match[];
+  const open = db
+    .prepare("select * from match where status = 'lobby'")
+    .all() as unknown as Match[];
+  const stale = open.filter((m) => {
+    const set = getConfig(m.guild_id).call_ttl_min;
+    if (set === 0) return false;
+    const ttl = set == null ? CALL_TTL_MS : set * 60 * 1000;
+    return m.created_at < Date.now() - ttl;
+  });
   for (const match of stale) {
     db.prepare("update match set status = 'cancelled' where id = ?").run(match.id);
     if (!match.message_id) continue;
@@ -560,7 +582,7 @@ client.on('guildCreate', (guild) => void leaveIfNotAllowed(guild).catch(console.
 client.once('clientReady', async (c) => {
   for (const guild of c.guilds.cache.values()) await leaveIfNotAllowed(guild);
   await c.application.commands.set([command.toJSON()]);
-  startWeb(c, { concludeMatch, cancelMatch });
+  startWeb(c, { concludeMatch, cancelMatch, syncRankRoles });
   setInterval(() => void tick().catch(console.error), TICK_MS).unref();
   console.log(`ready as ${c.user.tag}`);
 });
@@ -621,28 +643,53 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
           .setTitle(p.kovaaks_username)
           .setColor(0x5865f2)
           .setDescription(
-            `**${p.elo}** ${rankName(getRanks(i.guildId!), p.elo)} · ${p.tier} tier\n${p.wins}W ${p.losses}L${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
+            `**${p.elo}** ${rankName(getRanks(i.guildId!), p.elo)}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
           ),
       ],
     });
     return;
   }
 
-  if (sub === 'tier') {
+  if (sub === 'seed') {
     if (!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
       await i.reply({ content: 'Staff only.', flags: MessageFlags.Ephemeral });
       return;
     }
     const target = i.options.getUser('player', true);
-    const tier = i.options.getString('tier', true) as Tier;
+    const wanted = i.options.getString('rank', true).trim().toLowerCase();
+    const ranks = getRanks(i.guildId!);
+    const rank = ranks.find((r) => r.name.toLowerCase() === wanted);
+    if (!rank) {
+      await i.reply({
+        content: `No rank called that. This server has: ${ranks.map((r) => r.name).join(', ')}.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     const account = await kovaaksAccountForDiscordId(target.id);
     if (account.kind !== 'found') {
       await i.reply({ content: lookupError(account.kind), flags: MessageFlags.Ephemeral });
       return;
     }
-    ensurePlayer(target.id, account.username, account.steamId, tier);
-    setTier(target.id, tier);
-    await i.reply(`<@${target.id}> is now **${tier}** tier.`);
+    ensurePlayer(target.id, account.username, account.steamId, {
+      elo: rank.min_elo,
+      from: rank.name,
+    });
+    // Seeding an existing player only lands while they are unplayed. Saying so
+    // beats appearing to work and changing nothing.
+    if (!seedPlayer(target.id, rank.min_elo, rank.name)) {
+      const p = getPlayer(target.id);
+      await i.reply({
+        content: `<@${target.id}> has already played (${p?.wins ?? 0}W ${p?.losses ?? 0}L), so their rating is their own now.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    // Their role now, not after their first match: a split server's rank
+    // channel is private to its role, so a seeded player holding none would be
+    // seeded into a queue they cannot see.
+    await syncRankRoles(i.guildId!, [target.id]);
+    await i.reply(`<@${target.id}> starts at **${rank.min_elo}** (${rank.name}).`);
     return;
   }
 
@@ -818,34 +865,21 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
     await i.reply({ content: lookupError(account.kind), flags: MessageFlags.Ephemeral });
     return;
   }
-  const opener = ensurePlayer(i.user.id, account.username, account.steamId);
+  const opener = ensurePlayer(
+    i.user.id,
+    account.username,
+    account.steamId,
+    await seedFor(i.user.id, i.guildId, account.steamId),
+  );
 
   const ranks = getRanks(i.guildId);
-  // In manual mode the division is whatever role staff gave them, resolved once
-  // here: a role change mid-lobby must not move the goalposts under people who
-  // already joined.
-  let division: string | null = null;
-  if (getRankMode(i.guildId) === 'manual') {
-    const held = divisionFor(ranks, i.member?.roles instanceof Object && 'cache' in i.member.roles
-      ? i.member.roles.cache.keys()
-      : []);
-    if (!held) {
-      await i.reply({
-        content:
-          'You have no division role yet, so there is no queue you belong to. Ask staff to give you one.',
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-    division = held.discord_role_id!;
-  }
 
   const { lastInsertRowid } = db
     .prepare(
-      `insert into match (guild_id, channel_id, host_id, format, created_at, division_role_id)
-       values (?, ?, ?, ?, ?, ?)`,
+      `insert into match (guild_id, channel_id, host_id, format, created_at)
+       values (?, ?, ?, ?, ?)`,
     )
-    .run(i.guildId, i.channelId, i.user.id, format, Date.now(), division);
+    .run(i.guildId, i.channelId, i.user.id, format, Date.now());
   const matchId = Number(lastInsertRowid);
   db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(
     matchId,
@@ -855,11 +889,9 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   // Ping the bands this queue would actually admit, rather than everyone. That
   // is the whole reason not to split the queue into a channel per rank: the
   // notification is targeted, the pool of takers stays whole.
-  const reach = division
-    ? [division]
-    : bandsInReach(ranks, opener.elo, getRankSpread(i.guildId)[format])
-        .map((r) => r.discord_role_id)
-        .filter((id): id is string => !!id);
+  const reach = bandsInReach(ranks, opener.elo, getRankSpread(i.guildId)[format])
+    .map((r) => r.discord_role_id)
+    .filter((id): id is string => !!id);
   // the configured role is an opt-in "tell me about every call", on top.
   const always = getConfig(i.guildId).ping_role_id;
   const mentions = [...new Set([...(always ? [always] : []), ...reach])];

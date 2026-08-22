@@ -24,7 +24,7 @@ Needs Node 22+ (`node:sqlite` is stdlib, hence `--experimental-sqlite` in the
 scripts; the flag goes away on Node 24). State lives in `pug.db` next to the
 process - back that file up, it's the whole ladder.
 
-`npm test` runs the self-checks (rating maths, ranks/pool/tiers).
+`npm test` runs the self-checks (rating maths, ranks/pool/seeding).
 
 ### In Docker
 
@@ -114,18 +114,19 @@ Open `WEB_URL` in a browser and sign in with Discord. You get the servers where
 you have **Manage Server** - the same bar Discord uses for adding a bot. Servers
 without the bot link straight to the invite; the rest open a settings page:
 
-- **Queue channel** - where the panel and open calls live
-- **Results channel** - where finished matches get posted
+- **Category** - the Discord category Quorum fills with a results channel and
+  one queue channel per rank. Pick an existing one or let it make a `Quorum`
+- **Auto-cancel** - how long an untaken call stays up, or off entirely
 - **Extra ping role** - for people who want notifying about every call. The
   ranks a call can actually admit are pinged automatically
 - **Ranks** - add, remove, rename, recolour and set the threshold of every rank.
   Each one becomes a real Discord role, created and kept in sync by the bot
 - **Scenario pool** - categories you add and remove, each holding scenarios
   picked from a live KovaaK's search, so a name can never be a typo
-- **Queues** - how many rank bands apart a queue lets people be, per format,
-  and whether to run **a channel per rank** (below)
-- **Players** - Elo, rank, Voltaic S5 standing, and the tier of anyone who
-  hasn't played yet
+- **Queues** - how many rank bands apart a queue lets people be, per format.
+  This also decides who can *see* each rank channel (below)
+- **Players** - Elo, rank, Voltaic S5 standing, and the starting rank of
+  anyone who hasn't played yet
 - **Overview** - the server's numbers and what is still unconfigured
 - **Remove Quorum** - at the foot of the setup pane, with a tickbox to take its
   roles, categories and channels with it. Use this rather than kicking the bot:
@@ -148,71 +149,68 @@ it Administrator.**
 If the bot was invited before this was fixed it is still holding the old, wrong
 set: re-run the invite from the dashboard, which updates the role in place.
 
-## Who decides a division
+## Division roles
 
-Set on the ranks pane, and it changes who owns the roles.
+Quorum owns them. It hands them out and moves people between them as ratings
+cross the thresholds, so nobody has to keep a server's roles in step by hand.
+Where a rating *starts* is the one thing a server chooses - see
+[Where a rating starts](#where-a-rating-starts).
 
-**By rating** (the default). Quorum hands out the division roles itself as
-people cross the thresholds, and a queue admits whatever the queues pane allows.
+## Channels
 
-**By staff.** You give out the division roles by hand and Quorum never touches
-them - no reassignment after a match, no promotion behind your back. You queue
-with the role you hold: no role, no queue, and the bot says to ask staff. The
-Elo thresholds are ignored (the dashboard greys them out), though ratings and
-the ladder carry on exactly as before. A call is open only to the division its
-opener was in, resolved once when the call goes up so a role change mid-lobby
-cannot move the goalposts under people already in it. Holding two division
-roles resolves to the highest, so a promotion works before staff strip the old
-one.
+Quorum keeps one category - the one you pick in setup, or a `Quorum` it makes -
+holding `#results` and a channel per rank: `#champion`, `#diamond`, and so on.
+Each rank channel gets the same panel, buttons and all, so the channel is the
+rank and the button is the format. Every one of them is a live queue at the same
+time: a call belongs to the channel its button was pressed in, and there is no
+limit on how many are open at once.
 
-Staff mode is also the only mode where the per-rank channels below are locked
-to their role.
+**Results are never split.** Every finished match, whatever rank played it, is
+posted to `#results`, which stays visible to the whole server. A ladder is only
+a ladder if everyone can read it, and a Champion result nobody in Bronze can see
+is a private message with extra steps.
 
-## A channel per rank
+**A rank channel is visible to exactly the ranks its queue admits.** Not just
+its own: the per-format spreads in the queues pane already say who may play
+whom, so `#diamond` at "one rank either side" is visible to Champion, Diamond
+and Platinum. The join gate is still per format, so a Platinum who can see
+`#diamond` joins the 2v2 there and is turned away from a same-rank-only 1v1.
+What the dashboard says and what the channel shows are the same answer.
 
-Off by default, and most servers should leave it that way. On, Quorum keeps a
-Discord category per rank holding `<rank>-1v1`, `<rank>-2v2`, `<rank>-group` and
-`<rank>-results`, and posts the right single-format panel in each. Every one of
-them is a live queue at the same time - a call belongs to the channel its button
-was pressed in, and there is no limit on how many are open at once.
+**Roles first, then channels, then panels.** Nothing is built until every rank
+has its Discord role - the channels are locked to those roles, so making them
+first would either publish a wall of channels to the whole server or lock them
+to roles that do not exist. The panel posted into each new channel is a message
+everybody in it sees, so it goes last.
 
-**Post panel** fills in whatever is missing: in this mode it puts a fresh panel
-at the bottom of every rank channel, deleting the older one there rather than
-stacking a second. It is safe to press whenever someone has deleted one.
+That only works cleanly with **staff** as the starting rank: Quorum hands out
+the role the moment staff seed someone, so they can see their queue before they
+have played. On **flat** or **voltaic** a player holds no role until a match of
+theirs finishes, so a new arrival sees `#results` and nothing else.
 
-**The ladder is the only source of truth.** Rename a rank and its category and
-channels rename with it; delete a rank and they are deleted; turn the mode off
-and every channel it made is removed. Nothing is ever recreated in place of
-something that already exists, so a rename keeps the channel and its history.
-Four ranks means four categories and sixteen channels - if that is too many,
+**Post panel** fills in whatever is missing: a fresh panel at the bottom of
+every rank channel, deleting the older one there rather than stacking a second.
+Safe to press whenever someone has deleted one.
+
+**The ladder is the only source of truth.** Rename a rank and its channel
+renames with it; delete a rank and the channel goes. Nothing is ever recreated
+in place of something that already exists, so a rename keeps the channel and its
+history. Four ranks means one category and five channels - if that is too many,
 shorten the ladder, because the ladder is what decides.
 
-**The gate is forced to same-rank-only while it is on.** A channel called
-`elite-2v2` that admits an Advanced player is a channel whose name is a lie, so
-the per-format spread is ignored and the dashboard says so. Your saved spread
-comes back untouched when you turn the mode off.
-
-Channels are locked to their rank role **only when staff assign divisions**. On
-automatic ranks a player holds no role until their first match finishes, so
-locking would leave every new player staring at a server with no queue they can
-see. With staff handing roles out first that deadlock cannot happen, so the
-channels become private to their division - which is the point of splitting
-them.
-
-The honest trade-off: this divides your queue by the number of ranks times the
-number of formats, and thin queues are how pick-up games die. One shared channel
-with a call pinging the ranks it can admit gets you the same discoverability
-without the split.
+The honest trade-off: this divides your queue by the number of ranks, and thin
+queues are how pick-up games die. Widening the spread in the queues pane widens
+who can see each channel, which is the lever for pulling a thin ladder back
+together.
 
 ## How a match runs
 
-The panel is one message with a **1v1** and a **2v2** button that stays in the
-queue channel forever. Then:
+The panel is one message with a **1v1** and a **2v2** button, sitting in every
+rank channel forever. Then:
 
-1. Someone hits **1v1**. The bot posts their call in the channel: _looking for a
-   1v1_, and pings the rank roles that queue would admit - not everyone, and
-   not a channel per rank. One queue channel keeps the pool of takers whole;
-   the ping is what makes it findable.
+1. Someone hits **1v1**. The bot posts their call in that channel: _looking for
+   a 1v1_, and pings the rank roles that queue would admit - not everyone. The
+   ping is what makes it findable without anyone watching the channel.
 2. Someone else hits **Join** on it. That's the whole matchmaking.
 3. The moment it fills it starts itself: teams drawn, and a **private thread**
    made off the queue channel holding exactly the players. The call in the
@@ -233,11 +231,13 @@ queue channel forever. Then:
 their own, they'd end it while their opponent still had runs left. The clock is
 the other half: one player wandering off can't hold a result open forever.
 
-A call nobody takes within an hour is cancelled and its message deleted, so the
-queue channel only ever shows calls that are actually live.
+A call nobody takes is cancelled and its message deleted, so a rank channel
+only ever shows calls that are actually live. An hour out of the box; the setup
+pane sets the window per server, or turns it off entirely and leaves calls up
+until someone takes or cancels them.
 
 Other commands: `/pug score`, `/pug stats`, `/pug leaderboard`, and
-`/pug tier @player <tier>` for staff. Everything else is a button.
+`/pug seed @player <rank>` for staff. Everything else is a button.
 
 **When a match goes wrong**, the dashboard lists everything open or running:
 *force finish* scores it from whatever KovaaK's has, *cancel* bins it with no
@@ -250,25 +250,26 @@ thread takes members by id: everyone is in it the moment it exists, it needs
 nothing configured, and in a split server it lands in the right rank's channel
 on its own.
 
-## Tiers
+## Where a rating starts
 
-Assigned by hand off Voltaic rank (`/pug tier`), and they do exactly one job:
-seed a new player's Elo. Once someone has played, their record is the truth and
-a tier change no longer moves their rating.
+Everyone plays one ladder, and the only question is where you join it. The
+**Starting rank** setting in the ranks pane picks how:
 
-That's what removes the need for placement games: you're put where you belong
-instead of playing ten to get there.
+| mode | a new player starts at |
+| --- | --- |
+| flat (default) | 1050, the same as everyone else |
+| staff | wherever staff put them - a rank, chosen in the players pane or with `/pug seed` |
+| voltaic | their Voltaic S5 standing, mapped onto the ladder; flat if they have no S5 entry |
+
+It is only ever the **first** rating. The moment someone finishes a match their
+record is the truth, seeding refuses to move them, and Quorum owns their rank
+role from then on - crossing a threshold adds the new role and takes the old
+one. That is what removes the need for placement games: you are put where you
+belong instead of playing ten to get there.
 
 Who may play whom is a **separate** setting, per format, in the dashboard's
-queues pane - measured in rank bands, not tiers. Out of the box a 1v1 queue is
-one rank only, while 2v2 and group let in the band either side.
-
-| tier | starting Elo |
-| --- | --- |
-| novice | 950 |
-| intermediate | 1050 (default) |
-| advanced | 1150 |
-| elite | 1275 |
+queues pane - measured in rank bands. Out of the box a 1v1 queue is one rank
+only, while 2v2 and group let in the band either side.
 
 ## Rating
 

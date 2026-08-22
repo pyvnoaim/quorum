@@ -3,9 +3,10 @@ import {
   DEFAULT_CATEGORIES,
   DEFAULT_RANK_SPREAD,
   DEFAULT_RANKS,
-  TIER_SEED,
+  BASE_ELO,
+  SEED_MODES,
   type Format,
-  type Tier,
+  type SeedMode,
 } from './config.js';
 
 // ponytail: node:sqlite is in the stdlib (needs --experimental-sqlite on node 22),
@@ -24,6 +25,7 @@ db.exec(`
     discord_id       text primary key,
     kovaaks_username text not null,
     tier             text not null default 'intermediate',
+    seeded_from      text,
     elo              integer not null default 1050,
     wins             integer not null default 0,
     losses           integer not null default 0
@@ -91,10 +93,25 @@ for (const stmt of [
   'alter table rank add column channels text',
   'alter table guild_config add column split_channels integer',
   'alter table guild_config add column rank_mode text',
+  // Minutes an untaken call stays up. 0 is off - calls never expire - and null
+  // means the server has never said, so CALL_TTL_MS decides.
+  'alter table guild_config add column call_ttl_min integer',
+  // 'flat' | 'staff' | 'voltaic'. Replaces rank_mode, which decided who owned
+  // the rank ROLE; the bot always owns that now, and this decides only where a
+  // player's rating STARTS.
+  'alter table guild_config add column seed_mode text',
+  'alter table player add column seeded_from text',
+  // Split mode is one shared category now, not one per rank: these are the
+  // category and the results channel inside it.
+  'alter table guild_config add column split_category_id text',
+  'alter table guild_config add column split_results_id text',
   'alter table match add column division_role_id text',
   // Replaces voice_channel_id, which stays behind holding dead ids: sqlite can
   // drop a column but not on a database someone might still roll back.
   'alter table match add column thread_id text',
+  // `scenarios` shrinks in place as bans land, so what was banned is gone by
+  // the time the match ends. History wants both halves.
+  'alter table match add column ban_pool text',
 ]) {
   try {
     db.exec(stmt);
@@ -129,7 +146,8 @@ export interface Player {
   /** Stamped even when the answer was null, so "no benchmark" isn't re-fetched
    *  on every page load. */
   voltaic_at: number | null;
-  tier: Tier;
+  /** Where their rating was seeded from, kept only so the dashboard can say so. */
+  seeded_from: string | null;
   elo: number;
   wins: number;
   losses: number;
@@ -149,7 +167,7 @@ export interface Match {
   message_id: string | null;
   host_id: string;
   format: Format;
-  status: 'lobby' | 'banning' | 'live' | 'done' | 'cancelled';
+  status: 'lobby' | 'banning' | 'live' | 'done' | 'void' | 'cancelled';
   scenarios: string;
   created_at: number;
   started_at: number | null;
@@ -157,6 +175,7 @@ export interface Match {
   /** The match's private thread, holding exactly its players. Null when the
    *  bot couldn't make one - the match runs regardless. */
   thread_id: string | null;
+  ban_pool: string | null;
   /** The division this call belongs to, in manual mode: the Discord role its
    *  opener held. Resolved once at open time, so a role change mid-lobby can't
    *  move the goalposts under people already in. Null in automatic mode. */
@@ -175,28 +194,28 @@ export interface GuildConfig {
   /** 'manual' = staff hand out the division roles and the bot never touches
    *  them; a player queues with the role they hold. Default 'auto': the bot
    *  assigns roles off Elo and the gate measures rank bands. */
-  rank_mode: string | null;
+  /** How a new player's first rating is decided: flat | staff | voltaic. */
+  seed_mode: string | null;
+  /** The one category split mode puts everything in, and the results channel
+   *  inside it. Both owned by Quorum: it makes them and it deletes them. */
+  split_category_id: string | null;
+  split_results_id: string | null;
+  /** Minutes before an untaken call is binned. 0 = never, null = the default. */
+  call_ttl_min: number | null;
 }
 
-export type RankMode = 'auto' | 'manual';
-export const getRankMode = (guildId: string): RankMode =>
-  getConfig(guildId).rank_mode === 'manual' ? 'manual' : 'auto';
-
-export const isSplit = (guildId: string) => !!getConfig(guildId).split_channels;
+export const getSeedMode = (guildId: string): SeedMode => {
+  const set = getConfig(guildId).seed_mode;
+  return SEED_MODES.includes(set as SeedMode) ? (set as SeedMode) : 'flat';
+};
 
 /** The parsed gate, falling back to the defaults for anything unset or junk.
  *
- *  A server running a channel per rank gets 0 whatever is stored: the channel
- *  name is the promise, and a spread would let someone into a queue named for
- *  a rank they aren't. The dashboard says so rather than silently disagreeing. */
+ *  This is the only thing that decides who may queue with whom, and a rank
+ *  channel is made visible to exactly the roles it admits - so what the
+ *  dashboard says and what the channel shows are the same answer. */
 export function getRankSpread(guildId: string): Record<Format, number> {
   const config = getConfig(guildId);
-  if (config.split_channels) {
-    return Object.fromEntries(Object.keys(DEFAULT_RANK_SPREAD).map((f) => [f, 0])) as Record<
-      Format,
-      number
-    >;
-  }
   const raw = config.rank_spread;
   let saved: Record<string, unknown> = {};
   try {
@@ -229,7 +248,11 @@ export interface Rank {
   channels: string | null;
 }
 
-export type RankChannels = Partial<Record<'category' | 'results' | Format, string>>;
+/** What a rank owns in Discord. `queue` is the rank's own channel, holding one
+ *  panel with every format's button. The rest is the old shape - a category and
+ *  a channel per format per rank - kept only so a sync can still find those and
+ *  delete them. */
+export type RankChannels = Partial<Record<'queue' | 'category' | 'results' | Format, string>>;
 
 export function rankChannels(rank: Rank): RankChannels {
   try {
@@ -257,7 +280,10 @@ export function getConfig(guildId: string): GuildConfig {
       ping_role_id: null,
       rank_spread: null,
       split_channels: null,
-      rank_mode: null,
+      seed_mode: null,
+      split_category_id: null,
+      split_results_id: null,
+      call_ttl_min: null,
     }
   );
 }
@@ -267,15 +293,19 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
   db.prepare(
     `insert into guild_config
        (guild_id, panel_channel_id, results_channel_id, ping_role_id,
-        rank_spread, split_channels, rank_mode)
-     values (?, ?, ?, ?, ?, ?, ?)
+        rank_spread, split_channels, seed_mode, call_ttl_min,
+        split_category_id, split_results_id)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
        ping_role_id = excluded.ping_role_id,
        rank_spread = excluded.rank_spread,
        split_channels = excluded.split_channels,
-       rank_mode = excluded.rank_mode`,
+       seed_mode = excluded.seed_mode,
+       call_ttl_min = excluded.call_ttl_min,
+       split_category_id = excluded.split_category_id,
+       split_results_id = excluded.split_results_id`,
   ).run(
     guildId,
     next.panel_channel_id,
@@ -283,7 +313,10 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.ping_role_id,
     next.rank_spread,
     next.split_channels,
-    next.rank_mode,
+    next.seed_mode,
+    next.call_ttl_min,
+    next.split_category_id,
+    next.split_results_id,
   );
   return next;
 }
@@ -388,8 +421,8 @@ export function listOpenMatches(guildId: string) {
  *
  *  Ratings are global by design - one Elo across every server - but the list
  *  is not: without the guild filter, an admin of one server could read, and
- *  through setTier rewrite, the record of players who have never set foot in
- *  it. Anyone linked but not yet queued here is reachable via `/pug tier`,
+ *  through seedPlayer rewrite, the record of players who have never set foot
+ *  in it. Anyone linked but not yet queued here is reachable via `/pug seed`,
  *  which Discord already scopes to the server it was run in. */
 export function playersInGuild(guildId: string) {
   return db
@@ -404,20 +437,17 @@ export function playersInGuild(guildId: string) {
     .all(guildId) as unknown as Player[];
 }
 
-export function setTier(discordId: string, tier: Tier) {
+/** Moves an unplayed player's starting rating. Once someone has played, their
+ *  record is the truth - re-seeding then would wipe it, so it does nothing. */
+export function seedPlayer(discordId: string, elo: number, from: string) {
   const p = getPlayer(discordId);
-  if (!p) return;
-  // Re-seeding Elo would wipe a played record, so it only moves someone who
-  // hasn't played yet.
-  if (p.wins + p.losses === 0) {
-    db.prepare('update player set tier = ?, elo = ? where discord_id = ?').run(
-      tier,
-      TIER_SEED[tier],
-      discordId,
-    );
-  } else {
-    db.prepare('update player set tier = ? where discord_id = ?').run(tier, discordId);
-  }
+  if (!p || p.wins + p.losses > 0) return false;
+  db.prepare('update player set elo = ?, seeded_from = ? where discord_id = ?').run(
+    Math.round(elo),
+    from,
+    discordId,
+  );
+  return true;
 }
 export interface MatchPlayer {
   match_id: number;
@@ -436,13 +466,13 @@ export function getPlayer(discordId: string) {
     | undefined;
 }
 
-/** Upserts on first sighting, seeding Elo from the tier. Later calls only
+/** Upserts on first sighting at the rating the caller worked out. Later calls only
  *  refresh the KovaaK's name (it can be renamed) - never the Elo. */
 export function ensurePlayer(
   discordId: string,
   kovaaksUsername: string,
   steamId: string | null = null,
-  tier: Tier = 'intermediate',
+  seed: { elo: number; from: string } = { elo: BASE_ELO, from: 'flat' },
 ) {
   const existing = getPlayer(discordId);
   if (existing) {
@@ -459,8 +489,9 @@ export function ensurePlayer(
     return existing;
   }
   db.prepare(
-    'insert into player (discord_id, kovaaks_username, steam_id, tier, elo) values (?, ?, ?, ?, ?)',
-  ).run(discordId, kovaaksUsername, steamId, tier, TIER_SEED[tier]);
+    `insert into player (discord_id, kovaaks_username, steam_id, elo, seeded_from)
+     values (?, ?, ?, ?, ?)`,
+  ).run(discordId, kovaaksUsername, steamId, Math.round(seed.elo), seed.from);
   return getPlayer(discordId)!;
 }
 
@@ -472,6 +503,40 @@ export function matchPlayers(matchId: number) {
   return db
     .prepare('select * from match_player where match_id = ? order by rowid')
     .all(matchId) as unknown as MatchPlayer[];
+}
+
+/** Finished matches, newest first, with everyone who played them. Two queries
+ *  for the whole page rather than one per match - history is the one view that
+ *  reads a lot of rows at once. Only 'done' counts: a cancelled or voided match
+ *  was never played, and listing it as history would say it was. */
+export function matchHistory(guildId: string, limit = 25) {
+  const matches = db
+    .prepare(
+      `select * from match where guild_id = ? and status = 'done'
+       order by ended_at desc, id desc limit ?`,
+    )
+    .all(guildId, limit) as unknown as Match[];
+  if (!matches.length) return [];
+
+  const holes = matches.map(() => '?').join(',');
+  const rows = db
+    .prepare(
+      `select mp.*, p.kovaaks_username from match_player mp
+       join player p on p.discord_id = mp.discord_id
+       where mp.match_id in (${holes})
+       order by mp.placing, mp.rowid`,
+    )
+    .all(...matches.map((m) => m.id)) as unknown as (MatchPlayer & {
+    kovaaks_username: string;
+  })[];
+
+  const byMatch = new Map<number, typeof rows>();
+  for (const row of rows) {
+    const list = byMatch.get(row.match_id) ?? [];
+    list.push(row);
+    byMatch.set(row.match_id, list);
+  }
+  return matches.map((m) => ({ match: m, players: byMatch.get(m.id) ?? [] }));
 }
 
 /** The overview page's numbers. Two counts here; everything else it shows the

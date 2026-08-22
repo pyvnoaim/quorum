@@ -19,15 +19,38 @@ export const FORMATS = {
 } as const;
 export type Format = keyof typeof FORMATS;
 
-/** Tiers are assigned by hand off Voltaic rank (`/pug tier`). They do two jobs:
- *  seed a new player's Elo, and decide who may play whom. */
-export const TIERS = ['novice', 'intermediate', 'advanced', 'elite'] as const;
-export type Tier = (typeof TIERS)[number];
-export const TIER_SEED: Record<Tier, number> = {
-  novice: 950,
-  intermediate: 1050,
-  advanced: 1150,
-  elite: 1275,
+/** How a player's FIRST rating is decided. Only ever the first: once someone
+ *  has played, their record is the truth and nothing here moves them again.
+ *  Who may play whom is a separate setting, per format, in the queues pane. */
+export const SEED_MODES = ['flat', 'staff', 'voltaic'] as const;
+export type SeedMode = (typeof SEED_MODES)[number];
+
+/** Where everyone starts when nothing else decides it. */
+export const BASE_ELO = 1050;
+
+/** Voltaic S5, lowest to highest. */
+export const VOLTAIC_RANKS = [
+  'Iron', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond',
+  'Jade', 'Master', 'Grandmaster', 'Nova', 'Astra', 'Celestial',
+] as const;
+
+/** S5 standing -> starting Elo. Spread across the default ladder so a
+ *  benchmarked player lands roughly where they belong instead of playing ten
+ *  games to get there. A server that has edited its ladder still gets a sane
+ *  spread: these are ratings, and the ladder decides what to call them. */
+export const VOLTAIC_SEED: Record<string, number> = {
+  Iron: 850,
+  Bronze: 890,
+  Silver: 940,
+  Gold: 990,
+  Platinum: 1040,
+  Diamond: 1090,
+  Jade: 1140,
+  Master: 1190,
+  Grandmaster: 1250,
+  Nova: 1310,
+  Astra: 1370,
+  Celestial: 1430,
 };
 /** How many rank bands apart two players may be, per format. 0 locks a queue
  *  to one rank; 1 lets the band either side in. Seeded into a server's config
