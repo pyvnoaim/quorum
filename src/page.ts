@@ -1414,8 +1414,15 @@ async function renderGuild(guild) {
     const out = await res.json().catch(() => ({}));
     if (!res.ok) return status(out.error ?? 'failed');
     // split servers get one per rank per format, and "panel posted" would read
-    // like it went to one channel.
-    status(out.posted > 1 ? \`panels posted in \${out.posted} channels\` : 'panel posted');
+    // like it went to one channel. A refused channel is named, not swallowed -
+    // it means the bot can't post there, and a silent one is a dead queue.
+    status(
+      out.missed
+        ? \`posted in \${out.posted}, refused by \${out.missed} - check the bot can send there\`
+        : out.posted > 1
+          ? \`panels posted in \${out.posted} channels\`
+          : 'panel posted',
+    );
   };
 }
 

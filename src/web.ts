@@ -204,11 +204,30 @@ async function syncRankChannelsToDiscord(
     const next: RankChannels = {};
 
     // Children inherit the category, so the lock is set once, here.
+    //
+    // The bot names itself in the lock. Denying @everyone hides the channel
+    // from the bot too unless it is granted back, and a channel the bot cannot
+    // see is one it cannot put a panel in - or find again to delete when the
+    // rank goes, which is how a server ends up with the old ladder's channels
+    // sitting next to the new one's.
+    const me = guild.members.me?.id;
     const locked =
       lockToRole && rank.discord_role_id
         ? [
             { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
             { id: rank.discord_role_id, allow: [PermissionFlagsBits.ViewChannel] },
+            ...(me
+              ? [
+                  {
+                    id: me,
+                    allow: [
+                      PermissionFlagsBits.ViewChannel,
+                      PermissionFlagsBits.SendMessages,
+                      PermissionFlagsBits.ManageChannels,
+                    ],
+                  },
+                ]
+              : []),
           ]
         : [{ id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel] }];
 
@@ -268,8 +287,11 @@ async function postPanel(channel: GuildBasedChannel | undefined, formats: readon
     );
     if (mine && isPanel) await msg.delete().catch(() => {});
   }
-  await channel.send(panelMessage(formats));
-  return true;
+  // A refused send is nearly always a missing Send Messages in that one
+  // channel. It must not take the other twenty down with it, and it must not
+  // be swallowed either - a queue channel with no panel is a dead queue, and
+  // the whole reason this button exists is that nobody could tell.
+  return !!(await channel.send(panelMessage(formats)).catch(() => null));
 }
 
 /** The bot owns match lifecycle; the dashboard only asks it to act. Passing the
@@ -681,18 +703,21 @@ export function startWeb(client: Client, hooks: Hooks) {
         // One button, every queue channel the server actually has.
         if (isSplit(guildId)) {
           let posted = 0;
+          let missed = 0;
           for (const rank of getRanks(guildId)) {
             const channels = rankChannels(rank);
             for (const format of Object.keys(FORMATS) as Format[]) {
               const id = channels[format];
-              if (id && (await postPanel(guild.channels.cache.get(id), [format]))) posted++;
+              if (!id) continue;
+              if (await postPanel(guild.channels.cache.get(id), [format])) posted++;
+              else missed++;
             }
           }
-          if (!posted) {
+          if (!posted && !missed) {
             json(res, 400, { error: 'no rank channels yet - save the ladder first' });
             return;
           }
-          json(res, 200, { ok: true, posted });
+          json(res, 200, { ok: true, posted, missed });
           return;
         }
         const channelId = getConfig(guildId).panel_channel_id;
