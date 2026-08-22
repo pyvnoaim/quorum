@@ -161,7 +161,13 @@ to their role.
 
 Off by default, and most servers should leave it that way. On, Quorum keeps a
 Discord category per rank holding `<rank>-1v1`, `<rank>-2v2`, `<rank>-group` and
-`<rank>-results`, and posts the right single-format panel in each.
+`<rank>-results`, and posts the right single-format panel in each. Every one of
+them is a live queue at the same time - a call belongs to the channel its button
+was pressed in, and there is no limit on how many are open at once.
+
+**Post panel** fills in whatever is missing: in this mode it puts a fresh panel
+at the bottom of every rank channel, deleting the older one there rather than
+stacking a second. It is safe to press whenever someone has deleted one.
 
 **The ladder is the only source of truth.** Rename a rank and its category and
 channels rename with it; delete a rank and they are deleted; turn the mode off

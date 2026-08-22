@@ -1411,7 +1411,11 @@ async function renderGuild(guild) {
   document.getElementById('panelbtn').onclick = async () => {
     status('posting…');
     const res = await fetch(\`/api/guild/\${guild.id}/panel\`, { method: 'POST' });
-    status(res.ok ? 'panel posted' : (await res.json().catch(() => ({}))).error ?? 'failed');
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) return status(out.error ?? 'failed');
+    // split servers get one per rank per format, and "panel posted" would read
+    // like it went to one channel.
+    status(out.posted > 1 ? \`panels posted in \${out.posted} channels\` : 'panel posted');
   };
 }
 

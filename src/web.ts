@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { ChannelType, PermissionFlagsBits, type Client, type Guild } from 'discord.js';
-import { FORMATS, TIERS, guildAllowed, type Format, type Tier } from './config.js';
+import {
+  ChannelType,
+  PermissionFlagsBits,
+  type Client,
+  type Guild,
+  type GuildBasedChannel,
+} from 'discord.js';
+import { FORMATS, PANEL_FORMATS, TIERS, guildAllowed, type Format, type Tier } from './config.js';
 import {
   getConfig,
   getMatch,
@@ -243,6 +249,27 @@ async function syncRankChannelsToDiscord(
     }
     setRankChannels(rank.id, next);
   }
+}
+
+/** Puts a panel at the bottom of a channel, taking any older one with it.
+ *
+ *  "Post panel" is a repair tool - the panel is a plain message, so anyone with
+ *  Manage Messages can delete one - and a repair tool has to be safe to press
+ *  twice. Only the bot's own panels go; a call carries `pug:join`, not
+ *  `pug:open`, and must survive. */
+async function postPanel(channel: GuildBasedChannel | undefined, formats: readonly Format[]) {
+  if (!channel?.isSendable()) return false;
+  const recent = await channel.messages.fetch({ limit: 30 }).catch(() => null);
+  for (const msg of recent?.values() ?? []) {
+    const mine = msg.author.id === channel.client.user?.id;
+    const isPanel = msg.components.some((row) =>
+      'components' in row &&
+      row.components.some((c) => 'customId' in c && c.customId?.startsWith('pug:open:')),
+    );
+    if (mine && isPanel) await msg.delete().catch(() => {});
+  }
+  await channel.send(panelMessage(formats));
+  return true;
 }
 
 /** The bot owns match lifecycle; the dashboard only asks it to act. Passing the
@@ -648,14 +675,33 @@ export function startWeb(client: Client, hooks: Hooks) {
       }
 
       if (action === '/panel' && req.method === 'POST') {
+        // A split server's queues live in a channel per rank per format, each
+        // with its own one-format panel - and those were only ever posted the
+        // moment the channel was created, so a deleted one had no way back.
+        // One button, every queue channel the server actually has.
+        if (isSplit(guildId)) {
+          let posted = 0;
+          for (const rank of getRanks(guildId)) {
+            const channels = rankChannels(rank);
+            for (const format of Object.keys(FORMATS) as Format[]) {
+              const id = channels[format];
+              if (id && (await postPanel(guild.channels.cache.get(id), [format]))) posted++;
+            }
+          }
+          if (!posted) {
+            json(res, 400, { error: 'no rank channels yet - save the ladder first' });
+            return;
+          }
+          json(res, 200, { ok: true, posted });
+          return;
+        }
         const channelId = getConfig(guildId).panel_channel_id;
-        const channel = channelId ? guild.channels.cache.get(channelId) : null;
-        if (!channel?.isSendable()) {
+        const channel = channelId ? guild.channels.cache.get(channelId) : undefined;
+        if (!(await postPanel(channel, PANEL_FORMATS))) {
           json(res, 400, { error: 'pick and save a queue channel first' });
           return;
         }
-        await channel.send(panelMessage());
-        json(res, 200, { ok: true });
+        json(res, 200, { ok: true, posted: 1 });
         return;
       }
 
