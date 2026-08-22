@@ -1,3 +1,5 @@
+import { RUNS_PER_SCENARIO } from './config.js';
+
 const BASE = 'https://kovaaks.com/webapp-backend';
 /** Community benchmark index. Not KovaaK's, and not required - a server that
  *  can't reach it just shows no Voltaic ranks. */
@@ -123,10 +125,26 @@ interface RunRow {
   attributes?: { epoch?: string | number };
 }
 
-export type WindowScore = { ok: true; score: number | null } | { ok: false };
+export type WindowScore =
+  | { ok: true; score: number | null; prior: number | null; runs: number }
+  | { ok: false };
 
 /**
- * Best run on `scenario` between `start` and `end` (epoch ms).
+ * Their score on `scenario` for a match running from `start` to `end` (epoch
+ * ms): the best of their FIRST `runsCounted` runs inside that window.
+ *
+ * Ordering by run time rather than by score is the whole point - it is what
+ * makes "three runs each" a rule the bot enforces instead of an honour system.
+ * A fourth run does not count, so nobody gains by grinding while their opponent
+ * stops at three, and a score can only settle upwards as those three land.
+ *
+ * `runs` is how many they have actually put in - the whole list, not the capped
+ * three - which is what lets a match end itself the moment nobody has a run
+ * left to play.
+ *
+ * `prior` is their best from before the window - the same page of runs already
+ * holds it, so "beat your best" costs no extra request. It only goes as deep as
+ * the last 50 runs, so it is a recent best rather than a lifetime one.
  *
  * Returns `{ok: false}` when KovaaK's didn't answer, which is NOT the same as
  * "they didn't play it" - a match result must never record a 0 for a blip.
@@ -136,6 +154,7 @@ export async function scoreInWindow(
   scenario: string,
   start: number,
   end: number,
+  runsCounted = RUNS_PER_SCENARIO,
 ): Promise<WindowScore> {
   const params = new URLSearchParams({
     username,
@@ -147,14 +166,27 @@ export async function scoreInWindow(
   // A 4xx here is KovaaK's answering "no runs for that user and scenario",
   // which is a real null score. Only an unreachable service must leave what is
   // already recorded alone.
-  if (!res.ok) return res.reachable ? { ok: true, score: null } : { ok: false };
+  if (!res.ok) return res.reachable ? { ok: true, score: null, prior: null, runs: 0 } : { ok: false };
 
-  let best: number | null = null;
+  const runs: { epoch: number; score: number }[] = [];
+  let prior: number | null = null;
   for (const row of Array.isArray(res.data) ? res.data : []) {
     const epoch = Number(row.attributes?.epoch); // KovaaK's sends ms as a string
     if (row.score == null || !Number.isFinite(epoch)) continue;
-    if (epoch < start || epoch > end) continue;
-    if (best === null || row.score > best) best = row.score;
+    if (epoch > end) continue;
+    if (epoch < start) {
+      if (prior === null || row.score > prior) prior = row.score;
+      continue;
+    }
+    runs.push({ epoch, score: row.score });
   }
-  return { ok: true, score: best };
+  // Oldest first: the cap has to fall on the LAST runs, not the worst ones.
+  runs.sort((a, b) => a.epoch - b.epoch);
+  const counted = runs.slice(0, Math.max(1, runsCounted));
+  return {
+    ok: true,
+    score: counted.length ? Math.max(...counted.map((r) => r.score)) : null,
+    prior,
+    runs: runs.length,
+  };
 }

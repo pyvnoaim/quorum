@@ -1,72 +1,140 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
-import { BAN_TTL_MS, FORMATS, MATCH_TTL_MS, PANEL_FORMATS, type Format } from './config.js';
-import { getRanks, type Match, type MatchPlayer, type Player } from './db.js';
-import { rankName } from './rating.js';
+import { FORMATS, PANEL_FORMATS, ROUNDS, RUNS_PER_SCENARIO, type Format } from './config.js';
+import {
+  getFormat,
+  getPlayer,
+  getRanks,
+  guildStats,
+  type Match,
+  type MatchPlayer,
+  type Player,
+} from './db.js';
+import { rankFor, rankName } from './rating.js';
 
 const BLURPLE = 0x5865f2;
-
-/** Every embed ends the same way. Where an embed already had a footer, the
- *  credit joins it rather than replacing it - Discord gives an embed one
- *  footer, so a second setFooter would silently drop the first. */
-const CREDIT = 'Powered by kova';
-const footer = (text?: string) => ({ text: text ? `${text} · ${CREDIT}` : CREDIT });
 const GREEN = 0x57f287;
+
+/** The bar down the left of a CALL is the colour of the rank it is for -
+ *  whoever opened it. A call pings the bands around it, but it belongs to one
+ *  of them, and that band's colour is already what the ladder, the roles and
+ *  the channels are painted in. Only the call: past that point the colour has
+ *  a job of its own, saying whether a match is running, scored, or neither.
+ *  Falls back to blurple for a host who has somehow left the ladder. */
+function matchColor(match: Match) {
+  const host = getPlayer(match.host_id);
+  const band = host ? rankFor(getRanks(match.guild_id), host.elo) : undefined;
+  const parsed = band ? Number.parseInt(band.color.slice(1), 16) : NaN;
+  return Number.isFinite(parsed) ? parsed : BLURPLE;
+}
+
+/** Every embed ends the same way, and says nothing else down there. Anything a
+ *  player has to ACT on belongs in the body at full size - the footer is 12px
+ *  grey, which is where a rule goes to be missed. */
+const footer = () => ({ text: 'powered by kova' });
 const GREY = 0x99aab5;
 
-/** The ban phase. The pool shrinks in place, so the embed only ever needs the
- *  match row - there is nothing else to read. */
-export function banEmbed(
+/** The pick phase: one scenario at a time, each out of its own category's
+ *  shortlist. Everything shown is derived from the stored phase, so the embed
+ *  and the buttons can never disagree about whose turn it is. */
+export function pickEmbed(
   match: Match,
   rows: MatchPlayer[],
-  players: Map<string, Player>,
-  turn: number,
-  left: number,
+  phase: {
+    picked: string[];
+    cats: string[];
+    pool: string[];
+    action: 'ban' | 'pick';
+    turn: number;
+    bansLeft: number;
+  },
 ) {
-  const pool: string[] = JSON.parse(match.scenarios);
-  const side = rows.filter((r) => r.team === turn).map((r) => `<@${r.discord_id}>`);
+  const { rounds, pickTtlS } = getFormat(match.guild_id);
+  const side = rows.filter((r) => r.team === phase.turn).map((r) => `<@${r.discord_id}>`);
+  const slot = phase.picked.length + 1;
+  const locked = phase.picked.map((s, n) => `**${n + 1}.** \`${s}\``).join('\n');
+
   return new EmbedBuilder()
-    .setTitle(`${match.format} · banning`)
+    .setTitle(`${match.format} · scenario ${slot} of ${rounds}`)
     .setColor(BLURPLE)
     .setDescription(
-      `${side.join(' and ')} ${side.length > 1 ? 'ban' : 'bans'} one. ` +
-        `${left} ban${left === 1 ? '' : 's'} to go.\n\n` +
-        pool.map((s) => `\`${s}\``).join('\n'),
+      (locked ? `${locked}\n\n` : '') +
+        `${side.join(' and ')} ${phase.action === 'ban' ? 'bans one' : 'picks one'} ` +
+        `from **${phase.cats[phase.picked.length] ?? 'the pool'}**` +
+        (phase.action === 'ban'
+          ? `. ${phase.bansLeft} ban${phase.bansLeft === 1 ? '' : 's'} before the pick.`
+          : ' to play.') +
+        `\n\nScenario ${rounds} is a random roll - nobody picks it. ` +
+        `Nobody acts within **${pickTtlS}s** and the bot ${phase.action}s at random.\n\n` +
+        phase.pool.map((s) => `\`${s}\``).join('\n'),
     )
-    .setFooter(
-      footer(`nobody bans within ${Math.round(BAN_TTL_MS / 1000)}s and the bot bans at random`),
-    );
+    .setFooter(footer());
+}
+
+/** A match whose stored pick phase predates this version of the bot. It cannot
+ *  be finished, so it says so instead of showing buttons that do nothing. */
+export function staleEmbed(match: Match) {
+  return new EmbedBuilder()
+    .setTitle(`${match.format} · dropped`)
+    .setColor(GREY)
+    .setDescription('This match was mid-pick when the bot was updated. Open a new call.')
+    .setFooter(footer());
 }
 
 /** The open call: "someone is looking for a 1v1". Fills up, then starts itself. */
 export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
   const { max } = FORMATS[match.format as Format];
-  const opener = players.get(match.host_id);
   const ranks = getRanks(match.guild_id);
 
   return new EmbedBuilder()
     .setTitle(`Looking for a ${match.format}`)
-    .setColor(BLURPLE)
+    .setColor(matchColor(match))
     .setDescription(
-      rows
-        .map((r) => {
-          const p = players.get(r.discord_id)!;
-          return `<@${r.discord_id}> · **${p.elo}** ${rankName(ranks, p.elo)}`;
-        })
-        .join('\n'),
+      // How many seats are left is the whole point of this message, so it goes
+      // in the body at full size rather than in the grey line under it.
+      `**${rows.length}/${max}** · starts the moment it fills\n\n` +
+        rows
+          .map((r) => {
+            const p = players.get(r.discord_id)!;
+            return `<@${r.discord_id}> · **${p.elo}** ${rankName(ranks, p.elo)}`;
+          })
+          .join('\n'),
     )
-    .setFooter(footer(`${rows.length}/${max} · starts the moment it fills`));
+    .setFooter(footer());
 }
 
-/** The panel is one static message that never changes - its buttons carry the
- *  format, so it survives restarts with nothing stored about it. */
-export function panelMessage(formats: readonly Format[] = PANEL_FORMATS) {
+/** The queue panel: three beats, because that is the whole game - press the
+ *  button, play in the thread, the scores arrive on their own.
+ *
+ *  The numbers all come from the server itself, so the panel can neither
+ *  promise a match it doesn't run nor claim a queue nobody is in. The last line
+ *  is the one that moves; the tick edits this message when it changes. */
+export function panelMessage(formats: readonly Format[] = PANEL_FORMATS, guildId?: string) {
+  const { rounds, runs } = guildId
+    ? getFormat(guildId)
+    : { rounds: ROUNDS, runs: RUNS_PER_SCENARIO };
+  const buttons = formats.map((f) => `**${f}**`).join(' or ');
+  const stats = guildId ? guildStats(guildId) : null;
+  // An empty ladder is worth saying out loud - "0 played" reads as broken,
+  // where "be the first" reads as an invitation.
+  const pulse = !stats
+    ? ''
+    : stats.played === 0
+      ? '\n\nNobody has played yet. Be the first.'
+      : `\n\n**${stats.week}** played this week · **${stats.running}** ` +
+        `${stats.running === 1 ? 'match' : 'matches'} up right now`;
+
   return {
     embeds: [
       new EmbedBuilder()
         .setTitle(formats.length === 1 ? `Quorum · ${formats[0]}` : 'Quorum')
         .setColor(BLURPLE)
         .setDescription(
-          "Pick a format and the bot posts your call in this channel. When someone takes it you both get a private thread to play in, and your scenarios go up there.\n\nScores are read from KovaaK's - there's nothing to submit.",
+          `Press ${buttons}. Your call goes up here, and the first person to take it plays you.\n\n` +
+            `You get a private thread to yourselves. Ban and pick **${rounds} scenarios** in it, ` +
+            `**${runs} runs each**.\n\n` +
+            `Scores are read straight off KovaaK's. Nothing to submit, nothing to screenshot, ` +
+            `nothing to argue about.` +
+            pulse,
         )
         .setFooter(footer()),
     ],
@@ -86,14 +154,20 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
 
   // Discord renders this relative and per-viewer, so nobody has to work out
   // what time zone the deadline was written in.
-  const deadline = Math.floor(((match.started_at ?? Date.now()) + MATCH_TTL_MS) / 1000);
+  const { runs, matchTtlMin } = getFormat(match.guild_id);
+  const deadline = Math.floor(
+    ((match.started_at ?? Date.now()) + matchTtlMin * 60_000) / 1000,
+  );
   const embed = new EmbedBuilder()
     .setTitle(`${match.format} · ongoing`)
     .setColor(BLURPLE)
     .setDescription(
-      `Play these in any order - scores update on their own. Hit **Done** when you've finished; results post once everyone has, or <t:${deadline}:R> either way.\n\n${scenarios
-        .map((s, i) => `**${i + 1}.** ${s}`)
-        .join('\n')}`,
+      `**${runs} run${runs === 1 ? '' : 's'} per scenario**, best of them counts - one more does ` +
+        `not, so there is nothing to gain by grinding. Play them in any order; scores update on ` +
+        `their own.\n\nThe result posts itself once everyone has run all ${scenarios.length}, ` +
+        `or <t:${deadline}:R> either way. **Done** ends it early for both of you.\n\n${scenarios
+          .map((s, i) => `**${i + 1}.** ${s}`)
+          .join('\n')}`,
     );
 
   for (const team of teams) {
@@ -103,7 +177,17 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
       value: members
         .map((r) => {
           const scores = JSON.parse(r.scores) as Record<string, number | null>;
-          const line = scenarios.map((s) => scores[s]?.toFixed(0) ?? '–').join(' · ');
+          const used = JSON.parse(r.run_counts ?? '{}') as Record<string, number>;
+          // The run count only shows while it is still short - a scenario they
+          // have finished with is just a score, and what is left to play is
+          // what the reader is looking for.
+          const line = scenarios
+            .map((s) => {
+              const score = scores[s]?.toFixed(0) ?? '–';
+              const n = used[s] ?? 0;
+              return n > 0 && n < runs ? `${score} ${n}/${runs}` : score;
+            })
+            .join(' · ');
           return `${r.done ? '✅' : '·'} <@${r.discord_id}>\n\`${line}\``;
         })
         .join('\n'),
@@ -136,23 +220,52 @@ export function resultsEmbed(
   const ordered = [...rows].sort((a, b) => (a.placing ?? 99) - (b.placing ?? 99));
   const medal = ['🥇', '🥈', '🥉'];
   const ranks = getRanks(match.guild_id);
+  // Someone with no placing in a match that WAS scored never ran anything - the
+  // rest of the lobby played on without them. Said, rather than shown as a last
+  // place they didn't earn.
+  let anyPb = false;
+
+  const fields = ordered.map((r) => {
+    const p = players.get(r.discord_id)!;
+    const delta = deltas.get(r.discord_id) ?? 0;
+    const scores = JSON.parse(r.scores) as Record<string, number | null>;
+    const pb = JSON.parse(r.pb ?? '{}') as Record<string, number | null>;
+    const line = scenarios
+      .map((s) => {
+        const score = scores[s];
+        if (score == null) return '–';
+        const prior = pb[s];
+        const gain = prior == null ? 0 : Math.round(score - prior);
+        if (gain < 1) return score.toFixed(0);
+        anyPb = true;
+        return `${score.toFixed(0)} (+${gain})`;
+      })
+      .join(' · ');
+    return {
+      name: `${r.placing == null ? '·' : (medal[r.placing - 1] ?? `#${r.placing}`)} ${p.kovaaks_username}`,
+      value:
+        `<@${r.discord_id}> · **${p.elo}** ${rankName(ranks, p.elo)} ` +
+        `${r.placing == null ? '· _no scores, not rated_' : `(${delta >= 0 ? '+' : ''}${delta})`}\n\`${line}\``,
+    };
+  });
 
   return new EmbedBuilder()
     .setTitle(`${match.format} · results`)
     .setColor(GREEN)
-    .setDescription(scenarios.join(' · '))
-    .addFields(
-      ordered.map((r) => {
-        const p = players.get(r.discord_id)!;
-        const delta = deltas.get(r.discord_id) ?? 0;
-        const scores = JSON.parse(r.scores) as Record<string, number | null>;
-        return {
-          name: `${medal[(r.placing ?? 1) - 1] ?? `#${r.placing}`} ${p.kovaaks_username}`,
-          value: `<@${r.discord_id}> · **${p.elo}** ${rankName(ranks, p.elo)} (${delta >= 0 ? '+' : ''}${delta})\n\`${scenarios
-            .map((s) => scores[s]?.toFixed(0) ?? '–')
-            .join(' · ')}\``,
-        };
-      }),
+    .setDescription(
+      scenarios.join(' · ') +
+        (anyPb ? '\n_a bracket is how much they beat their best by_' : ''),
     )
+    .addFields(fields)
     .setFooter(footer());
 }
+
+/** The result message's one button. It opens a plain call - same rank gate,
+ *  same Join - so nothing about a rematch skips a step. */
+export const rematchRow = (match: Match) =>
+  new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`pug:rematch:${match.id}`)
+      .setLabel('Rematch')
+      .setStyle(ButtonStyle.Secondary),
+  );

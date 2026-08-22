@@ -12,10 +12,13 @@ export const ALLOWED_GUILDS = new Set(
 );
 export const guildAllowed = (id: string) => !ALLOWED_GUILDS.size || ALLOWED_GUILDS.has(id);
 
+/** The queues that exist. Everything else - panel buttons, the per-format gate,
+ *  a split server's channels, the dashboard - is built from these keys, so a
+ *  format comes back by putting its line back:
+ *    '2v2':  { min: 4, max: 4, teamSize: 2 }   (and a DEFAULT_RANK_SPREAD entry)
+ *    group:  { min: 3, max: 8, teamSize: 1 }   (no two sides, so no ban phase) */
 export const FORMATS = {
   '1v1': { min: 2, max: 2, teamSize: 1 },
-  '2v2': { min: 4, max: 4, teamSize: 2 },
-  group: { min: 3, max: 8, teamSize: 1 },
 } as const;
 export type Format = keyof typeof FORMATS;
 
@@ -57,8 +60,6 @@ export const VOLTAIC_SEED: Record<string, number> = {
  *  on first read and owned by the dashboard after that. */
 export const DEFAULT_RANK_SPREAD: Record<Format, number> = {
   '1v1': 0,
-  '2v2': 1,
-  group: 1,
 };
 
 /** Seeds a server's rank ladder the first time it's read. After that the rows
@@ -105,16 +106,25 @@ export const DEFAULT_CATEGORIES: Record<string, string[]> = {
 };
 export const ROUNDS = 3;
 
-/** Candidates rolled for the ban phase. The two sides alternate bans until
- *  ROUNDS are left, so this must exceed ROUNDS - and by an even number, or one
- *  side gets the last ban and a free advantage. Set it to ROUNDS to skip
- *  banning entirely and go straight to a random roll. */
-export const BAN_POOL = 7;
-/** A side that won't ban holds the whole lobby, so the sweep bans for them. */
+/** Runs per scenario. The score is the best of the FIRST this many in-window
+ *  runs: a fourth doesn't count, so nobody can farm attempts while their
+ *  opponent stops at three. */
+export const RUNS_PER_SCENARIO = 3;
+
+/** Candidates rolled per category for the pick phase.
+ *
+ *  Each of the first two scenarios is ban-ban-pick out of one of these: the
+ *  side with the pick bans first, the other bans second, then the picker takes
+ *  one of what is left - so the opponent's ban lands last and offsets the pick.
+ *  Three of five survive to be picked from. The third scenario is a plain roll,
+ *  so nobody shapes the whole match. */
+export const PICK_POOL = 5;
+/** A side that won't ban or pick holds the whole lobby, so the sweep acts for
+ *  them - at random, because a predictable auto-pick is a strategy. */
 export const BAN_TTL_MS = 90 * 1000;
 
 /** Which formats get a button on the queue panel. */
-export const PANEL_FORMATS: Format[] = ['1v1', '2v2'];
+export const PANEL_FORMATS: Format[] = ['1v1'];
 
 /** How long an untaken call stays up before the sweep bins it. */
 export const CALL_TTL_MS = 60 * 60 * 1000;

@@ -14,11 +14,8 @@ import {
 } from 'discord.js';
 import {
   guildAllowed,
-  BAN_POOL,
-  BAN_TTL_MS,
   CALL_TTL_MS,
   FORMATS,
-  MATCH_TTL_MS,
   ROUNDS,
   TICK_MS,
   BASE_ELO,
@@ -28,30 +25,48 @@ import {
 import {
   db,
   ensurePlayer,
+  dropPanel,
   getConfig,
+  getFormat,
   getMatch,
+  getPanels,
   getPlayer,
   getSeedMode,
   getRankSpread,
   getRanks,
   getScenarios,
+  headToHead,
   leaderboard,
   matchPlayers,
+  recentMatches,
   seedPlayer,
   type Match,
   type MatchPlayer,
 } from './db.js';
-import { banEmbed, liveEmbed, noContestEmbed, openEmbed, resultsEmbed } from './embeds.js';
+import {
+  liveEmbed,
+  noContestEmbed,
+  openEmbed,
+  panelMessage,
+  pickEmbed,
+  rematchRow,
+  resultsEmbed,
+  staleEmbed,
+} from './embeds.js';
 import { startWeb } from './web.js';
 import { kovaaksAccountForDiscordId, scoreInWindow, voltaicS5 } from './kovaaks.js';
 import {
+  advancePick,
+  allRunsUsed,
   bandsInReach,
-  banTurn,
   canPlay,
   eloDeltas,
+  pickTurn,
   placings,
   rankFor,
   rankName,
+  scorable,
+  type PickPhase,
 } from './rating.js';
 
 const token = process.env.DISCORD_BOT_TOKEN;
@@ -111,11 +126,35 @@ function rollScenarios(guildId: string, want = ROUNDS) {
   return out;
 }
 
-/** Whose turn it is, and how many bans are left. Both fall out of how much of
- *  the pool is gone, so a ban phase stores nothing beyond the pool itself. */
-function banState(match: Match) {
-  const pool: string[] = JSON.parse(match.scenarios);
-  return { pool, ...banTurn(pool.length, BAN_POOL, ROUNDS) };
+const shuffle = <T>(items: T[]) => [...items].sort(() => Math.random() - 0.5);
+
+/** One category per scenario, in a random order - the order is part of the
+ *  format, since knowing you finish on tracking is worth something in the picks
+ *  before it. A server with fewer categories than scenarios sees one come round
+ *  again rather than no match at all. */
+function rollCategories(guildId: string, want = ROUNDS) {
+  const all = shuffle([...new Set(getScenarios(guildId).map((s) => s.category))]);
+  if (!all.length) return [];
+  return Array.from({ length: want }, (_, i) => all[i % all.length]);
+}
+
+/** Candidates from one category, minus anything already locked in. A category
+ *  with nothing left to offer falls back to the whole pool: a thin category
+ *  must not be able to leave a match with no scenario to play. */
+function shortlist(guildId: string, category: string, want: number, taken: string[]) {
+  const pool = getScenarios(guildId).filter((s) => !taken.includes(s.name));
+  const mine = pool.filter((s) => s.category === category);
+  return shuffle((mine.length ? mine : pool).map((s) => s.name)).slice(0, want);
+}
+
+/** The pick phase, or null when the stored shape is a plain array - a match
+ *  that was mid-ban under the older format. Nothing can drive those to an end,
+ *  so callers cancel them rather than throwing on every tick. */
+function pickState(match: Match) {
+  const raw: unknown = JSON.parse(match.scenarios);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !('pool' in raw)) return null;
+  const phase = raw as PickPhase;
+  return { ...phase, ...pickTurn(phase.picked.length, phase.pool.length, phase.size) };
 }
 
 function render(match: Match) {
@@ -140,24 +179,27 @@ function render(match: Match) {
     };
   }
   if (match.status === 'banning') {
-    const { pool, turn, left } = banState(match);
-    // Discord allows five buttons a row, and BAN_POOL is small.
-    const rowsOfFive = pool.reduce<string[][]>((acc, name, n) => {
+    const phase = pickState(match);
+    // Nothing left to drive: the sweep cancels these, and until it does the
+    // message says so rather than showing dead buttons.
+    if (!phase) return { embeds: [staleEmbed(match)], components: [] };
+    // Discord allows five buttons a row, and PICK_POOL is five.
+    const rowsOfFive = phase.pool.reduce<string[][]>((acc, name, n) => {
       if (n % 5 === 0) acc.push([]);
       acc[acc.length - 1].push(name);
       return acc;
     }, []);
     return {
-      embeds: [banEmbed(match, rows, players, turn, left)],
+      embeds: [pickEmbed(match, rows, phase)],
       components: rowsOfFive.map((group, groupIdx) =>
         new ActionRowBuilder<ButtonBuilder>().addComponents(
           group.map((name, n) =>
             new ButtonBuilder()
               // the index into the pool, not the name - a scenario name is
               // longer than a custom id is allowed to be.
-              .setCustomId(`pug:ban:${match.id}:${groupIdx * 5 + n}`)
+              .setCustomId(`pug:pick:${match.id}:${groupIdx * 5 + n}`)
               .setLabel(name.length > 78 ? name.slice(0, 77) + '…' : name)
-              .setStyle(ButtonStyle.Secondary),
+              .setStyle(phase.action === 'ban' ? ButtonStyle.Danger : ButtonStyle.Success),
           ),
         ),
       ),
@@ -263,19 +305,28 @@ async function startMatch(guild: Guild, match: Match) {
   const threadId = await openThread(guild, match, rows);
   db.prepare('update match set thread_id = ? where id = ?').run(threadId, match.id);
 
-  // Group has no two sides to alternate between, and a pool no bigger than the
-  // round count has nothing to ban - either way, roll and play.
-  // A short pool can't fill BAN_POOL, and whose turn it is is derived from how
-  // much of BAN_POOL is gone - so anything less just plays a plain roll.
-  const pool = rollScenarios(guild.id, BAN_POOL);
-  if (match.format === 'group' || pool.length < BAN_POOL) {
-    return moveIntoThread(beginPlay(getMatch(match.id)!, rollScenarios(guild.id)));
+  // Who picks first is already decided: the shuffle above put someone on side
+  // 0, and side 0 holds the first pick. Nothing else to randomise.
+  //
+  // A shortlist of one has nothing to ban or pick, and more than two sides has
+  // nobody to alternate with - either way the match just plays a plain roll
+  // rather than stalling on setup.
+  const fmt = getFormat(guild.id);
+  const cats = rollCategories(guild.id, fmt.rounds);
+  const first = shortlist(guild.id, cats[0] ?? '', fmt.pickPool, []);
+  // sides from the shuffle above, not from `rows` - those were read before the
+  // teams were written, so every one of them still says 0.
+  const sides = Math.ceil(shuffled.length / teamSize);
+  if (first.length < 2 || sides !== 2) {
+    return moveIntoThread(beginPlay(getMatch(match.id)!, rollScenarios(guild.id, fmt.rounds)));
   }
-  // ban_pool is written once and never touched again - `scenarios` is what the
-  // bans eat into, so this is the only record of what was on the table.
+  const phase: PickPhase = { picked: [], cats, pool: first, size: first.length };
+  // ban_pool is the record of everything that was on the table; the dashboard
+  // reads what was banned out of it as "offered, then not played". Each
+  // shortlist is appended to it as it is rolled.
   db.prepare('update match set scenarios = ?, ban_pool = ? where id = ?').run(
-    JSON.stringify(pool),
-    JSON.stringify(pool),
+    JSON.stringify(phase),
+    JSON.stringify(first),
     match.id,
   );
   return moveIntoThread(getMatch(match.id)!);
@@ -319,13 +370,36 @@ function beginPlay(match: Match, scenarios: string[]) {
   return getMatch(match.id)!;
 }
 
-/** Removes one scenario and, if that was the last ban, starts the match. */
-function applyBan(match: Match, index: number) {
-  const { pool } = banState(match);
-  if (index < 0 || index >= pool.length) return match;
-  pool.splice(index, 1);
-  if (pool.length <= ROUNDS) return beginPlay(match, pool);
-  db.prepare('update match set scenarios = ? where id = ?').run(JSON.stringify(pool), match.id);
+/** Takes one scenario off the table - as a ban or as the pick, whichever the
+ *  phase is on. A pick either opens the next scenario's shortlist or, once the
+ *  last one is picked, rolls the final scenario at random and starts the match. */
+function applyPick(match: Match, index: number) {
+  const phase = pickState(match);
+  if (!phase) return match;
+  const fmt = getFormat(match.guild_id);
+  const next = advancePick(
+    phase,
+    index,
+    (category, want, taken) => shortlist(match.guild_id, category, want, taken),
+    fmt.rounds,
+    fmt.pickPool,
+  );
+  if ('scenarios' in next) return beginPlay(match, next.scenarios);
+
+  // A pick opens a fresh shortlist, and everything ever on the table goes into
+  // ban_pool - the dashboard reads what was banned back out of it as "offered,
+  // then not played".
+  if (next.phase.picked.length !== phase.picked.length) {
+    const offered: string[] = match.ban_pool ? JSON.parse(match.ban_pool) : [];
+    db.prepare('update match set ban_pool = ? where id = ?').run(
+      JSON.stringify([...offered, ...next.phase.pool]),
+      match.id,
+    );
+  }
+  db.prepare('update match set scenarios = ? where id = ?').run(
+    JSON.stringify(next.phase),
+    match.id,
+  );
   return getMatch(match.id)!;
 }
 
@@ -335,10 +409,13 @@ function applyBan(match: Match, index: number) {
 async function refreshScores(match: Match) {
   const scenarios: string[] = JSON.parse(match.scenarios);
   const end = match.ended_at ?? Date.now();
+  const want = getFormat(match.guild_id).runs;
   await Promise.all(
     matchPlayers(match.id).map(async (row) => {
       const player = getPlayer(row.discord_id)!;
       const scores = JSON.parse(row.scores) as Record<string, number | null>;
+      const pb = JSON.parse(row.pb ?? '{}') as Record<string, number | null>;
+      const runs = JSON.parse(row.run_counts ?? '{}') as Record<string, number>;
       await Promise.all(
         scenarios.map(async (scenario) => {
           const res = await scoreInWindow(
@@ -346,18 +423,58 @@ async function refreshScores(match: Match) {
             scenario,
             match.started_at!,
             end,
+            want,
           );
-          if (res.ok && res.score !== null) scores[scenario] = res.score;
+          // Settled the moment the run cap is reached: KovaaK's only hands back
+          // the last 50 runs, so someone grinding a scenario past that would
+          // eventually push their real first three off the end of the page and
+          // start scoring on later ones. Their score stops moving instead.
+          const settled = (runs[scenario] ?? 0) >= want;
+          if (res.ok && res.score !== null && !settled) scores[scenario] = res.score;
           else if (!(scenario in scores)) scores[scenario] = null;
+          // Their best before the match, kept from the first answer only: the
+          // 50-run page it comes out of slides forward as they play, so asking
+          // again later would quietly lower the bar they had to beat.
+          if (res.ok && !(scenario in pb)) pb[scenario] = res.prior;
+          // Runs only ever go up. A blink from KovaaK's must not read as
+          // "they un-played it" and re-open a match that had finished.
+          if (res.ok) runs[scenario] = Math.max(runs[scenario] ?? 0, res.runs);
         }),
       );
-      db.prepare('update match_player set scores = ? where match_id = ? and discord_id = ?').run(
+      db.prepare(
+        `update match_player set scores = ?, pb = ?, run_counts = ?
+         where match_id = ? and discord_id = ?`,
+      ).run(
         JSON.stringify(scores),
+        JSON.stringify(pb),
+        JSON.stringify(runs),
         match.id,
         row.discord_id,
       );
     }),
   );
+}
+
+/** Whether this match has nothing left to play - see allRunsUsed(). */
+function nothingLeftToPlay(match: Match) {
+  return allRunsUsed(
+    JSON.parse(match.scenarios),
+    matchPlayers(match.id).map((r) => JSON.parse(r.run_counts ?? '{}') as Record<string, number>),
+    getFormat(match.guild_id).runs,
+  );
+}
+
+/** Reads the scores, then ends the match if nobody has a run left. Every path
+ *  that refreshes goes through here, so a match can't sit finished-but-open
+ *  waiting for the next tick. */
+async function refreshMatch(match: Match) {
+  await refreshScores(match);
+  const fresh = getMatch(match.id)!;
+  if (fresh.status === 'live' && nothingLeftToPlay(fresh)) {
+    await concludeMatch(fresh);
+    return getMatch(match.id)!;
+  }
+  return fresh;
 }
 
 async function finishMatch(match: Match) {
@@ -381,19 +498,23 @@ async function finishMatch(match: Match) {
     scores: JSON.parse(r.scores) as Record<string, number | null>,
   }));
 
-  // Nobody ran a single scenario, so there is nothing to score. Not-played
-  // counts as 0, every side ties at 0, and a tie shares the better placing -
-  // which would hand a win to everyone in a match that never happened.
-  // A no-contest is its own end state: no Elo, no W/L, and not a played match.
-  if (!entrants.some((e) => scenarios.some((s) => e.scores[s] != null))) {
+  // Only whoever actually ran something is scored - see scorable(). Not-played
+  // counts as 0, so leaving a no-show in hands their opponent free Elo for a
+  // game nobody turned up to, and hands them a loss for it. Their row keeps a
+  // null placing, which is what marks it "not rated" in the result.
+  //
+  // With fewer than two sides left there was no contest at all. That is its own
+  // end state: no Elo, no W/L, and not a played match.
+  const scoring = scorable(entrants);
+  if (!scoring.length) {
     db.prepare("update match set status = 'void' where id = ?").run(done.id);
     return { match: getMatch(done.id)!, deltas: new Map<string, number>(), voided: true };
   }
 
-  const placing = placings(entrants, scenarios);
-  const deltas = eloDeltas(entrants, placing);
+  const placing = placings(scoring, scenarios);
+  const deltas = eloDeltas(scoring, placing);
 
-  for (const entrant of entrants) {
+  for (const entrant of scoring) {
     const place = placing.get(entrant.team)!;
     const delta = deltas.get(entrant.id)!;
     // ponytail: a win is placing 1, everything else is a loss - no draws column
@@ -477,7 +598,8 @@ async function concludeMatch(match: Match) {
   const cfg = getConfig(done.guild_id);
   const channelId = cfg.split_results_id ?? done.channel_id;
   const channel = await client.channels.fetch(channelId).catch(() => null);
-  const posted = channel?.isSendable() ? await channel.send({ embeds: [embed] }).catch(() => null) : null;
+  const message = { embeds: [embed], components: [rematchRow(done)] };
+  const posted = channel?.isSendable() ? await channel.send(message).catch(() => null) : null;
 
   // The thread is the match, and once the result lives elsewhere it has nothing
   // left to say. If posting failed it becomes the record instead - the scores
@@ -488,7 +610,7 @@ async function concludeMatch(match: Match) {
       ? await home.messages.fetch(done.message_id).catch(() => null)
       : null;
   if (!posted) {
-    await msg?.edit({ embeds: [embed], components: [] }).catch(() => {});
+    await msg?.edit(message).catch(() => {});
   } else {
     await closeThread(done);
     // Deleting the thread took the message with it; without one it is still
@@ -535,15 +657,26 @@ async function expireStaleCalls() {
   }
 }
 
-/** A side that walks away would hold the lobby forever, so the bot bans for
- *  them. Random, not "first in the list" - a predictable auto-ban is a strategy. */
-async function expireStaleBans() {
-  const stalled = db
-    .prepare("select * from match where status = 'banning' and created_at < ?")
-    .all(Date.now() - BAN_TTL_MS) as unknown as Match[];
+/** A side that walks away would hold the lobby forever, so the bot acts for
+ *  them - ban or pick, whichever is due. Random, not "first in the list": a
+ *  predictable auto-pick is a strategy. */
+async function expireStalePicks() {
+  const picking = db
+    .prepare("select * from match where status = 'banning'")
+    .all() as unknown as Match[];
+  // Each guild's own window, same as the call sweep above.
+  const stalled = picking.filter(
+    (m) => m.created_at < Date.now() - getFormat(m.guild_id).pickTtlS * 1000,
+  );
   for (const match of stalled) {
-    const { pool } = banState(match);
-    const next = applyBan(match, Math.floor(Math.random() * pool.length));
+    const phase = pickState(match);
+    // A phase this version can't read, or one with nothing left on the table,
+    // can never be finished by anyone - by a player or by this sweep.
+    if (!phase || !phase.pool.length) {
+      await cancelMatch(match);
+      continue;
+    }
+    const next = applyPick(match, Math.floor(Math.random() * phase.pool.length));
     // reset the clock so the next side gets its own full window
     if (next.status === 'banning') {
       db.prepare('update match set created_at = ? where id = ?').run(Date.now(), match.id);
@@ -552,19 +685,50 @@ async function expireStaleBans() {
   }
 }
 
+/** What each panel last said, by message id. The counts move only when a match
+ *  starts or ends, so comparing before fetching means a quiet server costs
+ *  nothing at all - no request, no edit, no rate limit spent on saying the same
+ *  thing sixty times an hour. Empty after a restart, which costs one edit. */
+const panelText = new Map<string, string>();
+
+/** Keeps the panels' counts honest. A panel whose message or channel is gone is
+ *  forgotten rather than chased every minute. */
+async function refreshPanels() {
+  for (const [guildId] of client.guilds.cache) {
+    for (const panel of getPanels(guildId)) {
+      const body = panelMessage(panel.formats, guildId);
+      const next = body.embeds[0].data.description ?? '';
+      if (panelText.get(panel.message) === next) continue;
+
+      const channel = await client.channels.fetch(panel.channel).catch(() => null);
+      const msg = channel?.isTextBased()
+        ? await channel.messages.fetch(panel.message).catch(() => null)
+        : null;
+      if (!msg) {
+        dropPanel(guildId, panel.channel);
+        panelText.delete(panel.message);
+        continue;
+      }
+      await msg.edit(body).catch(() => {});
+      panelText.set(panel.message, next);
+    }
+  }
+}
+
 async function tick() {
+  await refreshPanels();
   await expireStaleCalls();
-  await expireStaleBans();
+  await expireStalePicks();
   const live = db
     .prepare("select * from match where status = 'live'")
     .all() as unknown as Match[];
   for (const match of live) {
-    if (Date.now() - (match.started_at ?? 0) >= MATCH_TTL_MS) {
+    if (Date.now() - (match.started_at ?? 0) >= getFormat(match.guild_id).matchTtlMin * 60_000) {
       await concludeMatch(match);
       continue;
     }
-    await refreshScores(match);
-    await editMatchMessage(getMatch(match.id)!);
+    const fresh = await refreshMatch(match);
+    if (fresh.status === 'live') await editMatchMessage(fresh);
   }
 }
 
@@ -637,16 +801,35 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
       return;
     }
     const games = p.wins + p.losses;
-    await i.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle(p.kovaaks_username)
-          .setColor(0x5865f2)
-          .setDescription(
-            `**${p.elo}** ${rankName(getRanks(i.guildId!), p.elo)}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
-          ),
-      ],
-    });
+    const embed = new EmbedBuilder()
+      .setTitle(p.kovaaks_username)
+      .setColor(0x5865f2)
+      .setDescription(
+        `**${p.elo}** ${rankName(getRanks(i.guildId!), p.elo)}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
+      );
+
+    const recent = recentMatches(target.id, i.guildId!);
+    if (recent.length) {
+      embed.addFields({
+        name: `Last ${recent.length}`,
+        value: recent
+          .map((m) => {
+            const delta = (m.elo_after ?? 0) - (m.elo_before ?? 0);
+            const when = m.ended_at ? ` · <t:${Math.floor(m.ended_at / 1000)}:R>` : '';
+            return `${m.placing === 1 ? '✅' : '❌'} ${m.format} · ${delta >= 0 ? '+' : ''}${delta}${when}`;
+          })
+          .join('\n'),
+      });
+    }
+    // Only worth a field when they have actually met - "0W 0L" against everyone
+    // you look up is noise.
+    if (target.id !== i.user.id) {
+      const h2h = headToHead(i.user.id, target.id, i.guildId!);
+      if (h2h.wins + h2h.losses) {
+        embed.addFields({ name: 'Against you', value: `${h2h.wins}W ${h2h.losses}L` });
+      }
+    }
+    await i.reply({ embeds: [embed] });
     return;
   }
 
@@ -700,10 +883,11 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
     return;
   }
   await i.deferReply({ flags: MessageFlags.Ephemeral });
-  await refreshScores(match);
-  const fresh = getMatch(match.id)!;
+  const fresh = await refreshMatch(match);
   await i.editReply(render(fresh));
-  await editMatchMessage(fresh);
+  // A match that just ended has posted its result and taken its thread with it,
+  // so there is nothing left in there to edit.
+  if (fresh.status === 'live') await editMatchMessage(fresh);
 }
 
 async function onButton(i: import('discord.js').ButtonInteraction) {
@@ -719,9 +903,12 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
   const rows = matchPlayers(match.id);
   const isOpener = i.user.id === match.host_id;
 
-  if (action === 'ban') {
+  if (action === 'rematch') return onRematch(i, match);
+
+  // 'ban' is what the buttons on an older message carry; same step either way.
+  if (action === 'pick' || action === 'ban') {
     if (match.status !== 'banning') {
-      await i.reply({ content: 'Banning is over for that one.', flags: MessageFlags.Ephemeral });
+      await i.reply({ content: 'That one is past picking.', flags: MessageFlags.Ephemeral });
       return;
     }
     const mine = rows.find((r) => r.discord_id === i.user.id);
@@ -729,13 +916,24 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       await i.reply({ content: "You're not in that match.", flags: MessageFlags.Ephemeral });
       return;
     }
-    const { turn } = banState(match);
-    if (mine.team !== turn) {
-      await i.reply({ content: "Not your side's ban.", flags: MessageFlags.Ephemeral });
+    const phase = pickState(match);
+    if (!phase) {
+      await i.reply({
+        content: 'That match was mid-pick when the bot changed under it, so it has been dropped.',
+        flags: MessageFlags.Ephemeral,
+      });
+      await cancelMatch(match);
+      return;
+    }
+    if (mine.team !== phase.turn) {
+      await i.reply({
+        content: `Not your ${phase.action}.`,
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
     await i.deferUpdate();
-    await editMatchMessage(applyBan(match, Number(extra)));
+    await editMatchMessage(applyPick(match, Number(extra)));
     return;
   }
 
@@ -829,8 +1027,10 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       return;
     }
     await i.deferUpdate();
-    await refreshScores(match);
-    await i.editReply(render(getMatch(match.id)!));
+    const fresh = await refreshMatch(match);
+    // Concluding deleted the thread this message lived in; editing it now would
+    // only fail.
+    if (fresh.status === 'live') await i.editReply(render(fresh));
     return;
   }
 
@@ -873,18 +1073,7 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   );
 
   const ranks = getRanks(i.guildId);
-
-  const { lastInsertRowid } = db
-    .prepare(
-      `insert into match (guild_id, channel_id, host_id, format, created_at)
-       values (?, ?, ?, ?, ?)`,
-    )
-    .run(i.guildId, i.channelId, i.user.id, format, Date.now());
-  const matchId = Number(lastInsertRowid);
-  db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(
-    matchId,
-    i.user.id,
-  );
+  const match = createCall(i.guildId, i.channelId, i.user.id, format);
 
   // Ping the bands this queue would actually admit, rather than everyone. That
   // is the whole reason not to split the queue into a channel per rank: the
@@ -897,7 +1086,7 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   const mentions = [...new Set([...(always ? [always] : []), ...reach])];
 
   await i.reply({
-    ...render(getMatch(matchId)!),
+    ...render(match),
     ...(mentions.length
       ? {
           content: mentions.map((id) => `<@&${id}>`).join(' '),
@@ -906,7 +1095,59 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
       : {}),
   });
   const msg = await i.fetchReply();
-  db.prepare('update match set message_id = ? where id = ?').run(msg.id, matchId);
+  db.prepare('update match set message_id = ? where id = ?').run(msg.id, match.id);
+}
+
+/** A lobby row with its opener already seated. The panel and Rematch both land
+ *  here, so a call is created in exactly one place. */
+function createCall(guildId: string, channelId: string, hostId: string, format: Format) {
+  const { lastInsertRowid } = db
+    .prepare(
+      `insert into match (guild_id, channel_id, host_id, format, created_at)
+       values (?, ?, ?, ?, ?)`,
+    )
+    .run(guildId, channelId, hostId, format, Date.now());
+  const id = Number(lastInsertRowid);
+  db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(id, hostId);
+  return getMatch(id)!;
+}
+
+/** Rematch: a fresh call back in the queue channel the last one came from, with
+ *  the players of that match pinged instead of the rank roles.
+ *
+ *  Deliberately NOT a lobby that seats everyone and starts itself - a rematch
+ *  nobody agreed to is a match with an empty seat in it. Everyone presses Join
+ *  again, which also keeps the rank gate and the fill-to-start doing their job. */
+async function onRematch(i: import('discord.js').ButtonInteraction, old: Match) {
+  const was = matchPlayers(old.id);
+  if (!was.some((r) => r.discord_id === i.user.id)) {
+    await i.reply({
+      content: 'Only someone who played it can call a rematch.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const channel = await client.channels.fetch(old.channel_id).catch(() => null);
+  if (!channel?.isSendable()) {
+    await i.reply({
+      content: 'That queue channel is gone, so there is nowhere to post it.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const match = createCall(old.guild_id, old.channel_id, i.user.id, old.format);
+  const others = was.map((r) => r.discord_id).filter((id) => id !== i.user.id);
+  const msg = await channel.send({
+    ...render(match),
+    ...(others.length
+      ? { content: others.map((id) => `<@${id}>`).join(' '), allowedMentions: { users: others } }
+      : {}),
+  });
+  db.prepare('update match set message_id = ? where id = ?').run(msg.id, match.id);
+  await i.reply({
+    content: `Rematch is up in <#${old.channel_id}>.`,
+    flags: MessageFlags.Ephemeral,
+  });
 }
 
 async function editMatchMessage(match: Match) {

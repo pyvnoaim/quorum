@@ -1,9 +1,14 @@
 import { DatabaseSync } from 'node:sqlite';
 import {
+  BAN_TTL_MS,
   DEFAULT_CATEGORIES,
   DEFAULT_RANK_SPREAD,
   DEFAULT_RANKS,
   BASE_ELO,
+  MATCH_TTL_MS,
+  PICK_POOL,
+  ROUNDS,
+  RUNS_PER_SCENARIO,
   SEED_MODES,
   type Format,
   type SeedMode,
@@ -112,6 +117,11 @@ for (const stmt of [
   // `scenarios` shrinks in place as bans land, so what was banned is gone by
   // the time the match ends. History wants both halves.
   'alter table match add column ban_pool text',
+  'alter table match_player add column pb text',
+  'alter table match_player add column run_counts text',
+  'alter table guild_config add column format_cfg text',
+  // Where the queue panels are, so the tick can keep their counts honest.
+  'alter table guild_config add column panel_msgs text',
 ]) {
   try {
     db.exec(stmt);
@@ -202,6 +212,10 @@ export interface GuildConfig {
   split_results_id: string | null;
   /** Minutes before an untaken call is binned. 0 = never, null = the default. */
   call_ttl_min: number | null;
+  /** JSON: the format's own knobs - see getFormat(). Null = every default. */
+  format_cfg: string | null;
+  /** JSON: the panels this server has up - see getPanels(). */
+  panel_msgs: string | null;
 }
 
 export const getSeedMode = (guildId: string): SeedMode => {
@@ -234,6 +248,108 @@ export function getRankSpread(guildId: string): Record<Format, number> {
 export function setRankSpread(guildId: string, spread: Record<string, number>) {
   setConfig(guildId, { rank_spread: JSON.stringify(spread) });
   return getRankSpread(guildId);
+}
+
+/** The knobs of the match format itself, per server. */
+export interface FormatConfig {
+  /** Scenarios in a match. The last one is always the random roll. */
+  rounds: number;
+  /** Runs counted per scenario - the best of the first this many. */
+  runs: number;
+  /** Candidates offered per pick, before the two bans. */
+  pickPool: number;
+  /** Seconds a side gets to ban or pick before the bot does it for them. */
+  pickTtlS: number;
+  /** Minutes before a live match force-finishes on whatever KovaaK's has. */
+  matchTtlMin: number;
+}
+
+/** Bounds, not taste: outside these the format stops working rather than
+ *  becoming a different format. Five candidates is one Discord row of buttons,
+ *  and two is the fewest a ban-then-pick can start from. */
+const FORMAT_BOUNDS: Record<keyof FormatConfig, [number, number]> = {
+  rounds: [1, 5],
+  runs: [1, 10],
+  pickPool: [2, 5],
+  pickTtlS: [15, 600],
+  matchTtlMin: [5, 240],
+};
+
+const FORMAT_DEFAULTS: FormatConfig = {
+  rounds: ROUNDS,
+  runs: RUNS_PER_SCENARIO,
+  pickPool: PICK_POOL,
+  pickTtlS: Math.round(BAN_TTL_MS / 1000),
+  matchTtlMin: Math.round(MATCH_TTL_MS / 60000),
+};
+
+/** The format as this server runs it, falling back to the shipped default for
+ *  anything unset or out of bounds - the same shape as the rank spread, and for
+ *  the same reason: a junk column must never be able to stop a match. */
+export function getFormat(guildId: string): FormatConfig {
+  let saved: Record<string, unknown> = {};
+  try {
+    const raw = getConfig(guildId).format_cfg;
+    if (raw) saved = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    /* corrupt column falls back to the defaults rather than 500ing the page */
+  }
+  return Object.fromEntries(
+    (Object.keys(FORMAT_DEFAULTS) as (keyof FormatConfig)[]).map((key) => {
+      const [lo, hi] = FORMAT_BOUNDS[key];
+      const value = Math.trunc(Number(saved[key]));
+      return [key, Number.isFinite(value) && value >= lo && value <= hi ? value : FORMAT_DEFAULTS[key]];
+    }),
+  ) as unknown as FormatConfig;
+}
+
+/** Saves whatever is in bounds and keeps what is not - getFormat is the one
+ *  place that decides, so a bad number never reaches a match.
+ *
+ *  Only the known keys are taken: `patch` comes off the wire, and spreading it
+ *  whole would let anything with a Manage Server role park arbitrary keys - or,
+ *  for a string, a character per index - in the column forever. */
+export function setFormat(guildId: string, patch: Partial<FormatConfig>) {
+  const next = { ...getFormat(guildId) };
+  for (const key of Object.keys(FORMAT_DEFAULTS) as (keyof FormatConfig)[]) {
+    const value = (patch as Record<string, unknown>)?.[key];
+    if (value != null) next[key] = Math.trunc(Number(value));
+  }
+  setConfig(guildId, { format_cfg: JSON.stringify(next) });
+  return getFormat(guildId);
+}
+
+/** A panel this server has up: which message, in which channel, carrying which
+ *  formats. Split mode puts one in every rank's queue channel, each with a
+ *  single format, so one id would never have been enough. */
+export interface PanelRef {
+  channel: string;
+  message: string;
+  formats: Format[];
+}
+
+export function getPanels(guildId: string): PanelRef[] {
+  try {
+    const raw = getConfig(guildId).panel_msgs;
+    const list: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? (list as PanelRef[]).filter((p) => p?.channel && p?.message) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** One panel per channel: posting a new one replaces whatever was there, which
+ *  is also what makes "Post panel" safe to press twice. */
+export function setPanel(guildId: string, panel: PanelRef) {
+  const kept = getPanels(guildId).filter((p) => p.channel !== panel.channel);
+  setConfig(guildId, { panel_msgs: JSON.stringify([...kept, panel]) });
+}
+
+/** Forgets a panel whose message or channel is gone, so the tick stops chasing
+ *  it every minute. */
+export function dropPanel(guildId: string, channelId: string) {
+  const kept = getPanels(guildId).filter((p) => p.channel !== channelId);
+  setConfig(guildId, { panel_msgs: JSON.stringify(kept) });
 }
 
 export interface Rank {
@@ -284,6 +400,8 @@ export function getConfig(guildId: string): GuildConfig {
       split_category_id: null,
       split_results_id: null,
       call_ttl_min: null,
+      format_cfg: null,
+      panel_msgs: null,
     }
   );
 }
@@ -294,8 +412,8 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     `insert into guild_config
        (guild_id, panel_channel_id, results_channel_id, ping_role_id,
         rank_spread, split_channels, seed_mode, call_ttl_min,
-        split_category_id, split_results_id)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        split_category_id, split_results_id, format_cfg, panel_msgs)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
@@ -305,7 +423,9 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
        seed_mode = excluded.seed_mode,
        call_ttl_min = excluded.call_ttl_min,
        split_category_id = excluded.split_category_id,
-       split_results_id = excluded.split_results_id`,
+       split_results_id = excluded.split_results_id,
+       format_cfg = excluded.format_cfg,
+       panel_msgs = excluded.panel_msgs`,
   ).run(
     guildId,
     next.panel_channel_id,
@@ -317,6 +437,8 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.call_ttl_min,
     next.split_category_id,
     next.split_results_id,
+    next.format_cfg,
+    next.panel_msgs,
   );
   return next;
 }
@@ -455,6 +577,13 @@ export interface MatchPlayer {
   team: number;
   done: number;
   scores: string;
+  /** JSON {scenario: best score before this match, or null for none}, captured
+   *  on the first score refresh so it can't drift as they play. Null on a row
+   *  from before this was recorded. */
+  pb: string | null;
+  /** JSON {scenario: runs put in so far}. A match ends itself when everyone has
+   *  used all of them - see allRunsUsed(). Null on an older row. */
+  run_counts: string | null;
   placing: number | null;
   elo_before: number | null;
   elo_after: number | null;
@@ -539,6 +668,45 @@ export function matchHistory(guildId: string, limit = 25) {
   return matches.map((m) => ({ match: m, players: byMatch.get(m.id) ?? [] }));
 }
 
+/** How the two have gone against each other, from `a`'s side. Only matches they
+ *  played on opposite sides count - being on the same team says nothing about
+ *  which of them is better. */
+export function headToHead(a: string, b: string, guildId: string) {
+  const row = db
+    .prepare(
+      `select
+         sum(case when x.placing < y.placing then 1 else 0 end) as wins,
+         sum(case when x.placing > y.placing then 1 else 0 end) as losses
+       from match_player x
+       join match_player y on y.match_id = x.match_id and y.discord_id = ? and y.team <> x.team
+       join match m on m.id = x.match_id
+       where x.discord_id = ? and m.guild_id = ?
+         and x.placing is not null and y.placing is not null`,
+    )
+    .get(b, a, guildId) as { wins: number | null; losses: number | null };
+  return { wins: row?.wins ?? 0, losses: row?.losses ?? 0 };
+}
+
+/** Their last few finished games. A no-show is left out on purpose: it has no
+ *  placing, because nothing was scored. */
+export function recentMatches(discordId: string, guildId: string, limit = 5) {
+  return db
+    .prepare(
+      `select m.id, m.format, m.ended_at, p.placing, p.elo_before, p.elo_after
+       from match_player p join match m on m.id = p.match_id
+       where p.discord_id = ? and m.guild_id = ? and p.placing is not null
+       order by m.ended_at desc limit ?`,
+    )
+    .all(discordId, guildId, limit) as unknown as {
+    id: number;
+    format: string;
+    ended_at: number | null;
+    placing: number;
+    elo_before: number | null;
+    elo_after: number | null;
+  }[];
+}
+
 /** The overview page's numbers. Two counts here; everything else it shows the
  *  dashboard already has on the wire. */
 export function guildStats(guildId: string) {
@@ -550,6 +718,10 @@ export function guildStats(guildId: string) {
       "select count(*) as n from match where guild_id = ? and status = 'done' and ended_at > ?",
       guildId,
       Date.now() - 7 * 24 * 60 * 60 * 1000,
+    ),
+    running: one(
+      "select count(*) as n from match where guild_id = ? and status in ('lobby','banning','live')",
+      guildId,
     ),
     rated: one(
       `select count(*) as n from player p

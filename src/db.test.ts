@@ -9,11 +9,15 @@ const {
   getRanks,
   getScenarios,
   getConfig,
+  getFormat,
   getRankSpread,
   guildStats,
+  headToHead,
   leaderboard,
+  recentMatches,
   rankChannels,
   setConfig,
+  setFormat,
   setRankChannels,
   setRankSpread,
   playersInGuild,
@@ -135,11 +139,30 @@ assert.ok(
 
 // The saved spread is the only thing that decides the gate: a rank channel is
 // made visible to exactly the roles it admits, so the two cannot disagree.
-setRankSpread('gc', { '1v1': 2, '2v2': 2, group: 2 });
-assert.deepEqual(getRankSpread('gc'), { '1v1': 2, '2v2': 2, group: 2 }, 'stored spread applies');
-setRankSpread('gc', { '1v1': 0, '2v2': 1, group: 1 });
+setRankSpread('gc', { '1v1': 2 });
+assert.deepEqual(getRankSpread('gc'), { '1v1': 2 }, 'stored spread applies');
+setRankSpread('gc', { '1v1': 0 });
 assert.equal(getRankSpread('gc')['1v1'], 0, 'and a per-format spread is kept per format');
-assert.equal(getRankSpread('gc')['2v2'], 1);
+// a format that is turned off is not carried back in from a stored spread
+setRankSpread('gc', { '1v1': 1, '2v2': 3 });
+assert.deepEqual(getRankSpread('gc'), { '1v1': 1 }, 'only live formats come back');
+
+// The format's knobs: clamped on the way out, and only the known keys survive
+// the trip in - the patch comes off the wire.
+{
+  const shipped = getFormat('gf');
+  assert.equal(shipped.rounds, 3);
+  assert.equal(shipped.runs, 3);
+  assert.equal(setFormat('gf', { runs: 5 }).runs, 5, 'a value in bounds is kept');
+  assert.equal(setFormat('gf', { runs: 99 }).runs, 3, 'out of bounds falls back to the default');
+  assert.equal(getFormat('gf').rounds, 3, 'and the rest of the format is untouched');
+  // junk keys, and a patch that is not even an object, must not reach the column
+  setFormat('gf', { pickPool: 4, nonsense: 'x' } as never);
+  setFormat('gf', 'oops' as never);
+  assert.deepEqual(Object.keys(getFormat('gf')).sort(), Object.keys(shipped).sort());
+  assert.equal(getFormat('gf').pickPool, 4, 'the real key still landed');
+  assert.ok(!(getConfig('gf').format_cfg ?? '').includes('nonsense'), 'nothing else is stored');
+}
 
 // The claim behind startMatch and finishMatch. Force-finish, the last Done and
 // the clock can all reach the same match, each holding a row that went stale
@@ -156,5 +179,36 @@ const claim = () =>
   );
 assert.equal(claim(), 1, 'the first caller wins the match');
 assert.equal(claim(), 0, 'the second has nothing to score');
+
+// Head-to-head and recent form, off the rows a finished match already writes.
+{
+  const seed = (id: number, ended: number, aPlace: number | null, bPlace: number | null) => {
+    db.prepare(
+      "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at) values (?,'gh','c','h1','1v1','done',?)",
+    ).run(id, ended);
+    db.prepare(
+      'insert into match_player (match_id, discord_id, team, placing, elo_before, elo_after) values (?,?,0,?,1000,?)',
+    ).run(id, 'h1', aPlace, 1000 + (aPlace === 1 ? 16 : -16));
+    db.prepare(
+      'insert into match_player (match_id, discord_id, team, placing, elo_before, elo_after) values (?,?,1,?,1000,?)',
+    ).run(id, 'h2', bPlace, 1000 + (bPlace === 1 ? 16 : -16));
+  };
+  seed(101, 1000, 1, 2);
+  seed(102, 2000, 1, 2);
+  seed(103, 3000, 2, 1);
+  // a no-contest: no placings, so it is nobody's win and nobody's last game
+  seed(104, 4000, null, null);
+  // a third player h1 never met
+  db.prepare("insert into match_player (match_id, discord_id, team, placing) values (101,'h3',1,2)").run();
+
+  assert.deepEqual(headToHead('h1', 'h2', 'gh'), { wins: 2, losses: 1 });
+  assert.deepEqual(headToHead('h2', 'h1', 'gh'), { wins: 1, losses: 2 }, 'and the other way round');
+  assert.deepEqual(headToHead('h1', 'nobody', 'gh'), { wins: 0, losses: 0 }, 'never met');
+  assert.deepEqual(headToHead('h1', 'h2', 'other'), { wins: 0, losses: 0 }, 'scoped to a server');
+
+  const form = recentMatches('h1', 'gh');
+  assert.deepEqual(form.map((m) => m.id), [103, 102, 101], 'newest first, no-contest left out');
+  assert.equal(form[0].elo_after! - form[0].elo_before!, -16);
+}
 
 console.log('db ok');

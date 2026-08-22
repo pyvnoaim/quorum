@@ -39,7 +39,7 @@ export const PAGE = /* html */ `<!doctype html>
        plain centring would push its top off the top edge. */
     display: flex; flex-direction: column; align-items: center; justify-content: safe center;
   }
-  main { width: 100%; max-width: 720px; padding: 64px 24px 96px; position: relative; }
+  main { width: 100%; max-width: 720px; padding: 64px 24px; position: relative; }
   /* Glass over the dither: the texture stays sharp around the page and goes
      soft under it, which is what makes text on a moving background readable
      without covering the background up. Not on the sign-in page - there the
@@ -52,10 +52,12 @@ export const PAGE = /* html */ `<!doctype html>
     background: color-mix(in srgb, var(--bg) 55%, transparent);
     backdrop-filter: blur(20px) saturate(115%);
     -webkit-backdrop-filter: blur(20px) saturate(115%);
-    padding: 40px 32px 64px;
+    /* even top and bottom: the slab is a card, and 24px more under the last row
+       than over the header reads as the content having slipped upwards. */
+    padding: 40px 32px;
   }
   @media (max-width: 760px) {
-    main:not(:has(.login)) { margin: 0; border: 0; border-radius: 0; padding: 32px 20px 64px; }
+    main:not(:has(.login)) { margin: 0; border: 0; border-radius: 0; padding: 32px 20px; }
   }
   #bg { position: fixed; inset: 0; width: 100%; height: 100%; display: none; }
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 48px; }
@@ -85,9 +87,17 @@ export const PAGE = /* html */ `<!doctype html>
        the bar never lands on the content and switching panes never shifts it */
     scrollbar-gutter: stable; padding-right: 14px;
   }
+  /* The pane carries the scrollbar, so its cards are inset from the frame edge.
+     The header sits outside that frame and has to take the same inset, or the
+     Sign out button hangs off the right of everything below it. */
+  main:has(.dash) header { padding-right: 14px; }
   .dash { display: grid; grid-template-columns: 190px 1fr; gap: 48px; align-items: start; }
   #side { position: sticky; top: 32px; display: grid; gap: 2px; }
+  /* In the sidebar this card is a label saying which server you are editing -
+     it goes nowhere, so it must not light up under the cursor like the ones on
+     the home list that do. */
   #side .server { cursor: default; margin-bottom: 14px; padding: 10px 12px; }
+  #side .server:hover { border-color: var(--line); }
   #side a {
     display: flex; align-items: center; gap: 10px;
     padding: 7px 11px; border-radius: 6px; color: var(--muted); text-decoration: none;
@@ -161,8 +171,13 @@ export const PAGE = /* html */ `<!doctype html>
   .ladder tr + tr { border-top: 1px solid var(--line); }
   /* a rank reads as its colour first, so the dot carries it and the text
      borrows it at low weight rather than shouting. */
+  /* An inline-flex box takes its baseline from its first child, and these two
+     have different ones - an 8px dot against an 18px icon - so left on
+     baselines their labels sit at different heights. Both align on their own
+     middle instead, which is where the label already sits in each. */
   .rank {
     display: inline-flex; align-items: center; gap: 7px; font-size: 13px;
+    vertical-align: middle;
     color: color-mix(in srgb, var(--c) 78%, var(--fg));
   }
   .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--c); flex: none; }
@@ -199,8 +214,17 @@ export const PAGE = /* html */ `<!doctype html>
     padding: 3px 9px; border-radius: 999px;
   }
   .tag svg { width: 12px; height: 12px; }
-  .volt { padding-left: 3px; gap: 6px; color: var(--fg); }
-  .volt img { width: 18px; height: 18px; object-fit: contain; }
+  /* Voltaic standing reads as a rank, not a badge - same size and rhythm as the
+     ladder rank beside it, with the icon doing what that one's dot does. A
+     bordered chip next to a bare rank makes the two look like different kinds
+     of thing when they are the same kind of thing. */
+  .volt {
+    display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+    font-size: 13px; color: var(--fg); vertical-align: middle;
+  }
+  /* 16, not 18: the icon should read as the same weight as the dot beside it,
+     not as the tallest thing in the row. */
+  .volt img { width: 16px; height: 16px; object-fit: contain; }
   .volt .done { color: var(--muted); }
   h1 a { text-decoration: none; }
   /* Panes stack headed blocks, same as the home list does - a second heading
@@ -692,6 +716,8 @@ const ICONS = {
   arrow: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  // lucide 'list-ordered' - the format IS an order of steps
+  steps: '<line x1="10" x2="21" y1="6" y2="6"/><line x1="10" x2="21" y1="12" y2="12"/><line x1="10" x2="21" y1="18" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>',
   layers: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
 };
 /** Pinned to en-US: the page is written in English, and a German browser
@@ -905,12 +931,12 @@ function confirmDanger({ title, body, name, confirm }) {
   });
 }
 
-/** Voltaic standing as its own badge. An unknown rank name still renders - the
- *  icon just falls away rather than the whole chip disappearing. */
+/** Voltaic standing, styled as a rank. An unknown rank name still renders - the
+ *  icon just falls away rather than the whole thing disappearing. */
 const voltaicChip = (v) => {
   if (!v) return '';
   const art = RANK_ICONS[v.rank];
-  return \`<span class="tag volt" title="Voltaic S5 \${h(v.difficulty)}\${
+  return \`<span class="volt" title="Voltaic S5 \${h(v.difficulty)}\${
     v.complete ? ', complete' : ''}">\${
     art ? \`<img src="\${art}" alt="" />\` : ''}\${h(v.rank)}\${
     v.complete ? '<span class="done">✦</span>' : ''}</span>\`;
@@ -1096,6 +1122,7 @@ function watchForInvites() {
 const PANES = [
   ['overview', 'Overview', 'gauge'],
   ['setup', 'Setup', 'sliders'],
+  ['format', 'Format', 'steps'],
   ['queues', 'Queues', 'layers'],
   ['matches', 'Matches', 'swords'],
   ['ranks', 'Ranks', 'trophy'],
@@ -1244,6 +1271,17 @@ async function renderGuild(guild) {
     </div>
     </section>
 
+    <section id="format">
+    <h2>Format</h2>
+    <p class="muted">How a match is played. These are the rules the bot enforces - the pick phase, and what
+    counts as your score.</p>
+    <div id="formatbox"></div>
+    <div class="bar">
+      <button class="btn solid" id="savefmt">Save format</button>
+      <span class="status" id="fmtstatus"></span>
+    </div>
+    </section>
+
     <section id="queues">
     <h2>Queues</h2>
     <p class="muted">How far apart two ranks may be for a queue to admit them. A call pings exactly the ranks it can let in.</p>
@@ -1327,11 +1365,80 @@ async function renderGuild(guild) {
   const example = (n) => {
     if (!ladder.length) return 'Add a rank ladder first.';
     const mid = Math.min(1, ladder.length - 1);
-    const from = Math.max(0, mid - n);
-    const reach = ladder.slice(from, mid + n + 1);
-    return \`\${h(ladder[mid].name)} queues with \${reach.map((r) =>
-      \`<span class="rank" style="--c:\${h(r.color)}"><span class="dot"></span>\${h(r.name)}</span>\`).join('')}\`;
+    const chip = (r) =>
+      \`<span class="rank" style="--c:\${h(r.color)}"><span class="dot"></span>\${h(r.name)}</span>\`;
+    // A rank always queues with itself, so listing it back says nothing - what
+    // the number actually buys is who ELSE gets in.
+    const others = ladder
+      .slice(Math.max(0, mid - n), mid + n + 1)
+      .filter((r) => r !== ladder[mid]);
+    return others.length
+      ? \`\${chip(ladder[mid])} queues with \${others.map(chip).join('')}\`
+      : \`\${chip(ladder[mid])} queues with its own rank only\`;
   };
+  // The format pane: the shipped format up top, its knobs under it. Every one
+  // of these is a number the bot reads per match, so the preview line is built
+  // from the same values rather than written out by hand.
+  const fmt = { ...data.format };
+  const FMT_FIELDS = [
+    ['rounds', 'Scenarios per match', 1, 5, 'the last one is always the random roll'],
+    ['runs', 'Runs per scenario', 1, 10, 'the best of the first this many counts - a later run does not'],
+    ['pickPool', 'Candidates per pick', 2, 5, 'both sides ban one out of these, then the picker takes one'],
+    ['pickTtlS', 'Ban or pick timer', 15, 600, 'seconds before the bot acts for a side that walked away'],
+    ['matchTtlMin', 'Match time limit', 5, 240, 'minutes before a live match scores on whatever KovaaK has'],
+  ];
+  const drawFormat = () => {
+    const bans = Math.max(0, Math.min(2, fmt.pickPool - 1));
+    const picks = Math.max(0, fmt.rounds - 1);
+    document.getElementById('formatbox').innerHTML = \`
+      <div class="cat">
+        <div class="cat-top"><strong>\${h(data.formats[0] ?? '1v1')}</strong>
+          <span class="hint">\${data.formats.length > 1
+            ? h(data.formats.slice(1).join(', ')) + ' as well'
+            : 'the only format right now'}</span></div>
+        <p class="muted" style="margin:0 0 14px">\${picks
+          ? \`\${picks} scenario\${picks === 1 ? '' : 's'} picked, one per category: the side with the
+             pick bans first, the other bans back, then it picks from the
+             \${Math.max(1, fmt.pickPool - bans)} left. The pick alternates, and scenario
+             \${fmt.rounds} is rolled at random.\`
+          : 'One scenario, rolled at random.'} Category order is random too.</p>
+        <div class="rows">
+        \${FMT_FIELDS.map(([key, label, lo, hi, hint]) => \`
+          <div class="qrow">
+            <label for="fmt-\${key}"><strong>\${h(label)}</strong>
+              <span class="hint"> - \${h(hint)}</span></label>
+            <input type="number" id="fmt-\${key}" data-k="\${key}"
+                   min="\${lo}" max="\${hi}" step="1" value="\${fmt[key]}" />
+          </div>\`).join('')}
+        </div>
+      </div>\`;
+    document.getElementById('formatbox').querySelectorAll('input').forEach((el) => {
+      el.oninput = () => {
+        const n = Number(el.value);
+        if (Number.isFinite(n)) fmt[el.dataset.k] = n;
+        drawFormat();
+        // redrawing steals focus, so put it back where the typing was
+        const back = document.getElementById(el.id);
+        back.focus();
+        back.setSelectionRange(back.value.length, back.value.length);
+      };
+    });
+  };
+  drawFormat();
+
+  document.getElementById('savefmt').onclick = async () => {
+    const el = document.getElementById('fmtstatus');
+    el.textContent = 'Saving…';
+    const res = await fetch(\`/api/guild/\${guild.id}/format\`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ format: fmt }),
+    });
+    // The server clamps, so what comes back is what a match will actually use.
+    if (res.ok) Object.assign(fmt, (await res.json()).format);
+    drawFormat();
+    el.textContent = res.ok ? 'Saved' : 'Save failed';
+  };
+
   let seedMode = data.seedMode ?? 'flat';
   const drawQueues = () => {
     // One row per format. Three cards for three dropdowns was three times the

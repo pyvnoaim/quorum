@@ -12,6 +12,7 @@ import {
   getConfig,
   getMatch,
   getSeedMode,
+  getFormat,
   getRankSpread,
   getRanks,
   rankChannels,
@@ -25,6 +26,8 @@ import {
   getPlayer,
   purgeGuild,
   setConfig,
+  setFormat,
+  setPanel,
   setRankChannels,
   setRankRole,
   setRankSpread,
@@ -346,7 +349,11 @@ async function syncRankChannelsToDiscord(
     setRankChannels(rank.id, { queue: made.id });
     // a queue channel is useless without its panel, and this is the only moment
     // we know the channel is new.
-    if (made.isSendable()) await made.send(panelMessage()).catch(() => {});
+    if (made.isSendable()) {
+      const posted = await made.send(panelMessage(undefined, guild.id)).catch(() => null);
+      // Remembered so the tick can keep its counts honest - see refreshPanels().
+      if (posted) setPanel(guild.id, { channel: made.id, message: posted.id, formats: [...PANEL_FORMATS] });
+    }
   }
   return { ok: true };
 }
@@ -377,7 +384,11 @@ async function postPanel(channel: GuildBasedChannel | undefined, formats: readon
   // channel. It must not take the other twenty down with it, and it must not
   // be swallowed either - a queue channel with no panel is a dead queue, and
   // the whole reason this button exists is that nobody could tell.
-  return !!(await channel.send(panelMessage(formats)).catch(() => null));
+  const posted = await channel.send(panelMessage(formats, channel.guild.id)).catch(() => null);
+  if (posted) {
+    setPanel(channel.guild.id, { channel: channel.id, message: posted.id, formats: [...formats] });
+  }
+  return !!posted;
 }
 
 /** The bot owns match lifecycle; the dashboard only asks it to act. Passing the
@@ -615,6 +626,7 @@ export function startWeb(client: Client, hooks: Hooks) {
             .filter((c) => c.type === ChannelType.GuildCategory)
             .map((c) => ({ id: c.id, name: c.name })),
           seedMode: getSeedMode(guildId),
+          format: getFormat(guildId),
           seedModes: SEED_MODES,
           stats: guildStats(guildId),
           top: leaderboard(guildId, 5).map((p) => ({ ...p, voltaic: readVoltaic(p.voltaic) })),
@@ -646,7 +658,13 @@ export function startWeb(client: Client, hooks: Hooks) {
             status: m.status,
             started_at: m.started_at,
             created_at: m.created_at,
-            scenarios: JSON.parse(m.scenarios),
+            // A match still picking stores its phase here, not a list. What it
+            // has settled on so far is the honest answer for the page.
+            scenarios: (() => {
+              const stored: unknown = JSON.parse(m.scenarios);
+              if (Array.isArray(stored)) return stored as string[];
+              return (stored as { picked?: string[] })?.picked ?? [];
+            })(),
             players: matchPlayers(m.id).map((r) => ({
               id: r.discord_id,
               name: getPlayer(r.discord_id)?.kovaaks_username ?? r.discord_id,
@@ -737,6 +755,15 @@ export function startWeb(client: Client, hooks: Hooks) {
         }
         setConfig(guildId, { seed_mode: mode });
         json(res, 200, { mode });
+        return;
+      }
+
+      // The format's own knobs. getFormat clamps and falls back, so a number
+      // the page never should have sent lands as the default rather than as a
+      // match nobody can finish.
+      if (action === '/format' && req.method === 'PUT') {
+        const body = await readJson(req);
+        json(res, 200, { format: setFormat(guildId, body.format ?? {}) });
         return;
       }
 

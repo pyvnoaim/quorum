@@ -1,5 +1,6 @@
 /** Dev harness: runs the real dashboard against a fake Discord.
- *  `npm run dev:web`, then open http://localhost:3001 to land signed in.
+ *  `npm run dev:web`, then open http://localhost:3011 to land signed in
+ *  (the dashboard itself is on :3010; :3011 is the one-hit fake login).
  *  ponytail: no OAuth app, no bot, no gateway - global fetch is stubbed for
  *  discord.com and the Client is a couple of Collections. Delete this file if
  *  you'd rather test against real credentials. */
@@ -118,10 +119,13 @@ const client: any = {
 ensurePlayer('900000000000000001', 'devadmin', '76561199174645837', { elo: 1150, from: 'Platinum' });
 ensurePlayer('900000000000000002', 'challenger', null, { elo: 950, from: 'flat' });
 if (!db.prepare('select 1 from match').get()) {
+  // Eight minutes in, so the card reads like a match someone is actually
+  // playing rather than one from last year.
+  const started = Date.now() - 8 * 60 * 1000;
   db.prepare(
     `insert into match (guild_id, channel_id, host_id, format, status, scenarios, created_at, started_at)
-     values (?, '201', '900000000000000001', '1v1', 'live', ?, 1750000000000, 1750000000000)`,
-  ).run(GUILD_ID, JSON.stringify(['poleTS', 'CircleTS', 'darkSwitch']));
+     values (?, '201', '900000000000000001', '1v1', 'live', ?, ?, ?)`,
+  ).run(GUILD_ID, JSON.stringify(['poleTS', 'CircleTS', 'darkSwitch']), started, started);
   const id = (db.prepare('select max(id) as id from match').get() as any).id;
   for (const p of ['900000000000000001', '900000000000000002'])
     db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(id, p);
@@ -129,11 +133,12 @@ if (!db.prepare('select 1 from match').get()) {
   // finished history, so the overview has stats and a ladder to draw - and so
   // the history table has rows with players, placings and deltas in them.
   for (let n = 0; n < 7; n++) {
-    // a full ban pool and the three that survived it, so history has something
-    // to expand onto.
-    const pool = ['poleTS', 'CircleTS', 'darkSwitch', 'domiSwitch Harder',
-      'FloatTS Angelic', 'popcorn v2', 'Ground Plaza'];
-    const play = pool.slice(0, 3);
+    // Both shortlists the pick phase put on the table, and the three that came
+    // out of it - so history has something to expand onto. The third scenario
+    // is a plain roll, which is why it is not in the pool.
+    const pool = ['poleTS', 'CircleTS', 'darkSwitch', 'domiSwitch Harder', 'FloatTS Angelic',
+      'popcorn v2', 'Ground Plaza', 'Bounce 180 Tracking', 'Pasu Voltaic Easy', 'Air Angelic 4'];
+    const play = ['poleTS', 'popcorn v2', 'tamTargetSwitch Control Hard'];
     db.prepare(
       `insert into match (guild_id, channel_id, host_id, format, status, scenarios, ban_pool, created_at, ended_at)
        values (?, '201', '900000000000000001', '1v1', 'done', ?, ?, 0, ?)`,
@@ -168,10 +173,24 @@ if (!db.prepare('select 1 from match').get()) {
       );
     }
   }
+  // Mid pick phase, in the shape the bot stores: scenario one settled, scenario
+  // two down to its last three after both bans, so the card shows a match
+  // waiting on side 1's pick.
+  const phase = {
+    picked: ['poleTS'],
+    cats: ['Speed', 'Evasive', 'Precision'],
+    pool: ['CircleTS', 'darkSwitch', 'domiSwitch Harder'],
+    size: 5,
+  };
   db.prepare(
-    `insert into match (guild_id, channel_id, host_id, format, status, scenarios, created_at)
-     values (?, '201', '900000000000000001', '2v2', 'banning', ?, ?)`,
-  ).run(GUILD_ID, JSON.stringify(['poleTS', 'CircleTS', 'darkSwitch', 'domiSwitch Harder', 'FloatTS Angelic']), Date.now());
+    `insert into match (guild_id, channel_id, host_id, format, status, scenarios, ban_pool, created_at)
+     values (?, '201', '900000000000000001', '1v1', 'banning', ?, ?, ?)`,
+  ).run(
+    GUILD_ID,
+    JSON.stringify(phase),
+    JSON.stringify(['poleTS', 'FloatTS Angelic', 'Ground Plaza', 'popcorn v2', 'Pasu Voltaic Easy']),
+    Date.now() - 40 * 1000,
+  );
   const banId = (db.prepare('select max(id) as id from match').get() as any).id;
   for (const p of ['900000000000000001', '900000000000000002'])
     db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(banId, p);

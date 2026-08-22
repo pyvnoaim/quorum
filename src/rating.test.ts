@@ -1,7 +1,17 @@
 // ponytail: one runnable check, no framework. `npx tsx src/rating.test.ts`.
 import assert from 'node:assert/strict';
-import { DEFAULT_RANKS } from './config.js';
-import { bandsInReach, banTurn, canPlay, eloDeltas, placings, rankName } from './rating.js';
+import { DEFAULT_RANKS, ROUNDS } from './config.js';
+import {
+  advancePick,
+  allRunsUsed,
+  bandsInReach,
+  pickTurn,
+  canPlay,
+  eloDeltas,
+  placings,
+  rankName,
+  scorable,
+} from './rating.js';
 import type { Entrant } from './rating.js';
 
 const scenarios = ['a', 'b', 'c'];
@@ -80,10 +90,50 @@ const p = (id: string, elo: number, team: number, s: (number | null)[]): Entrant
   assert.ok(d.get('third')! < 0 && d.get('second')! > 0); // 2nd of 4 gains, 3rd loses
 }
 
-// A no-show scores 0 for that round rather than crashing the match.
+// A missed scenario scores 0 for that round rather than crashing the match.
 {
-  const e = [p('played', 1000, 0, [100, null, 100]), p('afk', 1000, 1, [null, null, null])];
+  const e = [p('played', 1000, 0, [100, null, 100]), p('most', 1000, 1, [90, 90, null])];
   assert.equal(placings(e, scenarios).get(0), 1);
+}
+
+// Missing EVERY scenario is not a loss, it is a game that never happened. The
+// no-show must not hand their opponent free Elo, and must not eat a loss for it.
+{
+  const e = [p('played', 1000, 0, [100, 100, 100]), p('afk', 1000, 1, [null, null, null])];
+  assert.deepEqual(scorable(e), [], '1v1 with one side absent is no contest');
+  assert.deepEqual(
+    scorable([p('a', 1000, 0, [null, null, null]), p('b', 1000, 1, [null, null, null])]),
+    [],
+    'and so is nobody running anything - what finishMatch voids',
+  );
+
+  // A 2v2 with one absent teammate is still a real match - it just is not
+  // scored for them. Their side keeps the round totals it earned without them.
+  const four = [
+    p('a1', 1000, 0, [120, 120, 120]),
+    p('afk', 1000, 0, [null, null, null]),
+    p('b1', 1000, 1, [50, 50, 50]),
+    p('b2', 1000, 1, [50, 50, 50]),
+  ];
+  const played = scorable(four);
+  assert.deepEqual(played.map((x) => x.id), ['a1', 'b1', 'b2']);
+  assert.equal(placings(played, scenarios).get(0), 1, 'their side still won the rounds');
+  assert.equal(eloDeltas(played, placings(played, scenarios)).get('afk'), undefined, 'no delta');
+}
+
+// What ends a match on its own: everyone's runs in, on every scenario.
+{
+  const full = { a: 3, b: 3, c: 3 };
+  assert.ok(allRunsUsed(scenarios, [full, full], 3), 'both players played it out');
+  assert.ok(!allRunsUsed(scenarios, [full, { a: 3, b: 2, c: 3 }], 3), 'one run short is not done');
+  assert.ok(!allRunsUsed(scenarios, [full, { a: 3, b: 3 }], 3), 'a scenario never touched is not done');
+  assert.ok(!allRunsUsed(scenarios, [full, {}], 3), 'a no-show never ends the match - the clock does');
+  // Running extra is nobody's problem: only the first three ever counted.
+  assert.ok(allRunsUsed(scenarios, [{ a: 5, b: 3, c: 4 }, full], 3), 'more than asked still counts');
+  // A server that runs one run per scenario ends after one.
+  assert.ok(allRunsUsed(scenarios, [{ a: 1, b: 1, c: 1 }, { a: 1, b: 2, c: 1 }], 1));
+  assert.ok(!allRunsUsed(scenarios, [], 3), 'a match with nobody in it is not finished');
+  assert.ok(!allRunsUsed([], [full], 3), 'nor one with nothing to play');
 }
 
 assert.equal(rankName(DEFAULT_RANKS, 1400), 'Champion');
@@ -128,11 +178,82 @@ assert.deepEqual(bandsInReach(ladder, 1250, 0).map((r) => r.name), ['Gold']);
 assert.deepEqual(bandsInReach(ladder, 1250, 1).map((r) => r.name), ['Gold', 'Silver']);
 assert.deepEqual(bandsInReach([], 1250, 1), [], 'no ladder, nothing to ping');
 
-// ban phase: 7 candidates down to 3 is 4 bans, alternating, team 0 first
-const bans = [7, 6, 5, 4, 3].map((left) => banTurn(left, 7, 3));
-assert.deepEqual(bans.map((b) => b.turn), [0, 1, 0, 1, 0], 'sides alternate from team 0');
-assert.deepEqual(bans.map((b) => b.left), [4, 3, 2, 1, 0], 'bans left counts down to zero');
-// an even number of bans is what stops one side getting the last word
-assert.equal((7 - 3) % 2, 0, 'BAN_POOL - ROUNDS must be even');
+// The pick phase, one scenario at a time out of a shortlist of five.
+{
+  // Scenario 1 belongs to side 0: it bans first, side 1 bans back, side 0 picks.
+  const one = [5, 4, 3].map((left) => pickTurn(0, left, 5));
+  assert.deepEqual(one.map((s) => s.action), ['ban', 'ban', 'pick']);
+  assert.deepEqual(one.map((s) => s.turn), [0, 1, 0], 'picker bans first, opponent last');
+  assert.deepEqual(one.map((s) => s.bansLeft), [2, 1, 0]);
+
+  // Scenario 2 hands the pick to the other side, and the ban order with it.
+  const two = [5, 4, 3].map((left) => pickTurn(1, left, 5));
+  assert.deepEqual(two.map((s) => s.turn), [1, 0, 1], 'the pick alternates');
+  assert.equal(two[2].action, 'pick');
+
+  // Whoever picks bans first: the last ban is always the opponent's, so the
+  // pick is made against their ban rather than after their information.
+  for (const picked of [0, 1]) {
+    const steps = [5, 4].map((left) => pickTurn(picked, left, 5));
+    assert.equal(steps[0].turn, picked % 2);
+    assert.notEqual(steps[1].turn, picked % 2);
+  }
+
+  // A shortlist too thin for two bans still has to end in something playable.
+  assert.deepEqual(pickTurn(0, 2, 2), { action: 'ban', picker: 0, turn: 0, bansLeft: 1 });
+  assert.equal(pickTurn(0, 1, 2).action, 'pick', 'one left is the pick, not a third ban');
+  assert.equal(pickTurn(0, 1, 1).action, 'pick', 'a single candidate is simply played');
+}
+
+// A whole 1v1 pick phase, start to finish: ban ban pick, ban ban pick, roll.
+{
+  const pools: Record<string, string[]> = {
+    Speed: ['s1', 's2', 's3', 's4', 's5'],
+    Evasive: ['e1', 'e2', 'e3', 'e4', 'e5'],
+    Precision: ['p1', 'p2', 'p3', 'p4', 'p5'],
+  };
+  // deterministic stand-in for the db roll: take from the front, minus what is
+  // already locked in.
+  const roll = (category: string, want: number, taken: string[]) =>
+    (pools[category] ?? []).filter((s) => !taken.includes(s)).slice(0, want);
+
+  const cats = ['Speed', 'Evasive', 'Precision'];
+  let phase = { picked: [], cats, pool: roll('Speed', 5, []), size: 5 } as {
+    picked: string[];
+    cats: string[];
+    pool: string[];
+    size: number;
+  };
+  const acted: number[] = [];
+  let scenarios: string[] = [];
+
+  // Always take index 0, so what survives says exactly which step did what.
+  for (let step = 0; step < 6; step++) {
+    acted.push(pickTurn(phase.picked.length, phase.pool.length, phase.size).turn);
+    const next = advancePick(phase, 0, roll);
+    if ('scenarios' in next) {
+      scenarios = next.scenarios;
+      break;
+    }
+    phase = next.phase;
+  }
+
+  assert.deepEqual(acted, [0, 1, 0, 1, 0, 1], 'side 0 opens each scenario, sides alternate');
+
+  // A pool emptied mid-match plays what is settled instead of stalling in a
+  // phase with no buttons in it.
+  const stranded = advancePick(
+    { picked: ['s3'], cats, pool: ['e1', 'e2'], size: 5 },
+    0,
+    () => [],
+  );
+  assert.deepEqual(stranded, { scenarios: ['s3', 'e1'] }, 'the pick still counts');
+  assert.deepEqual(
+    scenarios,
+    ['s3', 'e3', 'p1'],
+    'two bans off the front then the pick, per category, and the last is rolled',
+  );
+  assert.equal(new Set(scenarios).size, ROUNDS, 'three distinct scenarios');
+}
 
 console.log('rating ok');
