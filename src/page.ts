@@ -964,6 +964,9 @@ async function renderGuild(guild) {
     <section id="queues">
     <h2>queues</h2>
     <p class="muted">How far apart two people's ranks may be for a queue to let them in, checked against everyone already in the lobby rather than just whoever opened it. Opening a call pings exactly these ranks, so nobody is notified about a game they'd be turned away from.</p>
+
+    <div class="cat" id="splitbox"></div>
+
     <div id="queuebox"></div>
     <div class="bar">
       <button class="btn solid" id="savequeues">Save queues</button>
@@ -1043,11 +1046,45 @@ async function renderGuild(guild) {
     return \`\${h(ladder[mid].name)} queues with \${reach.map((r) =>
       \`<span class="rank" style="--c:\${h(r.color)}"><span class="dot"></span>\${h(r.name)}</span>\`).join('')}\`;
   };
+  let split = !!data.split;
+  const drawSplit = () => {
+    document.getElementById('splitbox').innerHTML = \`
+      <div class="cat-top">
+        <strong>a channel per rank</strong>
+        <span class="tag">\${split ? 'on' : 'off'}</span>
+        <button class="btn\${split ? '' : ' solid'}" id="splitbtn" style="margin-left:auto">\${
+          split ? 'Turn off' : 'Turn on'}</button>
+      </div>
+      <p class="muted" style="margin:0">\${split
+        ? \`Quorum keeps a category per rank, each holding a channel per format plus results, and mirrors the ladder into them: rename a rank and its channels rename, delete one and its channels go with it. Turning this off deletes the \${data.ranks.length * 4} channels it made.\`
+        : \`One shared queue channel, with a call pinging the ranks it can admit. Turning this on makes \${data.ranks.length} categories and \${data.ranks.length * 4} channels, and splits your queue \${data.ranks.length * 3} ways - which is how a pick-up queue dies. Most servers want it off.\`}</p>
+      \${split ? '<p class="muted" style="margin:8px 0 0">The channel is the rule while this is on, so every queue below is locked to one rank.</p>' : ''}
+      <span class="status" id="splitstatus"></span>\`;
+
+    document.getElementById('splitbtn').onclick = async () => {
+      const el = document.getElementById('splitstatus');
+      el.textContent = split ? 'removing channels…' : 'creating channels…';
+      const res = await fetch(\`/api/guild/\${guild.id}/split\`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ on: !split }),
+      });
+      if (!res.ok) { el.textContent = 'failed'; return; }
+      split = (await res.json()).split;
+      // the gate is forced while split is on, so re-read rather than guess
+      const fresh = await (await fetch('/api/guild/' + guild.id)).json();
+      Object.assign(spread, fresh.spread);
+      drawSplit();
+      drawQueues();
+    };
+  };
+
   const drawQueues = () => {
     document.getElementById('queuebox').innerHTML = data.formats.map((f) => \`
       <div class="cat">
         <div class="cat-top"><strong>\${h(f)}</strong></div>
-        \${selectField('sp-' + f, spreadOpts, String(spread[f] ?? 0), \`data-f="\${h(f)}"\`)}
+        \${split
+          ? '<div class="muted" style="margin:0">same rank only - the channel decides</div>'
+          : selectField('sp-' + f, spreadOpts, String(spread[f] ?? 0), \`data-f="\${h(f)}"\`)}
         <div class="reach">\${example(spread[f] ?? 0)}</div>
       </div>\`).join('');
     const scope = document.getElementById('queuebox');
@@ -1057,6 +1094,7 @@ async function renderGuild(guild) {
       drawQueues();
     }));
   };
+  drawSplit();
   drawQueues();
 
   document.getElementById('savequeues').onclick = async () => {

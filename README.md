@@ -119,7 +119,8 @@ without the bot link straight to the invite; the rest open a settings page:
   Each one becomes a real Discord role, created and kept in sync by the bot
 - **Scenario pool** - categories you add and remove, each holding scenarios
   picked from a live KovaaK's search, so a name can never be a typo
-- **Queues** - how many rank bands apart a queue lets people be, per format
+- **Queues** - how many rank bands apart a queue lets people be, per format,
+  and whether to run **a channel per rank** (below)
 - **Players** - Elo, rank, Voltaic S5 standing, and the tier of anyone who
   hasn't played yet
 - **Overview** - the server's numbers and what is still unconfigured
@@ -129,6 +130,34 @@ there are no configuration commands.
 
 Add `WEB_URL/callback` to the OAuth redirects on your Discord application, and
 give the bot **Manage Channels** + **Move Members** for the voice half.
+
+## A channel per rank
+
+Off by default, and most servers should leave it that way. On, Quorum keeps a
+Discord category per rank holding `<rank>-1v1`, `<rank>-2v2`, `<rank>-group` and
+`<rank>-results`, and posts the right single-format panel in each.
+
+**The ladder is the only source of truth.** Rename a rank and its category and
+channels rename with it; delete a rank and they are deleted; turn the mode off
+and every channel it made is removed. Nothing is ever recreated in place of
+something that already exists, so a rename keeps the channel and its history.
+Four ranks means four categories and sixteen channels - if that is too many,
+shorten the ladder, because the ladder is what decides.
+
+**The gate is forced to same-rank-only while it is on.** A channel called
+`elite-2v2` that admits an Advanced player is a channel whose name is a lie, so
+the per-format spread is ignored and the dashboard says so. Your saved spread
+comes back untouched when you turn the mode off.
+
+Channels are deliberately **not** locked to their rank role. A player has no
+rank role until their first match finishes, so locking would leave every new
+player unable to see a queue they are allowed to join. The gate refuses them
+anyway; the names and the pings are the signpost.
+
+The honest trade-off: this divides your queue by the number of ranks times the
+number of formats, and thin queues are how pick-up games die. One shared channel
+with a call pinging the ranks it can admit gets you the same discoverability
+without the split.
 
 ## How a match runs
 

@@ -54,11 +54,11 @@ export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string
 
 /** The panel is one static message that never changes - its buttons carry the
  *  format, so it survives restarts with nothing stored about it. */
-export function panelMessage() {
+export function panelMessage(formats: readonly Format[] = PANEL_FORMATS) {
   return {
     embeds: [
       new EmbedBuilder()
-        .setTitle('Quorum')
+        .setTitle(formats.length === 1 ? `Quorum · ${formats[0]}` : 'Quorum')
         .setColor(BLURPLE)
         .setDescription(
           "Pick a format and the bot posts your call in this channel. When someone takes it you'll be pulled into a voice channel and your scenarios go up.\n\nScores are read from KovaaK's - there's nothing to submit.",
@@ -66,7 +66,7 @@ export function panelMessage() {
     ],
     components: [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
-        PANEL_FORMATS.map((f) =>
+        formats.map((f) =>
           new ButtonBuilder().setCustomId(`pug:open:${f}`).setLabel(f).setStyle(ButtonStyle.Primary),
         ),
       ),

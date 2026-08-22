@@ -37,14 +37,23 @@ globalThis.fetch = (async (input: any, init?: any) => {
 const { db, ensurePlayer } = await import('./src/db.js');
 const { startWeb } = await import('./src/web.js');
 
-const channel = (id: string, name: string, type: number) => ({
+const channel = (id: string, name: string, type: number, parentId: string | null = null) => ({
   id,
   name,
   type,
+  parentId,
   isSendable: () => true,
   send: (msg: unknown) => {
-    console.log(`#${name} <- ${JSON.stringify(msg).slice(0, 200)}...`);
+    console.log(`  #${name} <- panel`);
     return Promise.resolve({ id: '1' });
+  },
+  edit: async (patch: any) => {
+    console.log(`  edit ${name} -> ${JSON.stringify(patch)}`);
+    return null;
+  },
+  delete: async () => {
+    channels.delete(id);
+    console.log(`  deleted ${type === 4 ? 'category ' : '#'}${name}`);
   },
 });
 const role = (id: string, name: string, color = 0) => ({
@@ -73,10 +82,10 @@ const guild: any = {
   memberCount: 1284,
   channels: {
     cache: channels,
-    create: async ({ name, type }: any) => {
-      const c = channel(String(++nextId), name, type);
+    create: async ({ name, type, parent }: any) => {
+      const c = channel(String(++nextId), name, type, parent ?? null);
       channels.set(c.id, c);
-      console.log(`created channel ${name}`);
+      console.log(`  created ${type === 4 ? 'category ' : '#'}${name}`);
       return c;
     },
   },

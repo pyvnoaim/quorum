@@ -7,6 +7,8 @@ import {
   getMatch,
   getRankSpread,
   getRanks,
+  isSplit,
+  rankChannels,
   getScenarios,
   guildStats,
   leaderboard,
@@ -15,6 +17,7 @@ import {
   matchPlayers,
   getPlayer,
   setConfig,
+  setRankChannels,
   setRankRole,
   setRankSpread,
   setVoltaic,
@@ -24,6 +27,7 @@ import {
   type Match,
   type Player,
   type Rank,
+  type RankChannels,
 } from './db.js';
 import { panelMessage } from './embeds.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
@@ -106,7 +110,10 @@ async function syncRankRolesToDiscord(guild: Guild, ranks: Rank[], orphaned: Ran
     if (role) setRankRole(rank.id, role.id);
   }
   for (const gone of orphaned) {
-    await guild.roles.cache.get(gone.discord_role_id!)?.delete().catch(() => {});
+    // an orphan can carry channels but no role, so this is no longer a given
+    if (gone.discord_role_id) {
+      await guild.roles.cache.get(gone.discord_role_id)?.delete().catch(() => {});
+    }
   }
 }
 
@@ -141,6 +148,85 @@ function readVoltaic(raw: string | null) {
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
+  }
+}
+
+/** A slug Discord will accept: lowercase, no spaces, no punctuation. */
+const slug = (name: string) =>
+  name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'rank';
+
+/** Mirrors the ladder into Discord as a category per rank holding a channel per
+ *  format plus a results channel.
+ *
+ *  The ladder is the single source of truth, so this is the same contract as
+ *  the roles: renaming a rank renames its category and channels, deleting one
+ *  deletes them, and turning the mode off deletes the lot. Nothing here is
+ *  created twice - a channel we already have an id for is edited, never
+ *  replaced, so a server's history survives a rename.
+ *
+ *  Channels are deliberately NOT locked to their rank role. A player has no
+ *  rank role until their first match finishes, so locking would leave a new
+ *  player unable to see any queue they could join. The gate already refuses
+ *  them; the names and the pings are the signpost. */
+async function syncRankChannelsToDiscord(
+  guild: Guild,
+  ranks: Rank[],
+  orphaned: Rank[],
+  split: boolean,
+) {
+  const drop = async (rank: Rank) => {
+    const { category, ...rest } = rankChannels(rank);
+    // children first: deleting a category in Discord does not delete what is
+    // inside it, it turns them loose at the root of the server.
+    for (const id of Object.values(rest)) {
+      await guild.channels.cache.get(id)?.delete().catch(() => {});
+    }
+    if (category) await guild.channels.cache.get(category)?.delete().catch(() => {});
+    setRankChannels(rank.id, {});
+  };
+
+  for (const gone of orphaned) await drop(gone);
+  if (!split) {
+    for (const rank of ranks) await drop(rank);
+    return;
+  }
+
+  for (const rank of ranks) {
+    const have = rankChannels(rank);
+    const next: RankChannels = {};
+
+    const category =
+      (have.category && guild.channels.cache.get(have.category)) ||
+      (await guild.channels
+        .create({ name: rank.name, type: ChannelType.GuildCategory })
+        .catch(() => null));
+    if (!category) continue;
+    if (category.name !== rank.name) await category.edit({ name: rank.name }).catch(() => {});
+    next.category = category.id;
+
+    const kinds = [...(Object.keys(FORMATS) as Format[]), 'results' as const];
+    for (const kind of kinds) {
+      const name = `${slug(rank.name)}-${kind}`;
+      const existing = have[kind] && guild.channels.cache.get(have[kind]!);
+      if (existing) {
+        if (existing.name !== name || existing.parentId !== category.id) {
+          await existing.edit({ name, parent: category.id }).catch(() => {});
+        }
+        next[kind] = existing.id;
+        continue;
+      }
+      const made = await guild.channels
+        .create({ name, type: ChannelType.GuildText, parent: category.id })
+        .catch(() => null);
+      if (!made) continue;
+      next[kind] = made.id;
+      // a queue channel is useless without its panel, and this is the only
+      // moment we know the channel is new.
+      if (kind !== 'results' && made.isSendable()) {
+        await made.send(panelMessage([kind])).catch(() => {});
+      }
+    }
+    setRankChannels(rank.id, next);
   }
 }
 
@@ -366,6 +452,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           tiers: TIERS,
           formats: Object.keys(FORMATS),
           spread: getRankSpread(guildId),
+          split: isSplit(guildId),
           stats: guildStats(guildId),
           top: leaderboard(guildId, 5),
           matches: listOpenMatches(guildId).map((m) => ({
@@ -427,7 +514,19 @@ export function startWeb(client: Client, hooks: Hooks) {
         }
         const { ranks, orphaned } = setRanks(guildId, clean);
         await syncRankRolesToDiscord(guild, ranks, orphaned);
+        await syncRankChannelsToDiscord(guild, getRanks(guildId), orphaned, isSplit(guildId));
         json(res, 200, { ranks: getRanks(guildId) });
+        return;
+      }
+
+      if (action === '/split' && req.method === 'POST') {
+        const body = await readJson(req);
+        const on = !!body.on;
+        setConfig(guildId, { split_channels: on ? 1 : 0 });
+        // Turning it off deletes the channels it made. Everything it created is
+        // tracked, so nothing else in the server is touched.
+        await syncRankChannelsToDiscord(guild, getRanks(guildId), [], on);
+        json(res, 200, { split: on, ranks: getRanks(guildId) });
         return;
       }
 

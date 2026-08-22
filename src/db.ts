@@ -83,6 +83,8 @@ for (const stmt of [
   'alter table player add column steam_id text',
   'alter table player add column voltaic text',
   'alter table player add column voltaic_at integer',
+  'alter table rank add column channels text',
+  'alter table guild_config add column split_channels integer',
 ]) {
   try {
     db.exec(stmt);
@@ -138,11 +140,26 @@ export interface GuildConfig {
   ping_role_id: string | null;
   /** JSON: how many rank bands apart a queue lets people be, per format. */
   rank_spread: string | null;
+  /** 1 = a queue channel per rank per format, instead of one shared channel. */
+  split_channels: number | null;
 }
 
-/** The parsed gate, falling back to the defaults for anything unset or junk. */
+export const isSplit = (guildId: string) => !!getConfig(guildId).split_channels;
+
+/** The parsed gate, falling back to the defaults for anything unset or junk.
+ *
+ *  A server running a channel per rank gets 0 whatever is stored: the channel
+ *  name is the promise, and a spread would let someone into a queue named for
+ *  a rank they aren't. The dashboard says so rather than silently disagreeing. */
 export function getRankSpread(guildId: string): Record<Format, number> {
-  const raw = getConfig(guildId).rank_spread;
+  const config = getConfig(guildId);
+  if (config.split_channels) {
+    return Object.fromEntries(Object.keys(DEFAULT_RANK_SPREAD).map((f) => [f, 0])) as Record<
+      Format,
+      number
+    >;
+  }
+  const raw = config.rank_spread;
   let saved: Record<string, unknown> = {};
   try {
     if (raw) saved = JSON.parse(raw) as Record<string, unknown>;
@@ -169,6 +186,26 @@ export interface Rank {
   min_elo: number;
   color: string;
   discord_role_id: string | null;
+  /** JSON {category, "1v1", "2v2", group, results} of Discord channel ids, for
+   *  servers running a queue channel per rank. Null when they aren't. */
+  channels: string | null;
+}
+
+export type RankChannels = Partial<Record<'category' | 'results' | Format, string>>;
+
+export function rankChannels(rank: Rank): RankChannels {
+  try {
+    return rank.channels ? (JSON.parse(rank.channels) as RankChannels) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function setRankChannels(rankId: number, channels: RankChannels) {
+  db.prepare('update rank set channels = ? where id = ?').run(
+    Object.keys(channels).length ? JSON.stringify(channels) : null,
+    rankId,
+  );
 }
 
 export function getConfig(guildId: string): GuildConfig {
@@ -182,6 +219,7 @@ export function getConfig(guildId: string): GuildConfig {
       voice_category_id: null,
       ping_role_id: null,
       rank_spread: null,
+      split_channels: null,
     }
   );
 }
@@ -190,14 +228,16 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
   const next = { ...getConfig(guildId), ...patch };
   db.prepare(
     `insert into guild_config
-       (guild_id, panel_channel_id, results_channel_id, voice_category_id, ping_role_id, rank_spread)
-     values (?, ?, ?, ?, ?, ?)
+       (guild_id, panel_channel_id, results_channel_id, voice_category_id, ping_role_id,
+        rank_spread, split_channels)
+     values (?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
        voice_category_id = excluded.voice_category_id,
        ping_role_id = excluded.ping_role_id,
-       rank_spread = excluded.rank_spread`,
+       rank_spread = excluded.rank_spread,
+       split_channels = excluded.split_channels`,
   ).run(
     guildId,
     next.panel_channel_id,
@@ -205,6 +245,7 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.voice_category_id,
     next.ping_role_id,
     next.rank_spread,
+    next.split_channels,
   );
   return next;
 }
@@ -239,14 +280,24 @@ export function setRanks(
 ) {
   const before = getRanks(guildId);
   const keptIds = new Set(ranks.map((r) => r.id).filter(Boolean));
-  const orphaned = before.filter((r) => !keptIds.has(r.id) && r.discord_role_id);
+  // Anything the removed rank left behind in Discord, not just its role - a
+  // rank with channels and no role would otherwise leak them forever.
+  const orphaned = before.filter((r) => !keptIds.has(r.id) && (r.discord_role_id || r.channels));
 
   db.prepare('delete from rank where guild_id = ?').run(guildId);
   for (const r of ranks) {
     const previous = before.find((b) => b.id === r.id);
     db.prepare(
-      'insert into rank (guild_id, name, min_elo, color, discord_role_id) values (?, ?, ?, ?, ?)',
-    ).run(guildId, r.name, r.min_elo, r.color, previous?.discord_role_id ?? null);
+      `insert into rank (guild_id, name, min_elo, color, discord_role_id, channels)
+       values (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      guildId,
+      r.name,
+      r.min_elo,
+      r.color,
+      previous?.discord_role_id ?? null,
+      previous?.channels ?? null,
+    );
   }
   return { ranks: getRanks(guildId), orphaned };
 }

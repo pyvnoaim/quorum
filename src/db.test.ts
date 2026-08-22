@@ -8,8 +8,14 @@ const {
   getPlayer,
   getRanks,
   getScenarios,
+  getConfig,
+  getRankSpread,
   guildStats,
   leaderboard,
+  rankChannels,
+  setConfig,
+  setRankChannels,
+  setRankSpread,
   playersInGuild,
   setRankRole,
   setRanks,
@@ -97,5 +103,35 @@ assert.deepEqual(
   'the ladder is scoped too',
 );
 assert.equal(guildStats('gA').rated, 1, 'and so is the rated count');
+
+// Channels follow the ladder exactly as roles do: a surviving rank keeps its
+// channels across a rewrite, a removed one hands them back to be deleted.
+const [keepId, dropId] = getRanks('gc').slice(0, 2).map((r) => r.id);
+setRankChannels(keepId, { category: 'cat-keep', results: 'res-keep' });
+setRankChannels(dropId, { category: 'cat-drop', results: 'res-drop' });
+const rewritten = setRanks('gc', [
+  { id: keepId, name: 'Renamed', min_elo: 1400, color: '#ffffff' },
+  { name: 'Brand New', min_elo: 0, color: '#000000' },
+]);
+const kept = rewritten.ranks.find((r) => r.name === 'Renamed')!;
+assert.equal(rankChannels(kept).category, 'cat-keep', 'a renamed rank keeps its channels');
+assert.deepEqual(
+  rankChannels(rewritten.ranks.find((r) => r.name === 'Brand New')!),
+  {},
+  'a new rank starts with none',
+);
+assert.ok(
+  rewritten.orphaned.some((r) => rankChannels(r).category === 'cat-drop'),
+  'a deleted rank hands its channels back for cleanup',
+);
+
+// Split mode forces the gate to zero however the spread was saved - the channel
+// name is the promise, so nothing may quietly widen it.
+setRankSpread('gc', { '1v1': 2, '2v2': 2, group: 2 });
+assert.equal(getRankSpread('gc')['2v2'], 2, 'stored spread applies while sharing one channel');
+setConfig('gc', { split_channels: 1 });
+assert.deepEqual(getRankSpread('gc'), { '1v1': 0, '2v2': 0, group: 0 }, 'split forces same-rank');
+setConfig('gc', { split_channels: 0 });
+assert.equal(getRankSpread('gc')['2v2'], 2, 'and the saved spread survives being turned off');
 
 console.log('db ok');

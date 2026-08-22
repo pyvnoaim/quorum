@@ -33,6 +33,8 @@ import {
   getPlayer,
   getRankSpread,
   getRanks,
+  isSplit,
+  rankChannels,
   getScenarios,
   leaderboard,
   matchPlayers,
@@ -177,6 +179,18 @@ function render(match: Match) {
           ]
         : [],
   };
+}
+
+/** Where a finished match's result belongs when the server runs a channel per
+ *  rank. Everyone in a split queue is the same rank (the gate is forced to 0),
+ *  so the first player decides it. */
+function splitResultsChannel(match: Match) {
+  if (!isSplit(match.guild_id)) return null;
+  const first = matchPlayers(match.id)[0];
+  const player = first && getPlayer(first.discord_id);
+  if (!player) return null;
+  const rank = rankFor(getRanks(match.guild_id), player.elo);
+  return rank ? (rankChannels(rank).results ?? null) : null;
 }
 
 /** A throwaway voice channel per match, deleted when it ends. Only someone
@@ -383,7 +397,10 @@ async function concludeMatch(match: Match) {
   const players = new Map(rows.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
   const embed = resultsEmbed(done, rows, players, deltas);
 
-  const channelId = getConfig(done.guild_id).results_channel_id ?? done.channel_id;
+  // Split servers post a result in its own rank's results channel; everyone
+  // else has one. Falling back to the call's own channel either way means a
+  // result is never lost to a deleted or misconfigured target.
+  const channelId = splitResultsChannel(done) ?? getConfig(done.guild_id).results_channel_id ?? done.channel_id;
   const channel = await client.channels.fetch(channelId).catch(() => null);
   const posted = channel?.isSendable() ? await channel.send({ embeds: [embed] }).catch(() => null) : null;
 
