@@ -14,11 +14,11 @@ import {
 } from 'discord.js';
 import {
   CALL_TTL_MS,
-  CATEGORIES,
   FORMATS,
+  MATCH_TTL_MS,
   ROUNDS,
+  TICK_MS,
   TIERS,
-  TIER_SEED,
   type Format,
   type Tier,
 } from './config.js';
@@ -28,15 +28,18 @@ import {
   getConfig,
   getMatch,
   getPlayer,
+  getRanks,
+  getScenarios,
   leaderboard,
   matchPlayers,
+  setTier,
   type Match,
   type MatchPlayer,
 } from './db.js';
 import { liveEmbed, openEmbed, resultsEmbed } from './embeds.js';
 import { startWeb } from './web.js';
 import { kovaaksNameForDiscordId, scoreInWindow } from './kovaaks.js';
-import { canPlay, eloDeltas, placings, rankName } from './rating.js';
+import { canPlay, eloDeltas, placings, rankFor, rankName } from './rating.js';
 
 const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set');
@@ -77,8 +80,11 @@ const command = new SlashCommandBuilder()
 
 /** One scenario per category, cycling, so a match is never three of the same
  *  thing. Falls back to whatever is left if the pool is smaller than ROUNDS. */
-function rollScenarios() {
-  const cats = Object.values(CATEGORIES);
+function rollScenarios(guildId: string) {
+  const pool = getScenarios(guildId);
+  const cats = [...new Set(pool.map((s) => s.category))].map((c) =>
+    pool.filter((s) => s.category === c).map((s) => s.name),
+  );
   const out: string[] = [];
   for (let i = 0; out.length < ROUNDS && i < ROUNDS * cats.length; i++) {
     const pool = cats[i % cats.length].filter((s) => !out.includes(s));
@@ -119,8 +125,8 @@ function render(match: Match) {
                 .setLabel('Refresh scores')
                 .setStyle(ButtonStyle.Secondary),
               new ButtonBuilder()
-                .setCustomId(`pug:finish:${match.id}`)
-                .setLabel('Finish')
+                .setCustomId(`pug:done:${match.id}`)
+                .setLabel('Done')
                 .setStyle(ButtonStyle.Success),
             ),
           ]
@@ -168,7 +174,7 @@ async function startMatch(guild: Guild, match: Match) {
   db.prepare(
     `update match set status = 'live', scenarios = ?, started_at = ?, voice_channel_id = ?
      where id = ?`,
-  ).run(JSON.stringify(rollScenarios()), Date.now(), voiceId, match.id);
+  ).run(JSON.stringify(rollScenarios(guild.id)), Date.now(), voiceId, match.id);
   return getMatch(match.id)!;
 }
 
@@ -243,6 +249,57 @@ async function finishMatch(match: Match) {
   return { match: getMatch(done.id)!, deltas };
 }
 
+/** One PATCH per member: keep every role that isn't a rank role, add the one
+ *  they've earned. Never roles.set([rankRole]) - that would strip everything
+ *  else they hold. */
+async function syncRankRoles(guildId: string, discordIds: string[]) {
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return;
+  const ranks = getRanks(guildId).filter((r) => r.discord_role_id);
+  if (!ranks.length) return;
+  const rankRoleIds = new Set(ranks.map((r) => r.discord_role_id!));
+
+  for (const id of discordIds) {
+    const player = getPlayer(id);
+    const member = await guild.members.fetch(id).catch(() => null);
+    if (!player || !member) continue;
+    const target = rankFor(ranks, player.elo)?.discord_role_id ?? null;
+    // @everyone is in the cache and is not a role you may assign.
+    const keep = member.roles.cache
+      .filter((r) => r.id !== guild.id && !rankRoleIds.has(r.id))
+      .map((r) => r.id);
+    const next = target ? [...keep, target] : keep;
+    const held = member.roles.cache.filter((r) => r.id !== guild.id).map((r) => r.id);
+    if (next.length === held.length && next.every((r) => held.includes(r))) continue;
+    await member.roles.set(next).catch(() => {});
+  }
+}
+
+/** Ends a match and cleans up after it. The Done button and the clock both
+ *  route through here, so there is exactly one place that posts a result. */
+async function concludeMatch(match: Match) {
+  const { match: done, deltas } = await finishMatch(match);
+  const rows = matchPlayers(done.id);
+  const players = new Map(rows.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
+  const embed = resultsEmbed(done, rows, players, deltas);
+
+  const channelId = getConfig(done.guild_id).results_channel_id ?? done.channel_id;
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  const posted = channel?.isSendable() ? await channel.send({ embeds: [embed] }).catch(() => null) : null;
+
+  if (done.message_id) {
+    const home = await client.channels.fetch(done.channel_id).catch(() => null);
+    if (home?.isTextBased()) {
+      const msg = await home.messages.fetch(done.message_id).catch(() => null);
+      // The call message goes away once the result lives elsewhere; if posting
+      // failed it becomes the result instead, so nobody loses the scores.
+      if (posted) await msg?.delete().catch(() => {});
+      else await msg?.edit({ embeds: [embed], components: [] }).catch(() => {});
+    }
+  }
+  await syncRankRoles(done.guild_id, rows.map((r) => r.discord_id));
+}
+
 function activeMatchFor(discordId: string, guildId: string) {
   return db
     .prepare(
@@ -269,10 +326,25 @@ async function expireStaleCalls() {
   }
 }
 
+async function tick() {
+  await expireStaleCalls();
+  const live = db
+    .prepare("select * from match where status = 'live'")
+    .all() as unknown as Match[];
+  for (const match of live) {
+    if (Date.now() - (match.started_at ?? 0) >= MATCH_TTL_MS) {
+      await concludeMatch(match);
+      continue;
+    }
+    await refreshScores(match);
+    await editMatchMessage(getMatch(match.id)!);
+  }
+}
+
 client.once('clientReady', async (c) => {
   await c.application.commands.set([command.toJSON()]);
   startWeb(c);
-  setInterval(() => void expireStaleCalls().catch(console.error), 5 * 60 * 1000).unref();
+  setInterval(() => void tick().catch(console.error), TICK_MS).unref();
   console.log(`ready as ${c.user.tag}`);
 });
 
@@ -295,6 +367,7 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
 
   if (sub === 'leaderboard') {
     const rows = leaderboard();
+    const ranks = getRanks(i.guildId!);
     await i.reply({
       embeds: [
         new EmbedBuilder()
@@ -305,7 +378,7 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
               ? rows
                   .map(
                     (p, n) =>
-                      `**${n + 1}.** <@${p.discord_id}> — **${p.elo}** ${rankName(p.elo)} · ${p.wins}W ${p.losses}L (${Math.round((p.wins / (p.wins + p.losses)) * 100)}%)`,
+                      `**${n + 1}.** <@${p.discord_id}> — **${p.elo}** ${rankName(ranks, p.elo)} · ${p.wins}W ${p.losses}L (${Math.round((p.wins / (p.wins + p.losses)) * 100)}%)`,
                   )
                   .join('\n')
               : '_no games played yet_',
@@ -329,7 +402,7 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
           .setTitle(p.kovaaks_username)
           .setColor(0x5865f2)
           .setDescription(
-            `**${p.elo}** ${rankName(p.elo)} · ${p.tier} tier\n${p.wins}W ${p.losses}L${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
+            `**${p.elo}** ${rankName(getRanks(i.guildId!), p.elo)} · ${p.tier} tier\n${p.wins}W ${p.losses}L${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
           ),
       ],
     });
@@ -348,19 +421,8 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
       await i.reply({ content: NO_LINK, flags: MessageFlags.Ephemeral });
       return;
     }
-    const existing = getPlayer(target.id);
     ensurePlayer(target.id, name, tier);
-    // Re-seeding Elo would wipe a played record, so it only happens for someone
-    // who hasn't played yet.
-    if (existing && existing.wins + existing.losses === 0) {
-      db.prepare('update player set tier = ?, elo = ? where discord_id = ?').run(
-        tier,
-        TIER_SEED[tier],
-        target.id,
-      );
-    } else if (existing) {
-      db.prepare('update player set tier = ? where discord_id = ?').run(tier, target.id);
-    }
+    setTier(target.id, tier);
     await i.reply(`<@${target.id}> is now **${tier}** tier.`);
     return;
   }
@@ -452,7 +514,7 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
     return;
   }
 
-  if (action === 'finish') {
+  if (action === 'done') {
     if (!rows.some((r) => r.discord_id === i.user.id)) {
       await i.reply({ content: 'Players only.', flags: MessageFlags.Ephemeral });
       return;
@@ -461,24 +523,15 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       await i.reply({ content: 'Already finished.', flags: MessageFlags.Ephemeral });
       return;
     }
+    db.prepare('update match_player set done = 1 where match_id = ? and discord_id = ?').run(
+      match.id,
+      i.user.id,
+    );
     await i.deferUpdate();
-    const { match: done, deltas } = await finishMatch(match);
-    const rowsDone = matchPlayers(done.id);
-    const players = new Map(rowsDone.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
-
-    const channelId = getConfig(done.guild_id).results_channel_id ?? done.channel_id;
-    const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (channel?.isSendable()) {
-      await channel.send({ embeds: [resultsEmbed(done, rowsDone, players, deltas)] });
-      // The call is over and the result lives elsewhere - leaving it would just
-      // silt up the queue channel.
-      await i.message.delete().catch(() => {});
-    } else {
-      await i.editReply({
-        embeds: [resultsEmbed(done, rowsDone, players, deltas)],
-        components: [],
-      });
-    }
+    // Everyone has to call it, so whoever is ahead can't end the match while
+    // their opponent still has runs left. The clock covers the other way out.
+    if (matchPlayers(match.id).every((r) => r.done)) await concludeMatch(getMatch(match.id)!);
+    else await i.editReply(render(getMatch(match.id)!));
   }
 }
 
@@ -505,7 +558,13 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
     i.user.id,
   );
 
-  await i.reply(render(getMatch(matchId)!));
+  const pingRole = getConfig(i.guildId).ping_role_id;
+  await i.reply({
+    ...render(getMatch(matchId)!),
+    ...(pingRole
+      ? { content: `<@&${pingRole}>`, allowedMentions: { roles: [pingRole] } }
+      : {}),
+  });
   const msg = await i.fetchReply();
   db.prepare('update match set message_id = ? where id = ?').run(msg.id, matchId);
 }

@@ -20,15 +20,17 @@ export const TIER_SEED: Record<Tier, number> = {
 /** Your tier or one either side. Set to 0 to lock people to their own tier. */
 export const TIER_SPREAD = 1;
 
-/** Display bands. Elo is the truth, this is just the word next to it. */
-export const RANKS: [floor: number, name: string][] = [
-  [1400, 'Champion'],
-  [1275, 'Diamond'],
-  [1150, 'Platinum'],
-  [1050, 'Gold'],
-  [950, 'Silver'],
-  [850, 'Bronze'],
-  [0, 'Iron'],
+/** Seeds a server's rank ladder the first time it's read. After that the rows
+ *  in the db are the truth - names, colors and thresholds are edited in the
+ *  dashboard, so don't reach for this constant anywhere else. */
+export const DEFAULT_RANKS: { name: string; min_elo: number; color: string }[] = [
+  { name: 'Champion', min_elo: 1400, color: '#ffd230' },
+  { name: 'Diamond', min_elo: 1275, color: '#67e8f9' },
+  { name: 'Platinum', min_elo: 1150, color: '#a5b4fc' },
+  { name: 'Gold', min_elo: 1050, color: '#fbbf24' },
+  { name: 'Silver', min_elo: 950, color: '#d4d4d8' },
+  { name: 'Bronze', min_elo: 850, color: '#d97706' },
+  { name: 'Iron', min_elo: 0, color: '#71717a' },
 ];
 
 export const K_FACTOR = 32;
@@ -38,7 +40,7 @@ export const K_FACTOR = 32;
  *  them out of the game, not off a spreadsheet.
  *  ponytail: categories are here because a ban/pick format (EmoAim) needs them;
  *  the base bot only uses them to spread the roll. */
-export const CATEGORIES: Record<string, string[]> = {
+export const DEFAULT_CATEGORIES: Record<string, string[]> = {
   Speed: [
     'voxTargetSwitch 2 10% Smaller',
     'StaticSwitchingVox xxSmall',
@@ -67,3 +69,8 @@ export const PANEL_FORMATS: Format[] = ['1v1', '2v2'];
 
 /** How long an untaken call stays up before the sweep bins it. */
 export const CALL_TTL_MS = 60 * 60 * 1000;
+/** A live match force-finishes here, so one player refusing to hit Done can't
+ *  hold the result open forever. */
+export const MATCH_TTL_MS = 45 * 60 * 1000;
+/** How often a live match re-reads scores off KovaaK's on its own. */
+export const TICK_MS = 60 * 1000;

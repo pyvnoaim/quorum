@@ -1,5 +1,6 @@
 // ponytail: one runnable check, no framework. `npx tsx src/rating.test.ts`.
 import assert from 'node:assert/strict';
+import { DEFAULT_RANKS } from './config.js';
 import { canPlay, eloDeltas, placings, rankName } from './rating.js';
 import type { Entrant } from './rating.js';
 
@@ -72,9 +73,13 @@ const p = (id: string, elo: number, team: number, s: (number | null)[]): Entrant
   assert.equal(placings(e, scenarios).get(0), 1);
 }
 
-assert.equal(rankName(1400), 'Champion');
-assert.equal(rankName(1050), 'Gold');
-assert.equal(rankName(700), 'Iron');
+assert.equal(rankName(DEFAULT_RANKS, 1400), 'Champion');
+assert.equal(rankName(DEFAULT_RANKS, 1050), 'Gold');
+assert.equal(rankName(DEFAULT_RANKS, 700), 'Iron');
+// an edited ladder arrives unsorted and with holes - still resolves
+assert.equal(rankName([{ name: 'Top', min_elo: 2000 }, { name: 'Base', min_elo: 0 }], 2100), 'Top');
+assert.equal(rankName([{ name: 'Top', min_elo: 2000 }, { name: 'Base', min_elo: 0 }], 500), 'Base');
+assert.equal(rankName([{ name: 'Top', min_elo: 2000 }], 500), '');
 
 assert.ok(canPlay('elite', 'advanced'));
 assert.ok(!canPlay('elite', 'intermediate'));

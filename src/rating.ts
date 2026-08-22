@@ -1,7 +1,20 @@
-import { K_FACTOR, RANKS, TIERS, TIER_SPREAD, type Tier } from './config.js';
+import { K_FACTOR, TIERS, TIER_SPREAD, type Tier } from './config.js';
 
-export function rankName(elo: number) {
-  return RANKS.find(([floor]) => elo >= floor)![1];
+/** Whatever ladder the caller holds - a server's rows, or DEFAULT_RANKS. */
+export interface Band {
+  name: string;
+  min_elo: number;
+  color?: string;
+}
+
+/** Highest band the Elo clears. Sorted here rather than trusted, since an
+ *  edited ladder arrives in whatever order the dashboard sent it. */
+export function rankFor<T extends Band>(ranks: T[], elo: number): T | undefined {
+  return [...ranks].sort((a, b) => b.min_elo - a.min_elo).find((r) => elo >= r.min_elo);
+}
+
+export function rankName(ranks: Band[], elo: number) {
+  return rankFor(ranks, elo)?.name ?? '';
 }
 
 /** Tier gate: your tier or one either side, so a Champion can slum it one down

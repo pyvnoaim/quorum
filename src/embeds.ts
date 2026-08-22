@@ -1,6 +1,6 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
-import { FORMATS, PANEL_FORMATS, type Format } from './config.js';
-import type { Match, MatchPlayer, Player } from './db.js';
+import { FORMATS, MATCH_TTL_MS, PANEL_FORMATS, type Format } from './config.js';
+import { getRanks, type Match, type MatchPlayer, type Player } from './db.js';
 import { rankName } from './rating.js';
 
 const BLURPLE = 0x5865f2;
@@ -10,6 +10,7 @@ const GREEN = 0x57f287;
 export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
   const { max } = FORMATS[match.format as Format];
   const opener = players.get(match.host_id);
+  const ranks = getRanks(match.guild_id);
 
   return new EmbedBuilder()
     .setTitle(`Looking for a ${match.format}`)
@@ -18,7 +19,7 @@ export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string
       rows
         .map((r) => {
           const p = players.get(r.discord_id)!;
-          return `<@${r.discord_id}> · **${p.elo}** ${rankName(p.elo)}`;
+          return `<@${r.discord_id}> · **${p.elo}** ${rankName(ranks, p.elo)}`;
         })
         .join('\n'),
     )
@@ -54,11 +55,14 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
   const teams = [...new Set(rows.map((r) => r.team))];
 
   const voice = match.voice_channel_id ? `\nVoice: <#${match.voice_channel_id}>` : '';
+  // Discord renders this relative and per-viewer, so nobody has to work out
+  // what time zone the deadline was written in.
+  const deadline = Math.floor(((match.started_at ?? Date.now()) + MATCH_TTL_MS) / 1000);
   const embed = new EmbedBuilder()
     .setTitle(`${match.format} · ongoing`)
     .setColor(BLURPLE)
     .setDescription(
-      `Play these in any order, then hit **Finish**. Your best run on each while the match is open counts — nothing to submit.${voice}\n\n${scenarios
+      `Play these in any order — scores update on their own. Hit **Done** when you've finished; results post once everyone has, or <t:${deadline}:R> either way.${voice}\n\n${scenarios
         .map((s, i) => `**${i + 1}.** ${s}`)
         .join('\n')}`,
     );
@@ -71,7 +75,7 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
         .map((r) => {
           const scores = JSON.parse(r.scores) as Record<string, number | null>;
           const line = scenarios.map((s) => scores[s]?.toFixed(0) ?? '–').join(' · ');
-          return `<@${r.discord_id}>\n\`${line}\``;
+          return `${r.done ? '✅' : '·'} <@${r.discord_id}>\n\`${line}\``;
         })
         .join('\n'),
       inline: true,
@@ -89,6 +93,7 @@ export function resultsEmbed(
   const scenarios: string[] = JSON.parse(match.scenarios);
   const ordered = [...rows].sort((a, b) => (a.placing ?? 99) - (b.placing ?? 99));
   const medal = ['🥇', '🥈', '🥉'];
+  const ranks = getRanks(match.guild_id);
 
   return new EmbedBuilder()
     .setTitle(`${match.format} · results`)
@@ -101,7 +106,7 @@ export function resultsEmbed(
         const scores = JSON.parse(r.scores) as Record<string, number | null>;
         return {
           name: `${medal[(r.placing ?? 1) - 1] ?? `#${r.placing}`} ${p.kovaaks_username}`,
-          value: `<@${r.discord_id}> · **${p.elo}** ${rankName(p.elo)} (${delta >= 0 ? '+' : ''}${delta})\n\`${scenarios
+          value: `<@${r.discord_id}> · **${p.elo}** ${rankName(ranks, p.elo)} (${delta >= 0 ? '+' : ''}${delta})\n\`${scenarios
             .map((s) => scores[s]?.toFixed(0) ?? '–')
             .join(' · ')}\``,
         };

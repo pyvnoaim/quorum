@@ -1,7 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { ChannelType, PermissionFlagsBits, type Client } from 'discord.js';
-import { getConfig, setConfig } from './db.js';
+import { ChannelType, PermissionFlagsBits, type Client, type Guild } from 'discord.js';
+import { TIERS, type Tier } from './config.js';
+import {
+  getConfig,
+  getRanks,
+  getScenarios,
+  listPlayers,
+  setConfig,
+  setRankRole,
+  setRanks,
+  setScenarios,
+  setTier,
+  type Rank,
+} from './db.js';
 import { panelMessage } from './embeds.js';
 import { PAGE } from './page.js';
 
@@ -59,6 +71,29 @@ async function discord<T>(path: string, accessToken: string): Promise<T | null> 
     signal: AbortSignal.timeout(10_000),
   }).catch(() => null);
   return res?.ok ? ((await res.json()) as T) : null;
+}
+
+/** Makes the ladder real in Discord: a role per rank, named and coloured to
+ *  match, created on first save and edited after. Deleting a rank deletes its
+ *  role, so an old band can't linger on people forever. */
+async function syncRankRolesToDiscord(guild: Guild, ranks: Rank[], orphaned: Rank[]) {
+  for (const rank of ranks) {
+    const color = Number.parseInt(rank.color.slice(1), 16);
+    const existing = rank.discord_role_id ? guild.roles.cache.get(rank.discord_role_id) : null;
+    if (existing) {
+      if (existing.name !== rank.name || existing.color !== color) {
+        await existing.edit({ name: rank.name, color }).catch(() => {});
+      }
+      continue;
+    }
+    const role = await guild.roles
+      .create({ name: rank.name, color, hoist: true, mentionable: false })
+      .catch(() => null);
+    if (role) setRankRole(rank.id, role.id);
+  }
+  for (const gone of orphaned) {
+    await guild.roles.cache.get(gone.discord_role_id!)?.delete().catch(() => {});
+  }
 }
 
 export function startWeb(client: Client) {
@@ -205,6 +240,13 @@ export function startWeb(client: Client) {
           categories: guild.channels.cache
             .filter((c) => c.type === ChannelType.GuildCategory)
             .map((c) => ({ id: c.id, name: c.name })),
+          roles: guild.roles.cache
+            .filter((r) => r.id !== guild.id && !r.managed)
+            .map((r) => ({ id: r.id, name: r.name })),
+          ranks: getRanks(guildId),
+          scenarios: getScenarios(guildId),
+          players: listPlayers(),
+          tiers: TIERS,
         });
         return;
       }
@@ -219,8 +261,60 @@ export function startWeb(client: Client) {
             panel_channel_id: pick(body.panel_channel_id),
             results_channel_id: pick(body.results_channel_id),
             voice_category_id: pick(body.voice_category_id),
+            ping_role_id: pick(body.ping_role_id),
           }),
         );
+        return;
+      }
+
+      if (action === '/ranks' && req.method === 'PUT') {
+        const body = await readJson(req);
+        const rows = Array.isArray(body.ranks) ? body.ranks : [];
+        const clean = rows
+          .map((r: Record<string, unknown>) => ({
+            id: typeof r.id === 'number' ? r.id : undefined,
+            name: String(r.name ?? '').trim().slice(0, 90),
+            min_elo: Math.trunc(Number(r.min_elo)),
+            color: /^#[0-9a-f]{6}$/i.test(String(r.color)) ? String(r.color) : '#ffffff',
+          }))
+          .filter((r: { name: string; min_elo: number }) => r.name && Number.isFinite(r.min_elo));
+        if (!clean.length) {
+          json(res, 400, { error: 'a ladder needs at least one rank' });
+          return;
+        }
+        const { ranks, orphaned } = setRanks(guildId, clean);
+        await syncRankRolesToDiscord(guild, ranks, orphaned);
+        json(res, 200, { ranks: getRanks(guildId) });
+        return;
+      }
+
+      if (action === '/scenarios' && req.method === 'PUT') {
+        const body = await readJson(req);
+        const rows = Array.isArray(body.scenarios) ? body.scenarios : [];
+        const clean = rows
+          .map((r: Record<string, unknown>) => ({
+            category: String(r.category ?? '').trim().slice(0, 60),
+            name: String(r.name ?? '').trim().slice(0, 120),
+          }))
+          .filter((r: { category: string; name: string }) => r.category && r.name);
+        // An empty pool would start matches with nothing to play, so it is
+        // refused rather than saved.
+        if (!clean.length) {
+          json(res, 400, { error: 'the pool needs at least one scenario' });
+          return;
+        }
+        json(res, 200, { scenarios: setScenarios(guildId, clean) });
+        return;
+      }
+
+      if (action === '/tiers' && req.method === 'PUT') {
+        const body = await readJson(req);
+        for (const row of Array.isArray(body.tiers) ? body.tiers : []) {
+          const id = String(row.discord_id ?? '');
+          const tier = String(row.tier ?? '') as Tier;
+          if (/^\d{1,32}$/.test(id) && TIERS.includes(tier)) setTier(id, tier);
+        }
+        json(res, 200, { players: listPlayers() });
         return;
       }
 

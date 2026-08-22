@@ -1,0 +1,71 @@
+// ponytail: one runnable check, no framework.
+// `NODE_OPTIONS=--experimental-sqlite npx tsx src/db.test.ts`
+process.env.DB_PATH = ':memory:';
+import assert from 'node:assert/strict';
+
+const {
+  ensurePlayer,
+  getPlayer,
+  getRanks,
+  getScenarios,
+  setRankRole,
+  setRanks,
+  setScenarios,
+  setTier,
+  db,
+} = await import('./db.js');
+const { rankFor } = await import('./rating.js');
+
+const G = '111';
+
+// A fresh server gets the default ladder rather than no ranks at all.
+const seeded = getRanks(G);
+assert.equal(seeded.length, 7);
+assert.equal(seeded[0].name, 'Champion');
+assert.equal(seeded.at(-1)!.name, 'Iron');
+assert.ok(seeded[0].min_elo > seeded[1].min_elo, 'highest band first');
+
+// An edited ladder keeps the Discord role of every rank that survived, and
+// hands back the roles of the ones that didn't so the caller can delete them.
+setRankRole(seeded[0].id, 'role-champion');
+setRankRole(seeded.at(-1)!.id, 'role-iron');
+const { ranks, orphaned } = setRanks(G, [
+  { id: seeded[0].id, name: 'Legend', min_elo: 1500, color: '#ff0000' },
+  { name: 'Rookie', min_elo: 0, color: '#00ff00' },
+]);
+assert.equal(ranks.length, 2);
+assert.equal(ranks[0].name, 'Legend');
+assert.equal(ranks[0].discord_role_id, 'role-champion', 'renamed rank keeps its role');
+assert.equal(ranks[1].discord_role_id, null, 'a new rank has no role yet');
+assert.deepEqual(
+  orphaned.map((r) => r.discord_role_id),
+  ['role-iron'],
+  'the deleted rank returns its role for cleanup',
+);
+
+// The ladder still resolves after being rewritten.
+assert.equal(rankFor(ranks, 1600)!.name, 'Legend');
+assert.equal(rankFor(ranks, 10)!.name, 'Rookie');
+
+// Ranks are per server: editing one leaves another alone.
+assert.equal(getRanks('222').length, 7);
+
+// Scenario pool: seeded, then owned by whatever the dashboard sends.
+assert.equal(getScenarios(G).length, 16);
+const pool = setScenarios(G, [{ category: 'Clicking', name: '1w4ts' }]);
+// node:sqlite hands back null-prototype rows, so compare the fields
+assert.equal(pool.length, 1);
+assert.equal(pool[0].category, 'Clicking');
+assert.equal(pool[0].name, '1w4ts');
+
+// Tier sets the starting rating - but only for someone who hasn't played, or a
+// promotion would wipe a real record.
+ensurePlayer('u1', 'fresh');
+setTier('u1', 'elite');
+assert.equal(getPlayer('u1')!.elo, 1275);
+db.prepare('update player set wins = 3, elo = 1400 where discord_id = ?').run('u1');
+setTier('u1', 'novice');
+assert.equal(getPlayer('u1')!.elo, 1400, 'a played record survives a tier change');
+assert.equal(getPlayer('u1')!.tier, 'novice');
+
+console.log('db ok');

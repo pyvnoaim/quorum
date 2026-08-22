@@ -32,6 +32,12 @@ without the bot link straight to the invite; the rest open a settings page:
 - **Results channel** — where finished matches get posted
 - **Voice category** — where match voice channels are made, with a button to
   create one if you haven't
+- **Ping role** — pinged whenever someone opens a call
+- **Ranks** — add, remove, rename, recolour and set the threshold of every rank.
+  Each one becomes a real Discord role, created and kept in sync by the bot
+- **Scenario pool** — one `Category | Scenario` per line, so you can paste a
+  list straight in
+- **Players** — set anyone's tier
 
 Then hit **Post panel** and the queue message goes up. That's the whole setup;
 there are no configuration commands.
@@ -49,10 +55,15 @@ queue channel forever. Then:
 2. Someone else hits **Scrim** on it. That's the whole matchmaking.
 3. The moment it fills it starts itself — teams drawn, 3 scenarios rolled (one
    per category), a temporary voice channel made and everyone dragged in.
-4. The call message becomes the live scoreboard: scenarios, players, scores
-   filling in. **Refresh scores** re-reads KovaaK's.
-5. **Finish** posts placings and Elo changes to the results channel, deletes the
-   call message, and deletes the voice channel.
+4. The call message becomes the live scoreboard, re-reading KovaaK's every
+   minute on its own. **Refresh scores** forces it early.
+5. Everyone hits **Done**. Once they all have — or 45 minutes in, whichever
+   comes first — placings and Elo changes go to the results channel, the call
+   message is deleted and the voice channel with it.
+
+**Done is per player, deliberately.** If whoever's ahead could end the match on
+their own, they'd end it while their opponent still had runs left. The clock is
+the other half: one player wandering off can't hold a result open forever.
 
 A call nobody takes within an hour is cancelled and its message deleted, so the
 queue channel only ever shows calls that are actually live.
@@ -93,10 +104,21 @@ Rounds are scored by **placing, then summed** — never by raw score. That's wha
 makes a 3000-point tracking scenario and a 90-point clicking one count equally,
 with no score normalization anywhere in the code.
 
-Display bands: Champion 1400+, Diamond 1275, Platinum 1150, Gold 1050, Silver
-950, Bronze 850, Iron below.
+Ranks are per server and edited in the dashboard — name, colour, threshold, and
+however many bands you want. A new server starts with Champion 1400+, Diamond
+1275, Platinum 1150, Gold 1050, Silver 950, Bronze 850, Iron below.
 
-## Editing the scenario pool
+Each rank is mirrored to a Discord role, handed out when a match moves someone
+across a threshold. Renaming or recolouring a rank edits that role; deleting a
+rank deletes it. The bot needs **Manage Roles**, and its own role has to sit
+above the rank roles in the server's role list or Discord won't let it assign
+them.
 
-`src/config.ts`, `CATEGORIES`. Names must match KovaaK's **exactly** or the
-score lookup finds nothing — copy them out of the game.
+## The scenario pool
+
+Edited in the dashboard. Names must match KovaaK's **exactly** or the score
+lookup finds nothing — copy them out of the game. A match rolls one scenario per
+category, so the categories decide the shape of a match.
+
+`DEFAULT_RANKS` and `DEFAULT_CATEGORIES` in `src/config.ts` only seed a server
+the first time it's read; after that the database is the truth.

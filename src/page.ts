@@ -61,6 +61,26 @@ export const PAGE = /* html */ `<!doctype html>
   .empty { color: var(--muted); font-size: 14px; padding: 32px 0; }
   hr { border: none; border-top: 1px solid var(--line); margin: 36px 0; }
   .login { padding: 120px 0; text-align: center; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 4px 6px 4px 0; vertical-align: middle; }
+  td:last-child { padding-right: 0; text-align: right; }
+  input[type=color] {
+    width: 34px; height: 34px; padding: 2px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+  }
+  input[type=number] { width: 90px; }
+  textarea {
+    width: 100%; min-height: 220px; background: var(--panel); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 10px 11px;
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical;
+  }
+  textarea:focus { outline: none; border-color: var(--fg); }
+  .icon-btn {
+    border: none; background: none; color: var(--muted); cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 4px 6px;
+  }
+  .icon-btn:hover { color: var(--fg); }
+  .muted { color: var(--muted); font-size: 13px; margin: -6px 0 14px; }
   .login p { color: var(--muted); margin-bottom: 24px; font-size: 14px; }
 </style>
 </head>
@@ -150,10 +170,42 @@ async function openConfig(guild) {
         <button class="btn" id="mkcat">New category</button>
       </div>
     </div>
+    <div class="field">
+      <label>Ping role <span class="hint">— pinged when someone opens a call</span></label>
+      <select id="ping">\${opts(data.roles, data.config.ping_role_id)}</select>
+    </div>
     <div class="bar">
       <button class="btn solid" id="save">Save</button>
       <button class="btn" id="panelbtn">Post panel</button>
       <span class="status" id="status"></span>
+    </div>
+
+    <hr />
+    <h2>ranks</h2>
+    <p class="muted">Each rank becomes a Discord role, named and coloured to match, handed out when someone's rating crosses it.</p>
+    <table><tbody id="ranks"></tbody></table>
+    <div class="bar">
+      <button class="btn" id="addrank">Add rank</button>
+      <button class="btn solid" id="saveranks">Save ranks</button>
+      <span class="status" id="rankstatus"></span>
+    </div>
+
+    <hr />
+    <h2>scenario pool</h2>
+    <p class="muted">One per line, <code>Category | Scenario</code>. Names must match KovaaK's exactly. A match rolls one scenario per category.</p>
+    <textarea id="pool" spellcheck="false"></textarea>
+    <div class="bar">
+      <button class="btn solid" id="savepool">Save pool</button>
+      <span class="status" id="poolstatus"></span>
+    </div>
+
+    <hr />
+    <h2>players</h2>
+    <p class="muted">Tier seeds a new player's rating and decides who they can play — their tier, or one either side.</p>
+    <table><tbody id="players"></tbody></table>
+    <div class="bar">
+      <button class="btn solid" id="savetiers">Save tiers</button>
+      <span class="status" id="tierstatus"></span>
     </div>\`;
 
   const status = (msg) => (document.getElementById('status').textContent = msg);
@@ -172,11 +224,86 @@ async function openConfig(guild) {
     status('category created');
   };
 
+  let ranks = data.ranks.slice();
+  const drawRanks = () => {
+    document.getElementById('ranks').innerHTML = ranks.map((r, n) => \`
+      <tr>
+        <td><input type="color" value="\${h(r.color)}" data-n="\${n}" data-k="color" /></td>
+        <td style="width:100%"><input type="text" value="\${h(r.name)}" data-n="\${n}" data-k="name" /></td>
+        <td><input type="number" value="\${Number(r.min_elo)}" data-n="\${n}" data-k="min_elo" /></td>
+        <td><button class="icon-btn" data-del="\${n}" title="remove">×</button></td>
+      </tr>\`).join('');
+    document.querySelectorAll('#ranks input').forEach((el) => {
+      el.oninput = () => {
+        const v = el.dataset.k === 'min_elo' ? Number(el.value) : el.value;
+        ranks[el.dataset.n][el.dataset.k] = v;
+      };
+    });
+    document.querySelectorAll('#ranks [data-del]').forEach((el) => {
+      el.onclick = () => { ranks.splice(Number(el.dataset.del), 1); drawRanks(); };
+    });
+  };
+  drawRanks();
+  document.getElementById('addrank').onclick = () => {
+    ranks.push({ name: 'New rank', min_elo: 0, color: '#888888' });
+    drawRanks();
+  };
+  document.getElementById('saveranks').onclick = async () => {
+    const el = document.getElementById('rankstatus');
+    el.textContent = 'saving…';
+    const res = await fetch(\`/api/guild/\${guild.id}/ranks\`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ranks }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (res.ok) { ranks = out.ranks; drawRanks(); el.textContent = 'saved, roles synced'; }
+    else el.textContent = out.error ?? 'save failed';
+  };
+
+  const pool = document.getElementById('pool');
+  pool.value = data.scenarios.map((s) => \`\${s.category} | \${s.name}\`).join('\\n');
+  document.getElementById('savepool').onclick = async () => {
+    const el = document.getElementById('poolstatus');
+    const scenarios = pool.value.split('\\n').map((line) => {
+      const [category, ...rest] = line.split('|');
+      return { category: (category ?? '').trim(), name: rest.join('|').trim() };
+    }).filter((s) => s.category && s.name);
+    const res = await fetch(\`/api/guild/\${guild.id}/scenarios\`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scenarios }),
+    });
+    const out = await res.json().catch(() => ({}));
+    el.textContent = res.ok ? \`saved \${out.scenarios.length} scenarios\` : out.error ?? 'save failed';
+  };
+
+  const tiers = {};
+  document.getElementById('players').innerHTML = data.players.length
+    ? data.players.map((p) => \`
+      <tr>
+        <td style="width:100%">\${h(p.kovaaks_username)} <span class="hint">\${p.elo} · \${p.wins}W \${p.losses}L</span></td>
+        <td><select data-id="\${h(p.discord_id)}">\${data.tiers.map((t) =>
+          \`<option value="\${t}"\${t === p.tier ? ' selected' : ''}>\${t}</option>\`).join('')}</select></td>
+      </tr>\`).join('')
+    : '<tr><td class="hint">nobody has played yet</td></tr>';
+  document.querySelectorAll('#players select').forEach((el) => {
+    el.onchange = () => (tiers[el.dataset.id] = el.value);
+  });
+  document.getElementById('savetiers').onclick = async () => {
+    const el = document.getElementById('tierstatus');
+    const body = Object.entries(tiers).map(([discord_id, tier]) => ({ discord_id, tier }));
+    const res = await fetch(\`/api/guild/\${guild.id}/tiers\`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tiers: body }),
+    });
+    el.textContent = res.ok ? 'saved' : 'save failed';
+  };
+
   document.getElementById('save').onclick = async () => {
     const body = {
       panel_channel_id: document.getElementById('panel').value || null,
       results_channel_id: document.getElementById('results').value || null,
       voice_category_id: document.getElementById('voice').value || null,
+      ping_role_id: document.getElementById('ping').value || null,
     };
     const res = await fetch('/api/guild/' + guild.id, {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
