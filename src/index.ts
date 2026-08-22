@@ -6,6 +6,7 @@ import {
   Client,
   EmbedBuilder,
   GatewayIntentBits,
+  InteractionContextType,
   MessageFlags,
   PermissionFlagsBits,
   SlashCommandBuilder,
@@ -16,6 +17,7 @@ import {
   guildAllowed,
   CALL_TTL_MS,
   FORMATS,
+  MAIN_CATEGORIES,
   ROUNDS,
   TICK_MS,
   BASE_ELO,
@@ -89,8 +91,12 @@ const lookupError = (kind: 'not-linked' | 'unreachable') =>
   kind === 'unreachable' ? KOVAAKS_DOWN : NO_LINK;
 
 const command = new SlashCommandBuilder()
-  .setName('pug')
-  .setDescription('pick-up games')
+  .setName('scrim')
+  .setDescription("KovaaK's scrims")
+  // In a server or nowhere. Every subcommand reads i.guildId, and in a DM that
+  // is null - which reaches getRanks as a null guild_id and trips the NOT NULL
+  // on the insert, so the whole command answers "That broke".
+  .setContexts(InteractionContextType.Guild)
   .addSubcommand((s) => s.setName('score').setDescription('refresh the scoreboard'))
   .addSubcommand((s) =>
     s
@@ -109,12 +115,14 @@ const command = new SlashCommandBuilder()
       ),
   );
 
-/** One scenario per category, cycling, so a match is never three of the same
+/** One scenario per main, cycling, so a match is never three of the same
  *  thing. Falls back to whatever is left if the pool is smaller than ROUNDS. */
 function rollScenarios(guildId: string, want = ROUNDS) {
   const pool = getScenarios(guildId);
-  const cats = [...new Set(pool.map((s) => s.category))].map((c) =>
-    pool.filter((s) => s.category === c).map((s) => s.name),
+  // Only mains a server has actually put scenarios under: an empty Tracking
+  // would otherwise take a round and roll nothing into it.
+  const cats = MAIN_CATEGORIES.filter((m) => pool.some((s) => s.main === m)).map((m) =>
+    pool.filter((s) => s.main === m).map((s) => s.name),
   );
   const out: string[] = [];
   // round-robin over categories so the roll spreads across them, however many
@@ -128,22 +136,27 @@ function rollScenarios(guildId: string, want = ROUNDS) {
 
 const shuffle = <T>(items: T[]) => [...items].sort(() => Math.random() - 0.5);
 
-/** One category per scenario, in a random order - the order is part of the
- *  format, since knowing you finish on tracking is worth something in the picks
- *  before it. A server with fewer categories than scenarios sees one come round
- *  again rather than no match at all. */
+/** One MAIN per scenario, in a random order - the order is part of the format,
+ *  since knowing you finish on tracking is worth something in the picks before
+ *  it. Subcategories are filing, not rounds: a server that splits Clicking into
+ *  Static and Dynamic still plays one Clicking scenario, drawn from both.
+ *
+ *  Only mains the pool actually has scenarios under, and a server with fewer of
+ *  those than ROUNDS sees one come round again rather than no match at all. */
 function rollCategories(guildId: string, want = ROUNDS) {
-  const all = shuffle([...new Set(getScenarios(guildId).map((s) => s.category))]);
+  const pool = getScenarios(guildId);
+  const all = shuffle(MAIN_CATEGORIES.filter((m) => pool.some((s) => s.main === m)));
   if (!all.length) return [];
   return Array.from({ length: want }, (_, i) => all[i % all.length]);
 }
 
-/** Candidates from one category, minus anything already locked in. A category
- *  with nothing left to offer falls back to the whole pool: a thin category
- *  must not be able to leave a match with no scenario to play. */
-function shortlist(guildId: string, category: string, want: number, taken: string[]) {
+/** Candidates from one main, minus anything already locked in - every scenario
+ *  filed under it, whichever subcategory it sits in. A main with nothing left to
+ *  offer falls back to the whole pool: a thin main must not be able to leave a
+ *  match with no scenario to play. */
+function shortlist(guildId: string, main: string, want: number, taken: string[]) {
   const pool = getScenarios(guildId).filter((s) => !taken.includes(s.name));
-  const mine = pool.filter((s) => s.category === category);
+  const mine = pool.filter((s) => s.main === main);
   return shuffle((mine.length ? mine : pool).map((s) => s.name)).slice(0, want);
 }
 
@@ -753,7 +766,7 @@ client.once('clientReady', async (c) => {
 
 client.on('interactionCreate', async (i: Interaction) => {
   try {
-    if (i.isChatInputCommand() && i.commandName === 'pug') await onCommand(i);
+    if (i.isChatInputCommand() && i.commandName === 'scrim') await onCommand(i);
     else if (i.isButton() && i.customId.startsWith('pug:')) await onButton(i);
   } catch (err) {
     console.error(err);
@@ -1015,7 +1028,17 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       await i.reply({ content: 'Only whoever opened it can cancel.', flags: MessageFlags.Ephemeral });
       return;
     }
-    db.prepare("update match set status = 'cancelled' where id = ?").run(match.id);
+    // Only a lobby can be cancelled, and the check has to be in the UPDATE:
+    // `match` was read before the Join handler's KovaaK's lookup could finish,
+    // so a call that filled in that window still reads 'lobby' here. Without
+    // the guard, Cancel lands on a live match and takes the game with it.
+    const killed = db
+      .prepare("update match set status = 'cancelled', ended_at = ? where id = ? and status = 'lobby'")
+      .run(Date.now(), match.id);
+    if (!killed.changes) {
+      await i.reply({ content: 'That one already started.', flags: MessageFlags.Ephemeral });
+      return;
+    }
     await i.deferUpdate();
     await i.message.delete().catch(() => {});
     return;

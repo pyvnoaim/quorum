@@ -4,7 +4,7 @@
 
 _Enough players, and it counts._
 
-Pick-up games for a KovaaK's server. A host opens a match, picks players out of
+Scrims for a KovaaK's server. A host opens a match, picks players out of
 the server list, they accept, everyone plays, the bot reads the scores off
 KovaaK's and posts results with an Elo change.
 
@@ -121,8 +121,9 @@ without the bot link straight to the invite; the rest open a settings page:
   ranks a call can actually admit are pinged automatically
 - **Ranks** - add, remove, rename, recolour and set the threshold of every rank.
   Each one becomes a real Discord role, created and kept in sync by the bot
-- **Scenario pool** - categories you add and remove, each holding scenarios
-  picked from a live KovaaK's search, so a name can never be a typo
+- **Scenario pool** - three fixed mains plus any subcategories you file under
+  them, each holding scenarios picked from a live KovaaK's search, so a name can
+  never be a typo
 - **Queues** - how many rank bands apart a queue lets people be, per format.
   This also decides who can *see* each rank channel (below)
 - **Players** - Elo, rank, Voltaic S5 standing, and the starting rank of
@@ -199,7 +200,7 @@ history. Four ranks means one category and five channels - if that is too many,
 shorten the ladder, because the ladder is what decides.
 
 The honest trade-off: this divides your queue by the number of ranks, and thin
-queues are how pick-up games die. Widening the spread in the queues pane widens
+queues are how scrims die. Widening the spread in the queues pane widens
 who can see each channel, which is the lever for pulling a thin ladder back
 together.
 
@@ -236,8 +237,8 @@ only ever shows calls that are actually live. An hour out of the box; the setup
 pane sets the window per server, or turns it off entirely and leaves calls up
 until someone takes or cancels them.
 
-Other commands: `/pug score`, `/pug stats`, `/pug leaderboard`, and
-`/pug seed @player <rank>` for staff. Everything else is a button.
+Other commands: `/scrim score`, `/scrim stats`, `/scrim leaderboard`, and
+`/scrim seed @player <rank>` for staff. Everything else is a button.
 
 **When a match goes wrong**, the dashboard lists everything open or running:
 *force finish* scores it from whatever KovaaK's has, *cancel* bins it with no
@@ -258,7 +259,7 @@ Everyone plays one ladder, and the only question is where you join it. The
 | mode | a new player starts at |
 | --- | --- |
 | flat (default) | 1050, the same as everyone else |
-| staff | wherever staff put them - a rank, chosen in the players pane or with `/pug seed` |
+| staff | wherever staff put them - a rank, chosen in the players pane or with `/scrim seed` |
 | voltaic | their Voltaic S5 standing, mapped onto the ladder; flat if they have no S5 entry |
 
 It is only ever the **first** rating. The moment someone finishes a match their
@@ -297,8 +298,18 @@ them.
 ## The scenario pool
 
 Edited in the dashboard. Names must match KovaaK's **exactly** or the score
-lookup finds nothing - copy them out of the game. A match rolls one scenario per
-category, so the categories decide the shape of a match.
+lookup finds nothing - copy them out of the game.
+
+Two levels. Three **main** categories are fixed - Clicking, Tracking, Switching
+- and a match rolls one scenario from each, in a random order. That is what
+makes every game one of all three rather than three of whatever the pool is
+deepest in, and it is why there are exactly as many mains as there are rounds.
+
+Under a main you can add as many **subcategories** as you like - Static and
+Dynamic under Clicking, say - and pick which main each one rolls into. A
+subcategory is filing, not a round: its scenarios are drawn as part of its
+main's round, so splitting Clicking in two does not give Clicking two rounds. A
+main with nothing under it is skipped rather than rolling an empty round.
 
 `DEFAULT_RANKS` and `DEFAULT_CATEGORIES` in `src/config.ts` only seed a server
 the first time it's read; after that the database is the truth.

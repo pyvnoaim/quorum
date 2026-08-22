@@ -4,8 +4,11 @@ process.env.DB_PATH = ':memory:';
 import assert from 'node:assert/strict';
 
 const {
+  deleteMatch,
   ensurePlayer,
+  getMatch,
   getPlayer,
+  matchPlayers,
   getRanks,
   getScenarios,
   getConfig,
@@ -63,13 +66,23 @@ assert.equal(rankFor(ranks, 10)!.name, 'Rookie');
 // Ranks are per server: editing one leaves another alone.
 assert.equal(getRanks('222').length, 7);
 
-// Scenario pool: seeded, then owned by whatever the dashboard sends.
-assert.equal(getScenarios(G).length, 16);
-const pool = setScenarios(G, [{ category: 'Clicking', name: '1w4ts' }]);
+// Scenario pool: seeded, then owned by whatever the dashboard sends. The
+// shipped groups are both switching, so that is the main they file under.
+const seededPool = getScenarios(G);
+assert.equal(seededPool.length, 16);
+assert.ok(seededPool.every((s) => s.main === 'Switching'), 'the defaults file under one main');
+// A subcategory keeps its own name and rolls up into the main it was filed
+// under - that is the whole two-level shape.
+const pool = setScenarios(G, [
+  { category: 'Clicking', name: '1w4ts', main: 'Clicking' },
+  { category: 'Dynamic', name: 'Pasu VP', main: 'Clicking' },
+]);
 // node:sqlite hands back null-prototype rows, so compare the fields
-assert.equal(pool.length, 1);
+assert.equal(pool.length, 2);
 assert.equal(pool[0].category, 'Clicking');
 assert.equal(pool[0].name, '1w4ts');
+assert.equal(pool[1].category, 'Dynamic', 'the sub keeps its own name');
+assert.equal(pool[1].main, 'Clicking', 'and rolls up into its main');
 
 // Seeding sets the starting rating - but only for someone who hasn't played,
 // or it would wipe a real record.
@@ -209,6 +222,47 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   const form = recentMatches('h1', 'gh');
   assert.deepEqual(form.map((m) => m.id), [103, 102, 101], 'newest first, no-contest left out');
   assert.equal(form[0].elo_after! - form[0].elo_before!, -16);
+}
+
+// Deleting a match hands back exactly what it paid out - rating and record
+// both - and a row that was never scored has nothing to hand back.
+{
+  ensurePlayer('d1', 'D1');
+  ensurePlayer('d2', 'D2');
+  db.prepare("update player set elo = 1016, wins = 1, losses = 0 where discord_id = 'd1'").run();
+  db.prepare("update player set elo = 984, wins = 0, losses = 1 where discord_id = 'd2'").run();
+  db.prepare(
+    "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at) values (200,'gd','c','d1','1v1','done',5000)",
+  ).run();
+  db.prepare(
+    'insert into match_player (match_id, discord_id, team, placing, elo_before, elo_after) values (200,?,?,?,?,?)',
+  ).run('d1', 0, 1, 1000, 1016);
+  db.prepare(
+    'insert into match_player (match_id, discord_id, team, placing, elo_before, elo_after) values (200,?,?,?,?,?)',
+  ).run('d2', 1, 2, 1000, 984);
+  // a no-show: no placing, so finishMatch never moved their rating either
+  ensurePlayer('d3', 'D3');
+  const before3 = getPlayer('d3')!.elo;
+  db.prepare("insert into match_player (match_id, discord_id, team) values (200,'d3',1)").run();
+
+  deleteMatch(200);
+  assert.equal(getPlayer('d1')!.elo, 1000, 'the winner gives the points back');
+  assert.equal(getPlayer('d1')!.wins, 0, 'and the win with them');
+  assert.equal(getPlayer('d2')!.elo, 1000, 'the loser gets theirs back');
+  assert.equal(getPlayer('d2')!.losses, 0, 'and the loss');
+  assert.equal(getPlayer('d3')!.elo, before3, 'an unscored row moves nothing');
+  assert.equal(getMatch(200), undefined, 'and the match is gone');
+  assert.equal(matchPlayers(200).length, 0, 'with its rows');
+
+  // A record can never be driven negative by a delete that half-matches.
+  db.prepare(
+    "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at) values (201,'gd','c','d1','1v1','done',6000)",
+  ).run();
+  db.prepare(
+    'insert into match_player (match_id, discord_id, team, placing, elo_before, elo_after) values (201,?,?,?,?,?)',
+  ).run('d1', 0, 1, 1000, 1016);
+  deleteMatch(201);
+  assert.equal(getPlayer('d1')!.wins, 0, 'wins floor at zero');
 }
 
 console.log('db ok');

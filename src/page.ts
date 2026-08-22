@@ -350,6 +350,12 @@ export const PAGE = /* html */ `<!doctype html>
   .opt.boxed:has(#autocancel:not(:checked)) input[type=number] { display: none; }
   .cat-top { display: flex; align-items: center; gap: 9px; font-size: 14px; margin-bottom: 11px; }
   .cat-top .icon-btn { margin-left: auto; }
+  /* The "rolls into" picker rides on a card's title line, so it is sized to
+     that line rather than to a form field. Its list needs a width of its own -
+     stretched to a button this small it would be unreadable. */
+  .cat-top .sel-btn { padding: 3px 8px; font-size: 12px; gap: 6px; }
+  .cat-top .sel-btn svg { width: 11px; }
+  .cat-top .sel-list { right: auto; min-width: 130px; }
   .chip .icon-btn { padding: 0 0 0 3px; }
   .chip .icon-btn svg { width: 12px; height: 12px; }
   .chip { display: inline-flex; align-items: center; gap: 3px; }
@@ -384,6 +390,18 @@ export const PAGE = /* html */ `<!doctype html>
   @media (max-width: 620px) {
     .qrow { grid-template-columns: 1fr; gap: 8px; }
   }
+  /* Format's rows are label + number. Not .qrow: that first column is 68px
+     because the queues pane puts a rank chip in it, which squeezes a sentence
+     into one word a line. Sits inside .cat, so no padding of its own sideways. */
+  .frow {
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 18px;
+    padding: 13px 0;
+  }
+  .frow + .frow { border-top: 1px solid var(--line); }
+  .frow label { font-size: 14px; }
+  @media (max-width: 620px) {
+    .frow { grid-template-columns: 1fr; gap: 8px; }
+  }
   /* Seven ranks means seven of every control here, so they are sized for a
      list rather than for a form with three fields in it. */
   #ranklist td { padding: 3px 8px 3px 0; }
@@ -395,7 +413,10 @@ export const PAGE = /* html */ `<!doctype html>
   /* history: one match per line, so the row has to stay a line - names run
      inline and the placing is carried by order and weight, not by a column. */
   .hist td { padding: 9px 12px 9px 0; font-size: 13px; }
-  .hist tr + tr { border-top: 1px solid var(--line); }
+  /* Direct children only. As a descendant selector this also bordered the rows
+     of the .hgrid nested inside an open row - and that table is width:auto, so
+     every match drew a set of short lines that stopped halfway across the pane. */
+  .hist > tbody > tr + tr { border-top: 1px solid var(--line); }
   .hp { color: var(--muted); white-space: nowrap; }
   .hp + .hp::before { content: '·'; margin: 0 7px; color: var(--line); }
   .hp.won { color: var(--fg); font-weight: 500; }
@@ -405,6 +426,11 @@ export const PAGE = /* html */ `<!doctype html>
   .hrow td:last-child { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
   .hrow svg { width: 13px; transition: transform .15s; }
   .hrow[aria-expanded="true"] svg { transform: rotate(180deg); }
+  /* visible always, not hover-only: a control that appears on hover is a
+     control a touch screen never has. Muted until you mean it. */
+  .hdel { color: var(--muted); }
+  .hdel:hover, .hdel:focus-visible { color: var(--bad); }
+  .hdel svg { transform: none !important; }
   /* the detail row is always in the table and always empty-until-open, so
      nothing has to be built or fetched when it is clicked. */
   .hx > td { padding: 0; border: 0; }
@@ -1321,10 +1347,10 @@ async function renderGuild(guild) {
 
     <section id="pool">
     <h2>Scenario pool</h2>
-    <p class="muted">A match rolls one scenario per category. Search pulls real names off KovaaK's, so a lookup can't miss on a typo.</p>
+    <p class="muted">A match rolls one scenario per main - Clicking, Tracking, Switching. Add subcategories to organise a main's pool; they file under it rather than taking a round of their own. Search pulls real names off KovaaK's, so a lookup can't miss on a typo.</p>
     <div id="poolbox"></div>
     <div class="bar">
-      <button class="btn" id="addcat">Add category</button>
+      <button class="btn" id="addcat">Add subcategory</button>
       <button class="btn solid" id="savepool">Save pool</button>
       <span class="status" id="poolstatus"></span>
     </div>
@@ -1401,14 +1427,14 @@ async function renderGuild(guild) {
             ? h(data.formats.slice(1).join(', ')) + ' as well'
             : 'the only format right now'}</span></div>
         <p class="muted" style="margin:0 0 14px">\${picks
-          ? \`\${picks} scenario\${picks === 1 ? '' : 's'} picked, one per category: the side with the
+          ? \`\${picks} scenario\${picks === 1 ? '' : 's'} picked, one per main: the side with the
              pick bans first, the other bans back, then it picks from the
              \${Math.max(1, fmt.pickPool - bans)} left. The pick alternates, and scenario
              \${fmt.rounds} is rolled at random.\`
-          : 'One scenario, rolled at random.'} Category order is random too.</p>
-        <div class="rows">
+          : 'One scenario, rolled at random.'} Main order is random too.</p>
+        <div>
         \${FMT_FIELDS.map(([key, label, lo, hi, hint]) => \`
-          <div class="qrow">
+          <div class="frow">
             <label for="fmt-\${key}"><strong>\${h(label)}</strong>
               <span class="hint"> - \${h(hint)}</span></label>
             <input type="number" id="fmt-\${key}" data-k="\${key}"
@@ -1505,8 +1531,10 @@ async function renderGuild(guild) {
           p.placing === 1 ? ' won' : ''}">\${h(p.name)}<em>\${
           p.delta >= 0 ? '+' : ''}\${p.delta}</em></span>\`).join('')}</td>
         <td class="hint" style="white-space:nowrap">\${m.played.length} scn</td>
-        <td class="hint" style="white-space:nowrap">\${
-          m.ended_at ? ago(m.ended_at) : ''}\${icon('chevron')}</td>
+        <td class="hint" style="white-space:nowrap">\${m.ended_at ? ago(m.ended_at) : ''}
+          <button type="button" class="icon-btn hdel" data-del="\${m.id}"
+                  title="Delete match" aria-label="Delete match #\${m.id}">\${icon('x')}</button>
+          \${icon('chevron')}</td>
       </tr>\` + histDetail(m)).join('')
     : '<tr><td class="hint">Nothing has finished yet.</td></tr>';
 
@@ -1521,6 +1549,35 @@ async function renderGuild(guild) {
       if (e.key !== 'Enter' && e.key !== ' ') return;
       e.preventDefault();
       toggle();
+    };
+  });
+
+  // Deleting a match hands back what it paid out, so the confirmation says who
+  // gets what rather than asking "are you sure" about a number nobody can see.
+  histBox.querySelectorAll('.hdel').forEach((btn) => {
+    // the row itself is the expand control - a click on this button is not one
+    btn.onkeydown = (e) => e.stopPropagation();
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.del;
+      const m = data.history.find((x) => String(x.id) === id);
+      const gives = (m?.players ?? [])
+        .filter((p) => p.delta)
+        .map((p) => \`<b>\${h(p.name)}</b> \${p.delta > 0 ? '-' : '+'}\${Math.abs(p.delta)}\`)
+        .join(', ');
+      const ok = await confirmDanger({
+        title: \`Delete match #\${h(id)}?\`,
+        body: (gives ? \`Ratings go back: \${gives}. Wins and losses go with them. \` : '') +
+          'Matches played since are NOT recalculated, and this cannot be undone.',
+        name: '#' + id,
+        confirm: 'Delete match',
+      });
+      if (!ok) return;
+      const res = await fetch(\`/api/guild/\${guild.id}/match/\${id}/delete\`, { method: 'POST' });
+      // Ratings moved, so the ladder, the players pane and the overview counts
+      // are all stale now - reloading is both the smallest fix and the honest one.
+      if (res.ok) location.reload();
+      else status('Delete failed');
     };
   });
 
@@ -1650,40 +1707,65 @@ async function renderGuild(guild) {
     else el.textContent = out.error ?? 'Save failed';
   };
 
+  // The three mains are fixed and always drawn, empty or not - they are what a
+  // match rolls over. Everything else is a subcategory filed under one of them:
+  // its own card, its own scenarios, but it feeds its main's round rather than
+  // taking a round of its own.
+  //
   // Categories live in their own list so a new, still-empty one survives until
-  // something is put in it - the saved shape is a flat (category, name) list.
+  // something is put in it - the saved shape is a flat (category, name, main) list.
+  const MAINS = data.mains ?? ['Clicking', 'Tracking', 'Switching'];
   let pool = data.scenarios.map((s) => ({ ...s }));
-  let cats = [...new Set(pool.map((s) => s.category))];
+  let cats = MAINS.map((m) => ({ name: m, main: m }));
+  for (const s of pool) {
+    if (!cats.some((c) => c.name === s.category)) {
+      cats.push({ name: s.category, main: MAINS.includes(s.main) ? s.main : MAINS[0] });
+    }
+  }
   let openCat = null;
   const poolBox = document.getElementById('poolbox');
 
   const drawPool = () => {
-    poolBox.innerHTML = cats.length
-      ? cats.map((cat) => {
-          const rows = pool.map((s, i) => ({ ...s, i })).filter((r) => r.category === cat);
+    poolBox.innerHTML = cats.map((cat, ci) => {
+          const rows = pool.map((s, i) => ({ ...s, i })).filter((r) => r.category === cat.name);
+          const isMainCat = MAINS.includes(cat.name);
           return \`
         <div class="cat">
           <div class="cat-top">
-            <strong>\${h(cat)}</strong>
+            <strong>\${h(cat.name)}</strong>
+            \${isMainCat
+              ? '<span class="hint">main - one round a match</span>'
+              : \`<span class="hint">rolls into</span>\${
+                  selectField('catmain-' + ci, MAINS, cat.main, \`data-ci="\${ci}"\`)}\`}
             <span class="hint">\${rows.length} scenario\${rows.length === 1 ? '' : 's'}</span>
-            <button class="icon-btn" data-delcat="\${h(cat)}" title="Remove category">\${icon('x')}</button>
+            \${isMainCat
+              ? ''
+              : \`<button class="icon-btn" data-delcat="\${h(cat.name)}" title="Remove category">\${icon('x')}</button>\`}
           </div>
           <div class="chips">
             \${rows.map((r) => \`<span class="chip">\${h(r.name)}
               <button class="icon-btn" data-del="\${r.i}" title="Remove">\${icon('x')}</button></span>\`).join('')}
-            <button class="chip add" data-add="\${h(cat)}">\${icon('plus')}Scenario</button>
+            <button class="chip add" data-add="\${h(cat.name)}">\${icon('plus')}Scenario</button>
           </div>
-          \${openCat === cat ? \`<div class="scn">
+          \${openCat === cat.name ? \`<div class="scn">
             <input type="text" class="scn-q" placeholder="Search KovaaK's scenarios" spellcheck="false" />
             <div class="scn-out hint">Type at least 2 characters.</div>
           </div>\` : ''}
         </div>\`;
-        }).join('')
-      : '<div class="empty">No categories yet. Add one to start the pool.</div>';
+        }).join('');
 
+    // a main is one of the three and cannot be dropped; only subs carry this
     poolBox.querySelectorAll('[data-delcat]').forEach((el) => (el.onclick = () => {
-      cats = cats.filter((c) => c !== el.dataset.delcat);
+      cats = cats.filter((c) => c.name !== el.dataset.delcat);
       pool = pool.filter((s) => s.category !== el.dataset.delcat);
+      drawPool();
+    }));
+    wireSelects(poolBox);
+    poolBox.querySelectorAll('[data-ci]').forEach((el) => (el.onchange = () => {
+      const cat = cats[Number(el.dataset.ci)];
+      cat.main = el.dataset.value;
+      // the rows carry the main, so re-filing the category re-files its pool
+      for (const s of pool) if (s.category === cat.name) s.main = cat.main;
       drawPool();
     }));
     poolBox.querySelectorAll('[data-del]').forEach((el) => (el.onclick = () => {
@@ -1719,7 +1801,10 @@ async function renderGuild(guild) {
         out.querySelectorAll('[data-name]').forEach((b) => (b.onclick = () => {
           const name = b.dataset.name;
           if (!pool.some((s) => s.category === openCat && s.name === name)) {
-            pool.push({ category: openCat, name });
+            // the row carries the main, so it is stamped from the category it
+            // is being dropped into rather than worked out again at save time
+            const into = cats.find((c) => c.name === openCat);
+            pool.push({ category: openCat, name, main: into?.main ?? MAINS[0] });
           }
           openCat = null;
           drawPool();
@@ -1729,10 +1814,12 @@ async function renderGuild(guild) {
   };
   drawPool();
 
+  // Only ever a subcategory: the three mains are always on the page already, so
+  // there is nothing else this could be making.
   document.getElementById('addcat').onclick = async () => {
-    const name = (await ask('Category name'))?.slice(0, 60);
-    if (!name || cats.includes(name)) return;
-    cats.push(name);
+    const name = (await ask('Subcategory name'))?.slice(0, 60);
+    if (!name || cats.some((c) => c.name === name)) return;
+    cats.push({ name, main: MAINS[0] });
     openCat = name;
     drawPool();
     poolBox.querySelector('.scn-q')?.focus();

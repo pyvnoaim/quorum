@@ -77,33 +77,55 @@ export const DEFAULT_RANKS: { name: string; min_elo: number; color: string }[] =
 
 export const K_FACTOR = 32;
 
-/** Rolled from at match start, one per category where the round count allows.
- *  Names must match KovaaK's EXACTLY or the score lookup finds nothing - copy
- *  them out of the game, not off a spreadsheet.
- *  ponytail: categories are here because a ban/pick format (EmoAim) needs them;
- *  the base bot only uses them to spread the roll. */
-export const DEFAULT_CATEGORIES: Record<string, string[]> = {
-  Speed: [
-    'voxTargetSwitch 2 10% Smaller',
-    'StaticSwitchingVox xxSmall',
-    'VT psalmTS Advanced',
-    'VT EddieTS Advanced S5 Hard',
-    'poleTS',
-    'FloatTS Angelic',
-    'VT Speedswitch 90 Elite',
-    'patCircleSwitch NR',
-  ],
-  Evasive: [
-    'domiSwitch Harder',
-    'B180T Voltaic 15% Smaller',
-    'darkSwitch',
-    'tamTargetSwitch Control Hard',
-    'CircleTS',
-    'VT FlyTS Advanced S5 Hard',
-    'Jump Switching',
-    'Avasive Air Switch',
-  ],
-};
+/** The three fundamentals, and exactly as many of them as there are ROUNDS:
+ *  every match rolls one scenario from each, so a game is always one of all
+ *  three rather than three of whatever the pool happens to be deepest in.
+ *
+ *  Fixed on purpose. A server organises its own pool with subcategories -
+ *  Static and Dynamic under Clicking, say - but a subcategory is filing, not a
+ *  round: its scenarios roll up into its main and are drawn from there. */
+export const MAIN_CATEGORIES = ['Clicking', 'Tracking', 'Switching'] as const;
+export type MainCategory = (typeof MAIN_CATEGORIES)[number];
+export const isMain = (v: unknown): v is MainCategory =>
+  (MAIN_CATEGORIES as readonly unknown[]).includes(v);
+
+/** Rolled from at match start, one per MAIN category. Names must match KovaaK's
+ *  EXACTLY or the score lookup finds nothing - copy them out of the game, not
+ *  off a spreadsheet.
+ *
+ *  Both shipped groups are target-switching, so both file under Switching. A
+ *  fresh server has nothing under Clicking or Tracking until someone puts
+ *  scenarios there - which is a pool to finish, not a bug. */
+export const DEFAULT_CATEGORIES: { name: string; main: MainCategory; scenarios: string[] }[] = [
+  {
+    name: 'Speed',
+    main: 'Switching',
+    scenarios: [
+      'voxTargetSwitch 2 10% Smaller',
+      'StaticSwitchingVox xxSmall',
+      'VT psalmTS Advanced',
+      'VT EddieTS Advanced S5 Hard',
+      'poleTS',
+      'FloatTS Angelic',
+      'VT Speedswitch 90 Elite',
+      'patCircleSwitch NR',
+    ],
+  },
+  {
+    name: 'Evasive',
+    main: 'Switching',
+    scenarios: [
+      'domiSwitch Harder',
+      'B180T Voltaic 15% Smaller',
+      'darkSwitch',
+      'tamTargetSwitch Control Hard',
+      'CircleTS',
+      'VT FlyTS Advanced S5 Hard',
+      'Jump Switching',
+      'Avasive Air Switch',
+    ],
+  },
+];
 export const ROUNDS = 3;
 
 /** Runs per scenario. The score is the best of the FIRST this many in-window

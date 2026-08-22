@@ -125,6 +125,9 @@ for (const stmt of [
   // Optional: where the bot says what staff changed, so players hear about a
   // new scenario pool from the server rather than from losing a match on it.
   'alter table guild_config add column announce_channel_id text',
+  // Which of the three fixed mains a category rolls up into. A category named
+  // after a main is its own main; everything else is a subcategory of one.
+  'alter table scenario add column main text',
 ]) {
   try {
     db.exec(stmt);
@@ -132,6 +135,17 @@ for (const stmt of [
     /* already there */
   }
 }
+
+// Backfill, not part of the ALTER above: the ALTER throws once the column is
+// there, which would skip this on every boot but the first. Idempotent, and it
+// only ever touches rows written before the column existed.
+db.exec(
+  `update scenario set main = case
+     when category in ('Clicking', 'Tracking', 'Switching') then category
+     else 'Switching'
+   end
+   where main is null`,
+);
 
 /** Replacing a list is delete-then-insert, and that has to be all-or-nothing:
  *  a throw halfway leaves a server with half a ladder. It is also the fsync
@@ -510,30 +524,42 @@ export function setRankRole(rankId: number, roleId: string | null) {
   db.prepare('update rank set discord_role_id = ? where id = ?').run(roleId, rankId);
 }
 
+/** A scenario in the pool: the category it is filed under, and the main that
+ *  category rolls up into. For a category named after a main the two match. */
+export interface PoolRow {
+  category: string;
+  name: string;
+  main: string;
+}
+
 /** The scenario pool, seeded from DEFAULT_CATEGORIES then owned by the dashboard. */
-export function getScenarios(guildId: string) {
+export function getScenarios(guildId: string): PoolRow[] {
   const read = () =>
-    db.prepare('select category, name from scenario where guild_id = ? order by id').all(guildId) as
-      | unknown as { category: string; name: string }[];
+    db
+      .prepare('select category, name, main from scenario where guild_id = ? order by id')
+      .all(guildId) as unknown as PoolRow[];
   const rows = read();
   if (rows.length) return rows;
-  for (const [category, names] of Object.entries(DEFAULT_CATEGORIES)) {
-    for (const name of names) {
-      db.prepare('insert into scenario (guild_id, category, name) values (?, ?, ?)').run(
+  for (const cat of DEFAULT_CATEGORIES) {
+    for (const name of cat.scenarios) {
+      db.prepare('insert into scenario (guild_id, category, name, main) values (?, ?, ?, ?)').run(
         guildId,
-        category,
+        cat.name,
         name,
+        cat.main,
       );
     }
   }
   return read();
 }
 
-export function setScenarios(guildId: string, rows: { category: string; name: string }[]) {
-  const insert = db.prepare('insert into scenario (guild_id, category, name) values (?, ?, ?)');
+export function setScenarios(guildId: string, rows: PoolRow[]) {
+  const insert = db.prepare(
+    'insert into scenario (guild_id, category, name, main) values (?, ?, ?, ?)',
+  );
   tx(() => {
     db.prepare('delete from scenario where guild_id = ?').run(guildId);
-    for (const r of rows) insert.run(guildId, r.category, r.name);
+    for (const r of rows) insert.run(guildId, r.category, r.name, r.main);
   });
   return getScenarios(guildId);
 }
@@ -552,7 +578,7 @@ export function listOpenMatches(guildId: string) {
  *  Ratings are global by design - one Elo across every server - but the list
  *  is not: without the guild filter, an admin of one server could read, and
  *  through seedPlayer rewrite, the record of players who have never set foot
- *  in it. Anyone linked but not yet queued here is reachable via `/pug seed`,
+ *  in it. Anyone linked but not yet queued here is reachable via `/scrim seed`,
  *  which Discord already scopes to the server it was run in. */
 export function playersInGuild(guildId: string) {
   return db
@@ -674,6 +700,38 @@ export function matchHistory(guildId: string, limit = 25) {
     byMatch.set(row.match_id, list);
   }
   return matches.map((m) => ({ match: m, players: byMatch.get(m.id) ?? [] }));
+}
+
+/** Undoes a finished match and forgets it: every rating point and every W/L it
+ *  handed out goes back where it came from.
+ *
+ *  Only rows with a placing were ever scored - finishMatch writes the three
+ *  columns and the W/L in one go, so reverting exactly that set keeps them in
+ *  step and a no-show's untouched record stays untouched.
+ *
+ *  Later matches are NOT recomputed. Elo is path-dependent, so the exact answer
+ *  is replaying the ladder from the start - this is the cheap one that keeps the
+ *  totals honest, and deleting a match is a rare staff correction rather than
+ *  something that happens every night. */
+export function deleteMatch(matchId: number) {
+  tx(() => {
+    for (const r of matchPlayers(matchId)) {
+      if (r.placing == null || r.elo_before == null || r.elo_after == null) continue;
+      // max(0, ...) so a half-reverted row can never drive a record negative.
+      db.prepare(
+        `update player set elo = elo - ?,
+           wins = max(0, wins - ?), losses = max(0, losses - ?)
+         where discord_id = ?`,
+      ).run(
+        r.elo_after - r.elo_before,
+        r.placing === 1 ? 1 : 0,
+        r.placing === 1 ? 0 : 1,
+        r.discord_id,
+      );
+    }
+    db.prepare('delete from match_player where match_id = ?').run(matchId);
+    db.prepare('delete from match where id = ?').run(matchId);
+  });
 }
 
 /** How the two have gone against each other, from `a`'s side. Only matches they

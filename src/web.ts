@@ -7,8 +7,18 @@ import {
   type Guild,
   type GuildBasedChannel,
 } from 'discord.js';
-import { FORMATS, PANEL_FORMATS, SEED_MODES, guildAllowed, type Format, type SeedMode } from './config.js';
 import {
+  FORMATS,
+  MAIN_CATEGORIES,
+  PANEL_FORMATS,
+  SEED_MODES,
+  guildAllowed,
+  isMain,
+  type Format,
+  type SeedMode,
+} from './config.js';
+import {
+  deleteMatch,
   getConfig,
   getMatch,
   getSeedMode,
@@ -584,7 +594,7 @@ export function startWeb(client: Client, hooks: Hooks) {
         return;
       }
 
-      const matchAction = /^\/api\/guild\/(\d{1,32})\/match\/(\d+)\/(finish|cancel)$/.exec(path);
+      const matchAction = /^\/api\/guild\/(\d{1,32})\/match\/(\d+)\/(finish|cancel|delete)$/.exec(path);
       if (matchAction && req.method === 'POST') {
         const [, gid, mid, verb] = matchAction;
         if (!session.guildIds.has(gid)) {
@@ -596,6 +606,17 @@ export function startWeb(client: Client, hooks: Hooks) {
         // alone would reach into someone else's games.
         if (!target || target.guild_id !== gid) {
           json(res, 404, { error: 'no such match' });
+          return;
+        }
+        // Delete is the only verb that wants a match that is already over, so
+        // it answers before the open-status gate below rather than through it.
+        if (verb === 'delete') {
+          if (target.status !== 'done' && target.status !== 'void') {
+            json(res, 409, { error: 'that match is still in play' });
+            return;
+          }
+          deleteMatch(target.id);
+          json(res, 200, { ok: true });
           return;
         }
         if (target.status !== 'lobby' && target.status !== 'banning' && target.status !== 'live') {
@@ -654,6 +675,9 @@ export function startWeb(client: Client, hooks: Hooks) {
             voltaic: readVoltaic(p.voltaic),
           })),
           formats: Object.keys(FORMATS),
+          // fixed, and the pool pane draws a card for each whether or not the
+          // server has put anything under it yet
+          mains: MAIN_CATEGORIES,
           spread: getRankSpread(guildId),
           categories: guild.channels.cache
             .filter((c) => c.type === ChannelType.GuildCategory)
@@ -878,10 +902,18 @@ export function startWeb(client: Client, hooks: Hooks) {
         const body = await readJson(req);
         const rows = Array.isArray(body.scenarios) ? body.scenarios : [];
         const clean = rows
-          .map((r: Record<string, unknown>) => ({
-            category: String(r.category ?? '').trim().slice(0, 60),
-            name: String(r.name ?? '').trim().slice(0, 120),
-          }))
+          .map((r: Record<string, unknown>) => {
+            const category = String(r.category ?? '').trim().slice(0, 60);
+            // A category named after a main IS that main - it cannot be filed
+            // under a different one, however the browser labelled it. Anything
+            // else falls back rather than storing a main the roll never asks for.
+            const main = isMain(category)
+              ? category
+              : isMain(r.main)
+                ? r.main
+                : MAIN_CATEGORIES[0];
+            return { category, name: String(r.name ?? '').trim().slice(0, 120), main };
+          })
           .filter((r: { category: string; name: string }) => r.category && r.name);
         // An empty pool would start matches with nothing to play, so it is
         // refused rather than saved.
