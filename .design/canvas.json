@@ -1,0 +1,15 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "title": "Quorum \u2014 the mark", "x": 0, "y": 0, "w": 880, "h": 560 }
+  ],
+  "annotations": [
+    {
+      "id": "spec",
+      "x": 960,
+      "y": 0,
+      "w": 320,
+      "text": "Geometry, in a 90-unit box (viewBox 12 12 90 90):\n\ndisc  centre 56,56  r 44, lower-right quadrant removed\nblock  x/y 68  34 square\n\nTwo shapes, one fill, no background of its own \u2014 so it sits on any ground and follows currentColor.\n\nShipped: assets/quorum-mark.svg, and the avatar / mark / icon PNGs beside it."
+    }
+  ],
+  "launch": { "view": "focused", "file": "Main.dc.html" }
+}

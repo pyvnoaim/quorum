@@ -1,11 +1,26 @@
 import { RANK_ICONS } from './rankicons.js';
 
+/** The mark: a three-quarter disc with the removed quadrant set down beside the
+ *  gap - the counter is the tail, nothing is drawn twice. Two shapes, one fill,
+ *  no background of its own, so it sits on any ground and follows currentColor. */
+const MARK =
+  '<path d="M56 56 L100 56 A44 44 0 1 0 56 100 Z"/><rect x="68" y="68" width="34" height="34"/>';
+
+/** Tab icon. Its own dark rounded ground rather than a bare white mark, which
+ *  would vanish in light browser chrome. */
+const FAVICON =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' +
+  '<rect width="128" height="128" rx="28" fill="#0a0a0a"/>' +
+  `<g fill="#ededed" transform="translate(23 23) scale(0.911) translate(-12 -12)">${MARK}</g>` +
+  '</svg>';
+
 export const PAGE = /* html */ `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Quorum</title>
+<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(FAVICON)}" />
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -21,7 +36,10 @@ export const PAGE = /* html */ `<!doctype html>
   main { max-width: 720px; margin: 0 auto; padding: 64px 24px 96px; position: relative; }
   #bg { position: fixed; inset: 0; width: 100%; height: 100%; display: none; }
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 48px; }
-  h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.025em; }
+  h1 a, h1 > span { display: flex; align-items: center; gap: 9px; }
+  .mark { width: 17px; height: 17px; }
+  .login .mark { width: 42px; height: 42px; margin: 0 auto 20px; }
   h2 { font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 12px; letter-spacing: 0.02em; text-transform: lowercase; }
   /* stacked sections need air between them; the first one already sits under the header. */
   #lists h2:not(:first-child) { margin-top: 36px; }
@@ -471,6 +489,10 @@ const ago = (ts) => {
   return m < 1 ? 'just now' : m < 60 ? m + 'm ago' : Math.round(m / 60) + 'h ago';
 };
 
+const mark = () =>
+  '<svg class="mark" viewBox="12 12 90 90" fill="currentColor" aria-hidden="true">' +
+  ${JSON.stringify(MARK)} + '</svg>';
+
 const icon = (name) =>
   \`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">\${ICONS[name]}</svg>\`;
@@ -672,6 +694,7 @@ async function boot() {
 
 function renderLogin() {
   app.innerHTML = \`<div class="login">
+    \${mark()}
     <h1>Quorum</h1>
     <p>Sign in to set up your server.</p>
     <a class="btn solid" href="/login">Continue with Discord</a>
@@ -744,7 +767,7 @@ function startShader(fsId, opts) {
 
 function renderHome() {
   app.innerHTML = \`
-    <header><h1>Quorum</h1>\${whoBar()}</header>
+    <header><h1><span>\${mark()}Quorum</span></h1>\${whoBar()}</header>
     <div id="lists"></div>\`;
   startRays();
 
@@ -817,7 +840,7 @@ const PANES = [
 
 async function renderGuild(guild) {
   app.innerHTML = \`
-    <header><h1><a href="/">Quorum</a></h1>\${whoBar()}</header>
+    <header><h1><a href="/">\${mark()}Quorum</a></h1>\${whoBar()}</header>
     <div class="dash">
       <aside id="side">
         <div class="server">

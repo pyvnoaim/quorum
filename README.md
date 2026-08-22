@@ -1,5 +1,7 @@
 # Quorum
 
+<img src="assets/quorum-mark.svg" width="56" alt="" />
+
 _Enough players, and it counts._
 
 Pick-up games for a KovaaK's server. A host opens a match, picks players out of
