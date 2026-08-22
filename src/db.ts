@@ -221,6 +221,15 @@ export function setScenarios(guildId: string, rows: { category: string; name: st
   return getScenarios(guildId);
 }
 
+/** Everything still in play in one server - the dashboard's match list. */
+export function listOpenMatches(guildId: string) {
+  return db
+    .prepare(
+      "select * from match where guild_id = ? and status in ('lobby', 'live') order by id desc",
+    )
+    .all(guildId) as unknown as Match[];
+}
+
 export function listPlayers() {
   return db
     .prepare('select * from player order by elo desc')

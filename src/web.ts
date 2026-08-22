@@ -4,14 +4,19 @@ import { ChannelType, PermissionFlagsBits, type Client, type Guild } from 'disco
 import { TIERS, type Tier } from './config.js';
 import {
   getConfig,
+  getMatch,
   getRanks,
   getScenarios,
+  listOpenMatches,
   listPlayers,
+  matchPlayers,
+  getPlayer,
   setConfig,
   setRankRole,
   setRanks,
   setScenarios,
   setTier,
+  type Match,
   type Rank,
 } from './db.js';
 import { panelMessage } from './embeds.js';
@@ -96,7 +101,14 @@ async function syncRankRolesToDiscord(guild: Guild, ranks: Rank[], orphaned: Ran
   }
 }
 
-export function startWeb(client: Client) {
+/** The bot owns match lifecycle; the dashboard only asks it to act. Passing the
+ *  two hooks in beats importing index.ts back into here. */
+interface Hooks {
+  concludeMatch: (match: Match) => Promise<void>;
+  cancelMatch: (match: Match) => Promise<void>;
+}
+
+export function startWeb(client: Client, hooks: Hooks) {
   if (!CLIENT_ID || !CLIENT_SECRET) {
     console.log('web: DISCORD_CLIENT_ID/SECRET unset, dashboard disabled');
     return;
@@ -213,6 +225,35 @@ export function startWeb(client: Client) {
         return;
       }
 
+      const matchAction = /^\/api\/guild\/(\d{1,32})\/match\/(\d+)\/(finish|cancel)$/.exec(path);
+      if (matchAction && req.method === 'POST') {
+        const [, gid, mid, verb] = matchAction;
+        if (!session.guildIds.has(gid)) {
+          json(res, 403, { error: 'not your server' });
+          return;
+        }
+        const target = getMatch(Number(mid));
+        // The match must belong to the server you're authorized for, or the id
+        // alone would reach into someone else's games.
+        if (!target || target.guild_id !== gid) {
+          json(res, 404, { error: 'no such match' });
+          return;
+        }
+        if (target.status !== 'lobby' && target.status !== 'live') {
+          json(res, 409, { error: 'that match is already over' });
+          return;
+        }
+        // Only a live match has scores worth scoring; finishing a lobby would
+        // hand out Elo for a game nobody played.
+        if (verb === 'finish' && target.status !== 'live') {
+          json(res, 409, { error: 'that one never started' });
+          return;
+        }
+        await (verb === 'finish' ? hooks.concludeMatch(target) : hooks.cancelMatch(target));
+        json(res, 200, { matches: listOpenMatches(gid).map((m) => ({ id: m.id })) });
+        return;
+      }
+
       const match = /^\/api\/guild\/(\d{1,32})(\/[a-z]+)?$/.exec(path);
       if (!match) {
         res.writeHead(404).end('not found');
@@ -247,6 +288,18 @@ export function startWeb(client: Client) {
           scenarios: getScenarios(guildId),
           players: listPlayers(),
           tiers: TIERS,
+          matches: listOpenMatches(guildId).map((m) => ({
+            id: m.id,
+            format: m.format,
+            status: m.status,
+            started_at: m.started_at,
+            created_at: m.created_at,
+            scenarios: JSON.parse(m.scenarios),
+            players: matchPlayers(m.id).map((r) => ({
+              name: getPlayer(r.discord_id)?.kovaaks_username ?? r.discord_id,
+              done: !!r.done,
+            })),
+          })),
         });
         return;
       }

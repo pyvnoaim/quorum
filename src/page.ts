@@ -181,6 +181,11 @@ async function openConfig(guild) {
     </div>
 
     <hr />
+    <h2>matches in play</h2>
+    <p class="muted">Everything open or running right now. Force finish scores it from whatever KovaaK's has; cancel bins it with no rating change.</p>
+    <div id="matches"></div>
+
+    <hr />
     <h2>ranks</h2>
     <p class="muted">Each rank becomes a Discord role, named and coloured to match, handed out when someone's rating crosses it.</p>
     <table><tbody id="ranks"></tbody></table>
@@ -223,6 +228,36 @@ async function openConfig(guild) {
     sel.insertAdjacentHTML('beforeend', \`<option value="\${cat.id}" selected>\${h(cat.name)}</option>\`);
     status('category created');
   };
+
+  const drawMatches = (matches) => {
+    const box = document.getElementById('matches');
+    if (!matches.length) {
+      box.innerHTML = '<div class="hint">nothing in play</div>';
+      return;
+    }
+    box.innerHTML = '<table><tbody>' + matches.map((m) => \`
+      <tr>
+        <td style="width:100%">
+          <strong>\${h(m.format)}</strong> <span class="hint">#\${m.id} · \${h(m.status === 'live' ? 'running' : 'waiting for a taker')}</span><br />
+          <span class="hint">\${m.players.map((p) => h(p.name) + (p.done ? ' ✅' : '')).join(', ')}\${
+            m.scenarios.length ? ' — ' + m.scenarios.map(h).join(', ') : ''}</span>
+        </td>
+        <td style="white-space:nowrap">
+          \${m.status === 'live' ? \`<button class="btn" data-finish="\${m.id}">Force finish</button> \` : ''}
+          <button class="btn" data-cancel="\${m.id}">Cancel</button>
+        </td>
+      </tr>\`).join('') + '</tbody></table>';
+
+    const act = async (id, verb) => {
+      box.innerHTML = '<div class="hint">working…</div>';
+      await fetch(\`/api/guild/\${guild.id}/match/\${id}/\${verb}\`, { method: 'POST' });
+      const fresh = await (await fetch('/api/guild/' + guild.id)).json();
+      drawMatches(fresh.matches);
+    };
+    box.querySelectorAll('[data-finish]').forEach((el) => (el.onclick = () => act(el.dataset.finish, 'finish')));
+    box.querySelectorAll('[data-cancel]').forEach((el) => (el.onclick = () => act(el.dataset.cancel, 'cancel')));
+  };
+  drawMatches(data.matches);
 
   let ranks = data.ranks.slice();
   const drawRanks = () => {

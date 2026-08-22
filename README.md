@@ -20,7 +20,25 @@ Needs Node 22+ (`node:sqlite` is stdlib, hence `--experimental-sqlite` in the
 scripts; the flag goes away on Node 24). State lives in `pug.db` next to the
 process — back that file up, it's the whole ladder.
 
-`npm test` runs the rating self-check.
+`npm test` runs the self-checks (rating maths, ranks/pool/tiers).
+
+### In Docker
+
+```yaml
+services:
+  scrim-bot:
+    image: scrim-bot
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports: ['3000:3000']
+    volumes: ['scrim-db:/data']   # pug.db lives here — this IS the ladder
+volumes:
+  scrim-db:
+```
+
+`DB_PATH` already points at `/data/pug.db` in the image. Back that volume up;
+losing it loses every rating and record.
 
 ## Setup (the dashboard)
 
@@ -70,6 +88,11 @@ queue channel only ever shows calls that are actually live.
 
 Other commands: `/pug score`, `/pug stats`, `/pug leaderboard`, and
 `/pug tier @player <tier>` for staff. Everything else is a button.
+
+**When a match goes wrong**, the dashboard lists everything open or running:
+*force finish* scores it from whatever KovaaK's has, *cancel* bins it with no
+rating change. Without that, a broken match just sits until the 45-minute clock
+catches it.
 
 Only someone already sitting in a voice channel can be dragged into the match
 VC — everyone else gets the channel link in the match message, which is as far

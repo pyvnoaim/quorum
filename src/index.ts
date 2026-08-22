@@ -275,6 +275,26 @@ async function syncRankRoles(guildId: string, discordIds: string[]) {
   }
 }
 
+/** Kills a match without a result: no Elo, no placings, nothing posted. The
+ *  staff escape hatch for a lobby that went wrong. */
+async function cancelMatch(match: Match) {
+  db.prepare("update match set status = 'cancelled', ended_at = ? where id = ?").run(
+    Date.now(),
+    match.id,
+  );
+  if (match.message_id) {
+    const channel = await client.channels.fetch(match.channel_id).catch(() => null);
+    if (channel?.isTextBased()) {
+      const msg = await channel.messages.fetch(match.message_id).catch(() => null);
+      await msg?.delete().catch(() => {});
+    }
+  }
+  if (match.voice_channel_id) {
+    const vc = await client.channels.fetch(match.voice_channel_id).catch(() => null);
+    if (vc?.isVoiceBased()) await vc.delete().catch(() => {});
+  }
+}
+
 /** Ends a match and cleans up after it. The Done button and the clock both
  *  route through here, so there is exactly one place that posts a result. */
 async function concludeMatch(match: Match) {
@@ -343,7 +363,7 @@ async function tick() {
 
 client.once('clientReady', async (c) => {
   await c.application.commands.set([command.toJSON()]);
-  startWeb(c);
+  startWeb(c, { concludeMatch, cancelMatch });
   setInterval(() => void tick().catch(console.error), TICK_MS).unref();
   console.log(`ready as ${c.user.tag}`);
 });
