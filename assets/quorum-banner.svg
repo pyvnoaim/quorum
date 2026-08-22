@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="1360" viewBox="0 0 1360 1360">
+  <rect width="1360" height="1360" fill="#0a0a0a"/>
+  <g transform="translate(0 440)">
+    <rect width="1360" height="480" fill="#0a0a0a"/>
+
+    <!-- the mark's disc alone, oversized and bled off three edges. A whole
+         shape, so nothing in it can read as a stray corner. -->
+    <circle cx="1190" cy="240" r="330" fill="#141414"/>
+
+    <g fill="#ededed" transform="translate(112 164) scale(0.889) translate(-12 -12)">
+      <path d="M56 56 L100 56 A44 44 0 1 0 56 100 Z"/>
+      <rect x="68" y="68" width="34" height="34"/>
+    </g>
+
+    <text x="224" y="234" fill="#ededed" font-family="SF Pro Display, -apple-system, Helvetica Neue, Helvetica"
+          font-size="84" font-weight="600" letter-spacing="-2.6">Quorum</text>
+    <text x="114" y="306" fill="#8a8a8a" font-family="SF Pro Text, -apple-system, Helvetica Neue, Helvetica"
+          font-size="30" font-weight="400">KovaaK's pick-up games with a self-scoring Elo ladder</text>
+  </g>
+</svg>
