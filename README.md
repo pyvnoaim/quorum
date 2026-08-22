@@ -93,9 +93,8 @@ https://quorum.example.com/callback
 Discord matches it character for character, so no trailing slash.
 
 On the **Bot** page, leave all three privileged intents OFF - the bot asks for
-`Guilds` and `GuildVoiceStates`, and neither is privileged. Turn **Public Bot**
-off too while you're there: with `ALLOWED_GUILD_IDS` set, nobody else can
-usefully add it anyway.
+`Guilds`, which is not privileged. Turn **Public Bot** off too while you're
+there: with `ALLOWED_GUILD_IDS` set, nobody else can usefully add it anyway.
 
 ### When it doesn't come up
 
@@ -117,8 +116,6 @@ without the bot link straight to the invite; the rest open a settings page:
 
 - **Queue channel** - where the panel and open calls live
 - **Results channel** - where finished matches get posted
-- **Voice category** - where match voice channels are made, with a button to
-  create one if you haven't
 - **Extra ping role** - for people who want notifying about every call. The
   ranks a call can actually admit are pinged automatically
 - **Ranks** - add, remove, rename, recolour and set the threshold of every rank.
@@ -142,10 +139,11 @@ there are no configuration commands.
 
 Add `WEB_URL/callback` to the OAuth redirects on your Discord application. The
 dashboard's invite link already asks for everything the bot needs - Manage
-Channels and Manage Roles for the ladder, Move Members for the voice half, and
-View Channel, Send Messages, Embed Links and Read Message History held in its
-own right, because a locked rank category is the moment @everyone stops
-supplying them. **Never give it Administrator.**
+Channels and Manage Roles for the ladder, Create Private Threads / Send Messages
+in Threads / Manage Threads for a match's own room, and View Channel, Send
+Messages, Embed Links and Read Message History held in its own right, because a
+locked rank category is the moment @everyone stops supplying them. **Never give
+it Administrator.**
 
 If the bot was invited before this was fixed it is still holding the old, wrong
 set: re-run the invite from the dashboard, which updates the role in place.
@@ -216,17 +214,20 @@ queue channel forever. Then:
    not a channel per rank. One queue channel keeps the pool of takers whole;
    the ping is what makes it findable.
 2. Someone else hits **Join** on it. That's the whole matchmaking.
-3. The moment it fills it starts itself - teams drawn, a temporary voice
-   channel made and everyone dragged in.
-4. **Pick/ban.** 7 candidates go up on the call message and the two sides
+3. The moment it fills it starts itself: teams drawn, and a **private thread**
+   made off the queue channel holding exactly the players. The call in the
+   channel is deleted - it filled, so it has nothing left to offer - and
+   everything from here happens in the thread, where nobody else can see it.
+4. **Pick/ban.** 7 candidates go up in the thread and the two sides
    alternate bans until 3 are left. Nobody banning within 90 seconds and the
    bot bans at random, so one person can't hold the lobby. Group format skips
    this - there are no two sides to alternate between.
-5. The call message becomes the live scoreboard, re-reading KovaaK's every
+5. That same message becomes the live scoreboard, re-reading KovaaK's every
    minute on its own. **Refresh scores** forces it early.
 6. Everyone hits **Done**. Once they all have - or 45 minutes in, whichever
-   comes first - placings and Elo changes go to the results channel, the call
-   message is deleted and the voice channel with it.
+   comes first - placings and Elo changes go to the results channel and the
+   thread is deleted. The result embed is the record; an archived thread per
+   match is a channel nobody can find anything in.
 
 **Done is per player, deliberately.** If whoever's ahead could end the match on
 their own, they'd end it while their opponent still had runs left. The clock is
@@ -243,9 +244,11 @@ Other commands: `/pug score`, `/pug stats`, `/pug leaderboard`, and
 rating change. Without that, a broken match just sits until the 45-minute clock
 catches it.
 
-Only someone already sitting in a voice channel can be dragged into the match
-VC - everyone else gets the channel link in the match message, which is as far
-as Discord lets a bot go.
+**Why a thread and not a voice channel.** A bot can only move someone who is
+already sitting in voice, so half a lobby would be left staring at a link. A
+thread takes members by id: everyone is in it the moment it exists, it needs
+nothing configured, and in a split server it lands in the right rank's channel
+on its own.
 
 ## Tiers
 

@@ -57,7 +57,6 @@ db.exec(`
     guild_id           text primary key,
     panel_channel_id   text,
     results_channel_id text,
-    voice_category_id  text,
     ping_role_id       text,
     rank_spread        text
   );
@@ -93,6 +92,9 @@ for (const stmt of [
   'alter table guild_config add column split_channels integer',
   'alter table guild_config add column rank_mode text',
   'alter table match add column division_role_id text',
+  // Replaces voice_channel_id, which stays behind holding dead ids: sqlite can
+  // drop a column but not on a database someone might still roll back.
+  'alter table match add column thread_id text',
 ]) {
   try {
     db.exec(stmt);
@@ -152,7 +154,9 @@ export interface Match {
   created_at: number;
   started_at: number | null;
   ended_at: number | null;
-  voice_channel_id: string | null;
+  /** The match's private thread, holding exactly its players. Null when the
+   *  bot couldn't make one - the match runs regardless. */
+  thread_id: string | null;
   /** The division this call belongs to, in manual mode: the Discord role its
    *  opener held. Resolved once at open time, so a role change mid-lobby can't
    *  move the goalposts under people already in. Null in automatic mode. */
@@ -163,7 +167,6 @@ export interface GuildConfig {
   guild_id: string;
   panel_channel_id: string | null;
   results_channel_id: string | null;
-  voice_category_id: string | null;
   ping_role_id: string | null;
   /** JSON: how many rank bands apart a queue lets people be, per format. */
   rank_spread: string | null;
@@ -251,7 +254,6 @@ export function getConfig(guildId: string): GuildConfig {
       guild_id: guildId,
       panel_channel_id: null,
       results_channel_id: null,
-      voice_category_id: null,
       ping_role_id: null,
       rank_spread: null,
       split_channels: null,
@@ -264,13 +266,12 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
   const next = { ...getConfig(guildId), ...patch };
   db.prepare(
     `insert into guild_config
-       (guild_id, panel_channel_id, results_channel_id, voice_category_id, ping_role_id,
+       (guild_id, panel_channel_id, results_channel_id, ping_role_id,
         rank_spread, split_channels, rank_mode)
-     values (?, ?, ?, ?, ?, ?, ?, ?)
+     values (?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
-       voice_category_id = excluded.voice_category_id,
        ping_role_id = excluded.ping_role_id,
        rank_spread = excluded.rank_spread,
        split_channels = excluded.split_channels,
@@ -279,7 +280,6 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     guildId,
     next.panel_channel_id,
     next.results_channel_id,
-    next.voice_category_id,
     next.ping_role_id,
     next.rank_spread,
     next.split_channels,

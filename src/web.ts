@@ -52,11 +52,14 @@ const REDIRECT = `${BASE_URL}/callback`;
 const INVITE_PERMISSIONS = [
   PermissionFlagsBits.ManageChannels,
   PermissionFlagsBits.ManageRoles,
-  PermissionFlagsBits.MoveMembers,
   PermissionFlagsBits.ViewChannel,
   PermissionFlagsBits.SendMessages,
   PermissionFlagsBits.EmbedLinks,
   PermissionFlagsBits.ReadMessageHistory,
+  // A match runs in its own private thread: make it, talk in it, delete it.
+  PermissionFlagsBits.CreatePrivateThreads,
+  PermissionFlagsBits.SendMessagesInThreads,
+  PermissionFlagsBits.ManageThreads,
 ].reduce((all, flag) => all | flag, 0n).toString();
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
@@ -463,7 +466,7 @@ export function startWeb(client: Client, hooks: Hooks) {
             // guild is pinned and the picker disabled - the dashboard already
             // asked which server, so Discord shouldn't ask again.
             // ManageChannels + ManageRoles for the ladder's roles and channels,
-            // MoveMembers for the voice half, and View/Send/Embed/History so the
+            // the thread permissions for a match's own room, and View/Send/Embed/History so the
             // bot holds those itself. It cannot lean on @everyone for them: the
             // first thing a locked rank category does is take them away.
             invite: `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=${INVITE_PERMISSIONS}&guild_id=${g.id}&disable_guild_select=true`,
@@ -527,9 +530,6 @@ export function startWeb(client: Client, hooks: Hooks) {
           channels: guild.channels.cache
             .filter((c) => c.type === ChannelType.GuildText)
             .map((c) => ({ id: c.id, name: c.name })),
-          categories: guild.channels.cache
-            .filter((c) => c.type === ChannelType.GuildCategory)
-            .map((c) => ({ id: c.id, name: c.name })),
           roles: guild.roles.cache
             .filter((r) => r.id !== guild.id && !r.managed)
             .map((r) => ({ id: r.id, name: r.name })),
@@ -580,7 +580,6 @@ export function startWeb(client: Client, hooks: Hooks) {
           setConfig(guildId, {
             panel_channel_id: chan(body.panel_channel_id),
             results_channel_id: chan(body.results_channel_id),
-            voice_category_id: chan(body.voice_category_id),
             ping_role_id: role(body.ping_role_id),
           }),
         );
@@ -699,25 +698,6 @@ export function startWeb(client: Client, hooks: Hooks) {
         return;
       }
 
-      if (action === '/category' && req.method === 'POST') {
-        const body = await readJson(req);
-        const name = String(body.name ?? '').slice(0, 90).trim();
-        if (!name) {
-          json(res, 400, { error: 'name required' });
-          return;
-        }
-        const category = await guild.channels
-          .create({ name, type: ChannelType.GuildCategory })
-          .catch(() => null);
-        if (!category) {
-          json(res, 502, { error: 'missing Manage Channels' });
-          return;
-        }
-        setConfig(guildId, { voice_category_id: category.id });
-        json(res, 200, { id: category.id, name: category.name });
-        return;
-      }
-
       if (action === '/panel' && req.method === 'POST') {
         // A split server's queues live in a channel per rank per format, each
         // with its own one-format panel - and those were only ever posted the
@@ -762,8 +742,8 @@ export function startWeb(client: Client, hooks: Hooks) {
       if (action === '/leave' && req.method === 'POST') {
         const body = await readJson(req);
         if (body.purge) {
-          // Calls first. Cancelling one deletes its message and its voice
-          // channel, neither of which the rank sweep below knows anything about.
+          // Calls first. Cancelling one deletes its message and its thread,
+          // neither of which the rank sweep below knows anything about.
           for (const open of listOpenMatches(guildId)) await hooks.cancelMatch(open);
           const ranks = getRanks(guildId);
           await syncRankChannelsToDiscord(guild, [], ranks, false, false);

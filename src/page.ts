@@ -894,7 +894,6 @@ async function renderGuild(guild) {
   const todo = [
     !data.config.panel_channel_id,
     !data.config.results_channel_id,
-    !data.config.voice_category_id,
     !data.scenarios.length,
     !data.ranks.length,
   ].filter(Boolean).length;
@@ -918,7 +917,6 @@ async function renderGuild(guild) {
     <div class="check">
       \${step(!!data.config.panel_channel_id, 'queue channel', 'setup')}
       \${step(!!data.config.results_channel_id, 'results channel', 'setup')}
-      \${step(!!data.config.voice_category_id, 'voice category', 'setup')}
       \${step(data.scenarios.length > 0, \`scenario pool (\${data.scenarios.length})\`, 'pool')}
       \${step(data.ranks.some((r) => r.discord_role_id),
               \`rank roles (\${data.ranks.filter((r) => r.discord_role_id).length}/\${data.ranks.length})\`,
@@ -952,13 +950,6 @@ async function renderGuild(guild) {
     <div class="field">
       <label>Results channel <span class="hint">- where finished matches get posted</span></label>
       \${selectField('results', NONE.concat(data.channels), data.config.results_channel_id)}
-    </div>
-    <div class="field">
-      <label>Voice category <span class="hint">- match voice channels are made here</span></label>
-      <div class="row">
-        \${selectField('voice', NONE.concat(data.categories), data.config.voice_category_id)}
-        <button class="btn" id="mkcat">New category</button>
-      </div>
     </div>
     <div class="field">
       <label>Extra ping role <span class="hint">- for people who want every call. The ranks a call can admit are already pinged.</span></label>
@@ -1136,22 +1127,6 @@ async function renderGuild(guild) {
   };
 
   const status = (msg) => (document.getElementById('status').textContent = msg);
-
-  document.getElementById('mkcat').onclick = async () => {
-    const name = await ask('Category name', 'Quorum');
-    if (!name) return;
-    const res = await fetch(\`/api/guild/\${guild.id}/category\`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) return status('could not create it');
-    const cat = await res.json();
-    const sel = document.getElementById('voice');
-    sel.querySelector('.sel-list').insertAdjacentHTML('beforeend',
-      \`<li role="option" tabindex="-1" data-value="\${h(cat.id)}" aria-selected="false">\${h(cat.name)}</li>\`);
-    pickOption(sel, cat.id);
-    status('category created');
-  };
 
   const drawMatches = (matches) => {
     const box = document.getElementById('matchlist');
@@ -1416,7 +1391,6 @@ async function renderGuild(guild) {
     const body = {
       panel_channel_id: document.getElementById('panel').dataset.value || null,
       results_channel_id: document.getElementById('results').dataset.value || null,
-      voice_category_id: document.getElementById('voice').dataset.value || null,
       ping_role_id: document.getElementById('ping').dataset.value || null,
     };
     const res = await fetch('/api/guild/' + guild.id, {

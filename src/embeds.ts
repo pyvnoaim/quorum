@@ -61,7 +61,7 @@ export function panelMessage(formats: readonly Format[] = PANEL_FORMATS) {
         .setTitle(formats.length === 1 ? `Quorum · ${formats[0]}` : 'Quorum')
         .setColor(BLURPLE)
         .setDescription(
-          "Pick a format and the bot posts your call in this channel. When someone takes it you'll be pulled into a voice channel and your scenarios go up.\n\nScores are read from KovaaK's - there's nothing to submit.",
+          "Pick a format and the bot posts your call in this channel. When someone takes it you both get a private thread to play in, and your scenarios go up there.\n\nScores are read from KovaaK's - there's nothing to submit.",
         ),
     ],
     components: [
@@ -78,7 +78,6 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
   const scenarios: string[] = JSON.parse(match.scenarios);
   const teams = [...new Set(rows.map((r) => r.team))];
 
-  const voice = match.voice_channel_id ? `\nVoice: <#${match.voice_channel_id}>` : '';
   // Discord renders this relative and per-viewer, so nobody has to work out
   // what time zone the deadline was written in.
   const deadline = Math.floor(((match.started_at ?? Date.now()) + MATCH_TTL_MS) / 1000);
@@ -86,7 +85,7 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
     .setTitle(`${match.format} · ongoing`)
     .setColor(BLURPLE)
     .setDescription(
-      `Play these in any order - scores update on their own. Hit **Done** when you've finished; results post once everyone has, or <t:${deadline}:R> either way.${voice}\n\n${scenarios
+      `Play these in any order - scores update on their own. Hit **Done** when you've finished; results post once everyone has, or <t:${deadline}:R> either way.\n\n${scenarios
         .map((s, i) => `**${i + 1}.** ${s}`)
         .join('\n')}`,
     );

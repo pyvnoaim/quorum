@@ -61,9 +61,9 @@ const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set');
 
 const client = new Client({
-  // GuildVoiceStates is what makes member.voice.channel readable - without it
-  // nobody can be dragged into the match VC.
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+  // Guilds alone. A match talks in its own private thread now, so nothing here
+  // reads a voice state and no second intent has to be justified.
+  intents: [GatewayIntentBits.Guilds],
 });
 
 const NO_LINK =
@@ -209,41 +209,47 @@ function splitResultsChannel(match: Match) {
   return rank ? (rankChannels(rank).results ?? null) : null;
 }
 
-/** A throwaway voice channel per match, deleted when it ends. Only someone
- *  already sitting in voice can be moved - the rest get the channel link in the
- *  match message, which is the best Discord allows. */
-async function openVoice(guild: Guild, match: Match, rows: MatchPlayer[]) {
-  const category = getConfig(guild.id).voice_category_id;
-  // No voice category is a setting, not a fault - the match just runs without
-  // one. A category that is set and still won't take a channel is a fault, and
-  // used to look identical from the outside.
-  if (!category) return null;
-  const channel = await guild.channels
+/** A private thread per match, holding exactly its players, deleted when the
+ *  match ends.
+ *
+ *  It hangs off the channel the call was made in, so there is nothing to
+ *  configure and a split server's threads land in the right rank's channel on
+ *  their own. Everyone in the match is added by id - unlike a voice channel,
+ *  nobody has to already be somewhere for that to work. */
+async function openThread(guild: Guild, match: Match, rows: MatchPlayer[]) {
+  const channel = guild.channels.cache.get(match.channel_id);
+  if (channel?.type !== ChannelType.GuildText) return null;
+  const thread = await channel.threads
     .create({
       name: `${match.format} #${match.id}`,
-      type: ChannelType.GuildVoice,
-      parent: category,
-      userLimit: rows.length,
+      type: ChannelType.PrivateThread,
+      // nobody drags a friend into someone else's match
+      invitable: false,
+      autoArchiveDuration: 1440,
     })
-    .catch((err) => {
-      console.error(`match ${match.id}: no voice channel in ${category}:`, err.message);
+    .catch((err: Error) => {
+      console.error(`match ${match.id}: no thread in ${match.channel_id}:`, err.message);
       return null;
     });
-  if (!channel) return null;
+  if (!thread) return null;
 
-  await Promise.all(
-    rows.map(async (r) => {
-      const member = await guild.members.fetch(r.discord_id).catch(() => null);
-      if (member?.voice.channel) await member.voice.setChannel(channel).catch(() => {});
-    }),
-  );
-  return channel.id;
+  await Promise.all(rows.map((r) => thread.members.add(r.discord_id).catch(() => {})));
+  return thread.id;
+}
+
+/** Threads are deleted rather than archived: an archived one still sits in the
+ *  channel's list, and a season of those is a channel nobody can find anything
+ *  in. The result embed is the record, and it lives in the results channel. */
+async function closeThread(match: Match) {
+  if (!match.thread_id) return;
+  const thread = await client.channels.fetch(match.thread_id).catch(() => null);
+  if (thread?.isThread()) await thread.delete().catch(() => {});
 }
 
 async function startMatch(guild: Guild, match: Match) {
   // One caller wins the transition. Two Joins landing in the same tick both see
   // a full lobby, and starting twice shuffles the teams twice and leaks the
-  // first voice channel. created_at moves with it because from here it means
+  // first thread. created_at moves with it because from here it means
   // "when the ban phase began", which is what the sweep reads.
   const claimed = db
     .prepare("update match set status = 'banning', created_at = ? where id = ? and status = 'lobby'")
@@ -260,8 +266,8 @@ async function startMatch(guild: Guild, match: Match) {
       row.discord_id,
     );
   });
-  const voiceId = await openVoice(guild, match, rows);
-  db.prepare('update match set voice_channel_id = ? where id = ?').run(voiceId, match.id);
+  const threadId = await openThread(guild, match, rows);
+  db.prepare('update match set thread_id = ? where id = ?').run(threadId, match.id);
 
   // Group has no two sides to alternate between, and a pool no bigger than the
   // round count has nothing to ban - either way, roll and play.
@@ -269,9 +275,35 @@ async function startMatch(guild: Guild, match: Match) {
   // much of BAN_POOL is gone - so anything less just plays a plain roll.
   const pool = rollScenarios(guild.id, BAN_POOL);
   if (match.format === 'group' || pool.length < BAN_POOL) {
-    return beginPlay(getMatch(match.id)!, rollScenarios(guild.id));
+    return moveIntoThread(beginPlay(getMatch(match.id)!, rollScenarios(guild.id)));
   }
   db.prepare('update match set scenarios = ? where id = ?').run(JSON.stringify(pool), match.id);
+  return moveIntoThread(getMatch(match.id)!);
+}
+
+/** The match moves into its thread the moment it starts: bans, scores and Done
+ *  all happen where only its players can see them. The call in the queue
+ *  channel has done its whole job by filling up, so it goes - leaving it would
+ *  put a dead Join button under a game already in progress.
+ *
+ *  No thread means no move. Everything carries on in the channel exactly as it
+ *  did before, because a match that can't be private is still a match. */
+async function moveIntoThread(match: Match) {
+  if (!match.thread_id) return match;
+  const thread = await client.channels.fetch(match.thread_id).catch(() => null);
+  if (!thread?.isThread()) return match;
+  const posted = await thread.send(render(match)).catch(() => null);
+  if (!posted) return match;
+
+  const call = match.message_id;
+  db.prepare('update match set message_id = ? where id = ?').run(posted.id, match.id);
+  if (call) {
+    const home = await client.channels.fetch(match.channel_id).catch(() => null);
+    if (home?.isTextBased()) {
+      const msg = await home.messages.fetch(call).catch(() => null);
+      await msg?.delete().catch(() => {});
+    }
+  }
   return getMatch(match.id)!;
 }
 
@@ -364,10 +396,8 @@ async function finishMatch(match: Match) {
     ).run(place, entrant.elo, entrant.elo + delta, done.id, entrant.id);
   }
 
-  if (done.voice_channel_id) {
-    const vc = await client.channels.fetch(done.voice_channel_id).catch(() => null);
-    if (vc?.isVoiceBased()) await vc.delete().catch(() => {});
-  }
+  // The thread outlives this on purpose - concludeMatch still has to reach the
+  // match message inside it if the result can't be posted anywhere else.
   return { match: getMatch(done.id)!, deltas };
 }
 
@@ -408,17 +438,16 @@ async function cancelMatch(match: Match) {
     Date.now(),
     match.id,
   );
-  if (match.message_id) {
+  if (match.message_id && !match.thread_id) {
     const channel = await client.channels.fetch(match.channel_id).catch(() => null);
     if (channel?.isTextBased()) {
       const msg = await channel.messages.fetch(match.message_id).catch(() => null);
       await msg?.delete().catch(() => {});
     }
   }
-  if (match.voice_channel_id) {
-    const vc = await client.channels.fetch(match.voice_channel_id).catch(() => null);
-    if (vc?.isVoiceBased()) await vc.delete().catch(() => {});
-  }
+  // With a thread there is no separate message to chase: deleting the thread
+  // deletes what is inside it.
+  await closeThread(match);
 }
 
 /** Ends a match and cleans up after it. The Done button and the clock both
@@ -439,15 +468,21 @@ async function concludeMatch(match: Match) {
   const channel = await client.channels.fetch(channelId).catch(() => null);
   const posted = channel?.isSendable() ? await channel.send({ embeds: [embed] }).catch(() => null) : null;
 
-  if (done.message_id) {
-    const home = await client.channels.fetch(done.channel_id).catch(() => null);
-    if (home?.isTextBased()) {
-      const msg = await home.messages.fetch(done.message_id).catch(() => null);
-      // The call message goes away once the result lives elsewhere; if posting
-      // failed it becomes the result instead, so nobody loses the scores.
-      if (posted) await msg?.delete().catch(() => {});
-      else await msg?.edit({ embeds: [embed], components: [] }).catch(() => {});
-    }
+  // The thread is the match, and once the result lives elsewhere it has nothing
+  // left to say. If posting failed it becomes the record instead - the scores
+  // must not go down with it.
+  const home = await client.channels.fetch(done.thread_id ?? done.channel_id).catch(() => null);
+  const msg =
+    done.message_id && home?.isTextBased()
+      ? await home.messages.fetch(done.message_id).catch(() => null)
+      : null;
+  if (!posted) {
+    await msg?.edit({ embeds: [embed], components: [] }).catch(() => {});
+  } else {
+    await closeThread(done);
+    // Deleting the thread took the message with it; without one it is still
+    // sitting in the queue channel.
+    if (!done.thread_id) await msg?.delete().catch(() => {});
   }
   await syncRankRoles(done.guild_id, rows.map((r) => r.discord_id));
 }
@@ -724,7 +759,9 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
     const full = matchPlayers(match.id).length >= FORMATS[match.format].max;
     await i.deferUpdate();
     const next = full ? await startMatch(i.guild!, match) : getMatch(match.id)!;
-    await i.editReply(render(next));
+    // A started match has moved into its thread and taken the call message with
+    // it - there is nothing left here to edit.
+    if (next.status === 'lobby' || !next.thread_id) await i.editReply(render(next));
     return;
   }
 
@@ -842,7 +879,8 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
 
 async function editMatchMessage(match: Match) {
   if (!match.message_id) return;
-  const channel = await client.channels.fetch(match.channel_id).catch(() => null);
+  // A started match lives in its thread; only a lobby is still in the channel.
+  const channel = await client.channels.fetch(match.thread_id ?? match.channel_id).catch(() => null);
   if (!channel?.isTextBased()) return;
   const msg = await channel.messages.fetch(match.message_id).catch(() => null);
   await msg?.edit(render(match)).catch(() => {});
