@@ -134,4 +134,20 @@ assert.deepEqual(getRankSpread('gc'), { '1v1': 0, '2v2': 0, group: 0 }, 'split f
 setConfig('gc', { split_channels: 0 });
 assert.equal(getRankSpread('gc')['2v2'], 2, 'and the saved spread survives being turned off');
 
+// The claim behind startMatch and finishMatch. Force-finish, the last Done and
+// the clock can all reach the same match, each holding a row that went stale
+// while it awaited - so the transition, not the read, is what decides. Second
+// caller gets nothing, and the game is scored once.
+db.prepare(
+  "insert into match (id, guild_id, channel_id, host_id, format, status) values (93,'gA','c','inA','1v1','live')",
+).run();
+const claim = () =>
+  Number(
+    db
+      .prepare("update match set status = 'done', ended_at = ? where id = ? and status = 'live'")
+      .run(Date.now(), 93).changes,
+  );
+assert.equal(claim(), 1, 'the first caller wins the match');
+assert.equal(claim(), 0, 'the second has nothing to score');
+
 console.log('db ok');

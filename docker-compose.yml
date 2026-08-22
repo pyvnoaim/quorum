@@ -10,6 +10,9 @@ services:
     # Swap for `image: ghcr.io/pyvnoaim/quorum:latest` if you'd rather push
     # images from CI than build on the VPS.
     build: .
+    # Without this, Portainer reuses the image already on the host and a
+    # "Pull and redeploy" ships the old code.
+    pull_policy: build
     container_name: quorum
     restart: unless-stopped
     environment:
@@ -19,6 +22,7 @@ services:
       # Must be the public https URL. It is what the OAuth redirect is built
       # from, and https here is what puts Secure on the session cookie.
       WEB_URL: ${WEB_URL}
+      ALLOWED_GUILD_IDS: ${ALLOWED_GUILD_IDS:-}
     volumes:
       # The ladder lives in here. Back this volume up; losing it loses every
       # rating and every record.

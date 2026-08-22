@@ -42,10 +42,12 @@ the VPS. Nothing else - NPM terminates TLS.
 | field | value |
 | --- | --- |
 | Repository URL | `https://github.com/pyvnoaim/quorum` |
+| Repository reference | `refs/heads/main` |
 | Compose path | `docker-compose.yml` |
-| Authentication | on - GitHub username + a PAT with `repo` (the repo is private) |
+| Authentication | off - the repo is public. On, with a PAT scoped `repo`, if it ever isn't |
 
-Then set these environment variables in the same screen:
+Then set these environment variables in the same screen (**Advanced mode** takes
+the whole block at once):
 
 ```
 DISCORD_BOT_TOKEN=…

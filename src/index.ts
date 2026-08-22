@@ -235,6 +235,15 @@ async function openVoice(guild: Guild, match: Match, rows: MatchPlayer[]) {
 }
 
 async function startMatch(guild: Guild, match: Match) {
+  // One caller wins the transition. Two Joins landing in the same tick both see
+  // a full lobby, and starting twice shuffles the teams twice and leaks the
+  // first voice channel. created_at moves with it because from here it means
+  // "when the ban phase began", which is what the sweep reads.
+  const claimed = db
+    .prepare("update match set status = 'banning', created_at = ? where id = ? and status = 'lobby'")
+    .run(Date.now(), match.id);
+  if (!claimed.changes) return getMatch(match.id)!;
+
   const rows = matchPlayers(match.id);
   const { teamSize } = FORMATS[match.format];
   const shuffled = [...rows].sort(() => Math.random() - 0.5);
@@ -256,13 +265,7 @@ async function startMatch(guild: Guild, match: Match) {
   if (match.format === 'group' || pool.length < BAN_POOL) {
     return beginPlay(getMatch(match.id)!, rollScenarios(guild.id));
   }
-  // created_at is reused as "when the current pre-game phase began": the lobby
-  // sweep only ever reads it for status 'lobby', and the ban sweep wants
-  // exactly this. Without the bump, a call that sat open an hour would have
-  // every ban auto-fired the instant it filled.
-  db.prepare(
-    "update match set status = 'banning', scenarios = ?, created_at = ? where id = ?",
-  ).run(JSON.stringify(pool), Date.now(), match.id);
+  db.prepare('update match set scenarios = ? where id = ?').run(JSON.stringify(pool), match.id);
   return getMatch(match.id)!;
 }
 
@@ -320,11 +323,14 @@ async function refreshScores(match: Match) {
 }
 
 async function finishMatch(match: Match) {
-  db.prepare('update match set status = ?, ended_at = ? where id = ?').run(
-    'done',
-    Date.now(),
-    match.id,
-  );
+  // Force-finish from the dashboard, the last Done, and the clock can all land
+  // on the same live match - and the row every caller holds went stale the
+  // moment it awaited. Only whoever moves it off 'live' gets to score it;
+  // handing out Elo twice for one game is not something a rating recovers from.
+  const claimed = db
+    .prepare("update match set status = 'done', ended_at = ? where id = ? and status = 'live'")
+    .run(Date.now(), match.id);
+  if (!claimed.changes) return null;
   const done = getMatch(match.id)!;
   await refreshScores(done);
 
@@ -412,7 +418,10 @@ async function cancelMatch(match: Match) {
 /** Ends a match and cleans up after it. The Done button and the clock both
  *  route through here, so there is exactly one place that posts a result. */
 async function concludeMatch(match: Match) {
-  const { match: done, deltas } = await finishMatch(match);
+  const finished = await finishMatch(match);
+  // somebody else already scored it
+  if (!finished) return;
+  const { match: done, deltas } = finished;
   const rows = matchPlayers(done.id);
   const players = new Map(rows.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
   const embed = resultsEmbed(done, rows, players, deltas);
@@ -659,6 +668,19 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
     const player = ensurePlayer(i.user.id, account.username, account.steamId);
     const ranks = getRanks(match.guild_id);
 
+    // The lookup above is a network hop and Join is a button people double-tap,
+    // so everything read before it is stale. Re-read, or two people race into a
+    // lobby with one seat and the rank gate below checks against the wrong list.
+    const seated = matchPlayers(match.id);
+    if (getMatch(match.id)!.status !== 'lobby' || seated.length >= FORMATS[match.format].max) {
+      await i.reply({ content: 'That one just filled.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (seated.some((r) => r.discord_id === i.user.id)) {
+      await i.reply({ content: "You're already in it.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
     if (match.division_role_id) {
       // Manual mode: one role, one queue. Nothing to compare across the lobby,
       // because the call itself carries the division.
@@ -675,7 +697,7 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       // Rank gate against everyone already in, not just the opener - otherwise
       // two people a band apart each meet in the middle through a third.
       const spread = getRankSpread(match.guild_id)[match.format];
-      const clash = rows
+      const clash = seated
         .map((r) => getPlayer(r.discord_id)!)
         .find((other) => !canPlay(ranks, player.elo, other.elo, spread));
       if (clash) {

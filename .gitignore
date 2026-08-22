@@ -3,5 +3,7 @@ dist
 .env
 pug.db
 pug.db-journal
+pug.db-wal
+pug.db-shm
 # the seeded design canvas is 2MB of editor; the .dc.html sources are the work
 .design/*.html

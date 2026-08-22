@@ -13,6 +13,12 @@ import {
 // ever runs on more than one host.
 export const db = new DatabaseSync(process.env.DB_PATH ?? 'pug.db');
 
+// The tick loop writes while the dashboard reads, and the default rollback
+// journal makes those block each other. WAL plus synchronous=normal is the
+// usual pair: a power cut can lose the last transaction, never the file.
+db.exec('pragma journal_mode = wal');
+db.exec('pragma synchronous = normal');
+
 db.exec(`
   create table if not exists player (
     discord_id       text primary key,
@@ -92,6 +98,21 @@ for (const stmt of [
     db.exec(stmt);
   } catch {
     /* already there */
+  }
+}
+
+/** Replacing a list is delete-then-insert, and that has to be all-or-nothing:
+ *  a throw halfway leaves a server with half a ladder. It is also the fsync
+ *  difference between one write and five hundred. */
+function tx<T>(fn: () => T): T {
+  db.exec('begin');
+  try {
+    const out = fn();
+    db.exec('commit');
+    return out;
+  } catch (err) {
+    db.exec('rollback');
+    throw err;
   }
 }
 
@@ -301,21 +322,24 @@ export function setRanks(
   // rank with channels and no role would otherwise leak them forever.
   const orphaned = before.filter((r) => !keptIds.has(r.id) && (r.discord_role_id || r.channels));
 
-  db.prepare('delete from rank where guild_id = ?').run(guildId);
-  for (const r of ranks) {
-    const previous = before.find((b) => b.id === r.id);
-    db.prepare(
-      `insert into rank (guild_id, name, min_elo, color, discord_role_id, channels)
-       values (?, ?, ?, ?, ?, ?)`,
-    ).run(
-      guildId,
-      r.name,
-      r.min_elo,
-      r.color,
-      previous?.discord_role_id ?? null,
-      previous?.channels ?? null,
-    );
-  }
+  const insert = db.prepare(
+    `insert into rank (guild_id, name, min_elo, color, discord_role_id, channels)
+     values (?, ?, ?, ?, ?, ?)`,
+  );
+  tx(() => {
+    db.prepare('delete from rank where guild_id = ?').run(guildId);
+    for (const r of ranks) {
+      const previous = before.find((b) => b.id === r.id);
+      insert.run(
+        guildId,
+        r.name,
+        r.min_elo,
+        r.color,
+        previous?.discord_role_id ?? null,
+        previous?.channels ?? null,
+      );
+    }
+  });
   return { ranks: getRanks(guildId), orphaned };
 }
 
@@ -343,14 +367,11 @@ export function getScenarios(guildId: string) {
 }
 
 export function setScenarios(guildId: string, rows: { category: string; name: string }[]) {
-  db.prepare('delete from scenario where guild_id = ?').run(guildId);
-  for (const r of rows) {
-    db.prepare('insert into scenario (guild_id, category, name) values (?, ?, ?)').run(
-      guildId,
-      r.category,
-      r.name,
-    );
-  }
+  const insert = db.prepare('insert into scenario (guild_id, category, name) values (?, ?, ?)');
+  tx(() => {
+    db.prepare('delete from scenario where guild_id = ?').run(guildId);
+    for (const r of rows) insert.run(guildId, r.category, r.name);
+  });
   return getScenarios(guildId);
 }
 

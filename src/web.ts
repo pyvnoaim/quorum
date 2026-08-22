@@ -272,6 +272,11 @@ export function startWeb(client: Client, hooks: Hooks) {
       }
 
       if (path === '/login') {
+        // /login is the one thing here anyone can reach, and every hit parks a
+        // uuid and a timer for ten minutes. Nobody has ten thousand logins in
+        // flight, so hitting this means someone is filling the heap, not
+        // signing in - drop the lot rather than carry it.
+        if (states.size >= 10_000) states.clear();
         const state = randomUUID();
         states.add(state);
         setTimeout(() => states.delete(state), 10 * 60 * 1000).unref();
@@ -493,15 +498,19 @@ export function startWeb(client: Client, hooks: Hooks) {
 
       if (!action && req.method === 'PUT') {
         const body = await readJson(req);
-        const pick = (v: unknown) => (typeof v === 'string' && /^\d{1,32}$/.test(v) ? v : null);
+        // Against this guild's own caches, not just the shape of a snowflake:
+        // results_channel_id is fetched by id when a match ends, so a well-formed
+        // id from another server would post this server's results into it.
+        const chan = (v: unknown) => (typeof v === 'string' && guild.channels.cache.has(v) ? v : null);
+        const role = (v: unknown) => (typeof v === 'string' && guild.roles.cache.has(v) ? v : null);
         json(
           res,
           200,
           setConfig(guildId, {
-            panel_channel_id: pick(body.panel_channel_id),
-            results_channel_id: pick(body.results_channel_id),
-            voice_category_id: pick(body.voice_category_id),
-            ping_role_id: pick(body.ping_role_id),
+            panel_channel_id: chan(body.panel_channel_id),
+            results_channel_id: chan(body.results_channel_id),
+            voice_category_id: chan(body.voice_category_id),
+            ping_role_id: role(body.ping_role_id),
           }),
         );
         return;
