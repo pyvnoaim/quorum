@@ -28,21 +28,74 @@ process - back that file up, it's the whole ladder.
 
 ### In Docker
 
-```yaml
-services:
-  quorum:
-    image: quorum
-    build: .
-    restart: unless-stopped
-    env_file: .env
-    ports: ['3000:3000']
-    volumes: ['quorum-db:/data']   # pug.db lives here - this IS the ladder
-volumes:
-  quorum-db:
+`docker-compose.yml` in the repo is the whole thing. `DB_PATH` already points at
+`/data/pug.db` in the image, so the `quorum-db` volume IS the ladder - back it
+up, losing it loses every rating and every record.
+
+## Deploying (Portainer + Nginx Proxy Manager)
+
+**1. DNS.** An `A` record for the domain (say `quorum.example.com`) pointing at
+the VPS. Nothing else - NPM terminates TLS.
+
+**2. The stack.** Portainer > Stacks > Add stack > **Repository**:
+
+| field | value |
+| --- | --- |
+| Repository URL | `https://github.com/pyvnoaim/quorum` |
+| Compose path | `docker-compose.yml` |
+| Authentication | on - GitHub username + a PAT with `repo` (the repo is private) |
+
+Then set these environment variables in the same screen:
+
+```
+DISCORD_BOT_TOKEN=…
+DISCORD_CLIENT_ID=…
+DISCORD_CLIENT_SECRET=…
+WEB_URL=https://quorum.example.com
+PROXY_NETWORK=npm_default
 ```
 
-`DB_PATH` already points at `/data/pug.db` in the image. Back that volume up;
-losing it loses every rating and record.
+`WEB_URL` must be the public **https** URL: it is what the OAuth redirect is
+built from, and it is what puts `Secure` on the session cookie.
+
+`PROXY_NETWORK` is whatever docker network your NPM container is on
+(`docker inspect <npm-container> -f '{{json .NetworkSettings.Networks}}'`). The
+stack joins it rather than publishing a port, so the dashboard cannot be
+reached except through the proxy.
+
+**3. The proxy host.** In NPM, Hosts > Proxy Hosts > Add:
+
+| field | value |
+| --- | --- |
+| Domain | `quorum.example.com` |
+| Scheme | `http` |
+| Forward hostname | `quorum` |
+| Forward port | `3000` |
+| Block common exploits | on |
+| Websockets | off - nothing here uses them |
+
+SSL tab: request a new Let's Encrypt certificate, **Force SSL** and HTTP/2 on.
+
+**4. Discord.** In the developer portal, OAuth2 > Redirects, add exactly:
+
+```
+https://quorum.example.com/callback
+```
+
+Discord matches it character for character, so no trailing slash. The bot needs
+the **Server Members** intent left OFF and **Server Voice States** ON.
+
+### When it doesn't come up
+
+- **502 from the domain.** The container is crash-looping, almost always a bad
+  `DISCORD_BOT_TOKEN` - the bot logs in before it ever serves HTTP, so an
+  invalid token means there is nothing listening. `docker logs quorum`.
+- **The dashboard says the bot isn't in that server.** It is in Discord but not
+  in the gateway cache yet; give it a few seconds after a restart.
+- **`bad oauth state` on sign-in.** `WEB_URL` doesn't match the redirect URI
+  registered in the developer portal.
+- **Everyone signed out after a deploy.** Expected: sessions are in memory, so
+  a restart clears them. A settings page is not worth a session store.
 
 ## Setup (the dashboard)
 

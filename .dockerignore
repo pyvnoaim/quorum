@@ -4,3 +4,6 @@ dist
 pug.db
 *.md
 .git
+.design
+assets
+.github

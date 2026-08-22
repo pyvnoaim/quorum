@@ -1,0 +1,45 @@
+# Portainer stack for Quorum, sitting behind Nginx Proxy Manager.
+#
+# No `ports:` on purpose. NPM reaches the container by name over a shared
+# docker network, so nothing is published on the host and the dashboard cannot
+# be hit except through the proxy (and therefore except over TLS).
+
+services:
+  quorum:
+    # Portainer > Stacks > Add stack > Repository builds this from the repo.
+    # Swap for `image: ghcr.io/pyvnoaim/quorum:latest` if you'd rather push
+    # images from CI than build on the VPS.
+    build: .
+    container_name: quorum
+    restart: unless-stopped
+    environment:
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET}
+      # Must be the public https URL. It is what the OAuth redirect is built
+      # from, and https here is what puts Secure on the session cookie.
+      WEB_URL: ${WEB_URL}
+    volumes:
+      # The ladder lives in here. Back this volume up; losing it loses every
+      # rating and every record.
+      - quorum-db:/data
+    networks:
+      - proxy
+    healthcheck:
+      # Only meaningful because the dashboard is enabled. With CLIENT_ID/SECRET
+      # unset the bot still runs but serves no HTTP, and this would fail forever.
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/']
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+volumes:
+  quorum-db:
+
+networks:
+  proxy:
+    external: true
+    # Whatever network your Nginx Proxy Manager container is on. If NPM was
+    # deployed as a Portainer stack named `npm`, this is `npm_default`.
+    name: ${PROXY_NETWORK:-npm_default}
