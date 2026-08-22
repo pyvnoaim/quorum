@@ -31,6 +31,7 @@ import {
   getConfig,
   getMatch,
   getPlayer,
+  getRankMode,
   getRankSpread,
   getRanks,
   isSplit,
@@ -45,7 +46,16 @@ import {
 import { banEmbed, liveEmbed, openEmbed, resultsEmbed } from './embeds.js';
 import { startWeb } from './web.js';
 import { kovaaksAccountForDiscordId, scoreInWindow } from './kovaaks.js';
-import { bandsInReach, banTurn, canPlay, eloDeltas, placings, rankFor, rankName } from './rating.js';
+import {
+  bandsInReach,
+  banTurn,
+  canPlay,
+  divisionFor,
+  eloDeltas,
+  placings,
+  rankFor,
+  rankName,
+} from './rating.js';
 
 const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set');
@@ -186,10 +196,16 @@ function render(match: Match) {
  *  so the first player decides it. */
 function splitResultsChannel(match: Match) {
   if (!isSplit(match.guild_id)) return null;
-  const first = matchPlayers(match.id)[0];
-  const player = first && getPlayer(first.discord_id);
-  if (!player) return null;
-  const rank = rankFor(getRanks(match.guild_id), player.elo);
+  const ranks = getRanks(match.guild_id);
+  // The call already knows its division in manual mode. Otherwise everyone in
+  // it is the same rank (the gate is forced to 0), so the first player decides.
+  const rank = match.division_role_id
+    ? ranks.find((r) => r.discord_role_id === match.division_role_id)
+    : (() => {
+        const first = matchPlayers(match.id)[0];
+        const player = first && getPlayer(first.discord_id);
+        return player ? rankFor(ranks, player.elo) : undefined;
+      })();
   return rank ? (rankChannels(rank).results ?? null) : null;
 }
 
@@ -347,6 +363,10 @@ async function finishMatch(match: Match) {
  *  they've earned. Never roles.set([rankRole]) - that would strip everything
  *  else they hold. */
 async function syncRankRoles(guildId: string, discordIds: string[]) {
+  // Manual mode means staff own division membership. The bot reassigning roles
+  // off Elo here would quietly undo their work after every match, which is the
+  // whole thing that mode exists to prevent.
+  if (getRankMode(guildId) === 'manual') return;
   const guild = client.guilds.cache.get(guildId);
   if (!guild) return;
   const ranks = getRanks(guildId).filter((r) => r.discord_role_id);
@@ -637,21 +657,36 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       return;
     }
     const player = ensurePlayer(i.user.id, account.username, account.steamId);
-    // Rank gate against everyone already in, not just the opener - otherwise
-    // two people a band apart each meet in the middle through a third.
     const ranks = getRanks(match.guild_id);
-    const spread = getRankSpread(match.guild_id)[match.format];
-    const clash = rows
-      .map((r) => getPlayer(r.discord_id)!)
-      .find((other) => !canPlay(ranks, player.elo, other.elo, spread));
-    if (clash) {
-      await i.reply({
-        content:
-          `This queue is ${spread === 0 ? 'one rank only' : `within ${spread} rank${spread > 1 ? 's' : ''}`}` +
-          `. You're ${rankName(ranks, player.elo)}, they're ${rankName(ranks, clash.elo)}.`,
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
+
+    if (match.division_role_id) {
+      // Manual mode: one role, one queue. Nothing to compare across the lobby,
+      // because the call itself carries the division.
+      const held = i.member?.roles && 'cache' in i.member.roles ? i.member.roles.cache : null;
+      if (!held?.has(match.division_role_id)) {
+        await i.reply({
+          content: `That queue is <@&${match.division_role_id}> only.`,
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
+    } else {
+      // Rank gate against everyone already in, not just the opener - otherwise
+      // two people a band apart each meet in the middle through a third.
+      const spread = getRankSpread(match.guild_id)[match.format];
+      const clash = rows
+        .map((r) => getPlayer(r.discord_id)!)
+        .find((other) => !canPlay(ranks, player.elo, other.elo, spread));
+      if (clash) {
+        await i.reply({
+          content:
+            `This queue is ${spread === 0 ? 'one rank only' : `within ${spread} rank${spread > 1 ? 's' : ''}`}` +
+            `. You're ${rankName(ranks, player.elo)}, they're ${rankName(ranks, clash.elo)}.`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
     }
     db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(
       match.id,
@@ -720,11 +755,32 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   }
   const opener = ensurePlayer(i.user.id, account.username, account.steamId);
 
+  const ranks = getRanks(i.guildId);
+  // In manual mode the division is whatever role staff gave them, resolved once
+  // here: a role change mid-lobby must not move the goalposts under people who
+  // already joined.
+  let division: string | null = null;
+  if (getRankMode(i.guildId) === 'manual') {
+    const held = divisionFor(ranks, i.member?.roles instanceof Object && 'cache' in i.member.roles
+      ? i.member.roles.cache.keys()
+      : []);
+    if (!held) {
+      await i.reply({
+        content:
+          'You have no division role yet, so there is no queue you belong to. Ask staff to give you one.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    division = held.discord_role_id!;
+  }
+
   const { lastInsertRowid } = db
     .prepare(
-      'insert into match (guild_id, channel_id, host_id, format, created_at) values (?, ?, ?, ?, ?)',
+      `insert into match (guild_id, channel_id, host_id, format, created_at, division_role_id)
+       values (?, ?, ?, ?, ?, ?)`,
     )
-    .run(i.guildId, i.channelId, i.user.id, format, Date.now());
+    .run(i.guildId, i.channelId, i.user.id, format, Date.now(), division);
   const matchId = Number(lastInsertRowid);
   db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(
     matchId,
@@ -734,13 +790,11 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   // Ping the bands this queue would actually admit, rather than everyone. That
   // is the whole reason not to split the queue into a channel per rank: the
   // notification is targeted, the pool of takers stays whole.
-  const reach = bandsInReach(
-    getRanks(i.guildId),
-    opener.elo,
-    getRankSpread(i.guildId)[format],
-  )
-    .map((r) => r.discord_role_id)
-    .filter((id): id is string => !!id);
+  const reach = division
+    ? [division]
+    : bandsInReach(ranks, opener.elo, getRankSpread(i.guildId)[format])
+        .map((r) => r.discord_role_id)
+        .filter((id): id is string => !!id);
   // the configured role is an opt-in "tell me about every call", on top.
   const always = getConfig(i.guildId).ping_role_id;
   const mentions = [...new Set([...(always ? [always] : []), ...reach])];

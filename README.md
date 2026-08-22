@@ -131,6 +131,26 @@ there are no configuration commands.
 Add `WEB_URL/callback` to the OAuth redirects on your Discord application, and
 give the bot **Manage Channels** + **Move Members** for the voice half.
 
+## Who decides a division
+
+Set on the ranks pane, and it changes who owns the roles.
+
+**By rating** (the default). Quorum hands out the division roles itself as
+people cross the thresholds, and a queue admits whatever the queues pane allows.
+
+**By staff.** You give out the division roles by hand and Quorum never touches
+them - no reassignment after a match, no promotion behind your back. You queue
+with the role you hold: no role, no queue, and the bot says to ask staff. The
+Elo thresholds are ignored (the dashboard greys them out), though ratings and
+the ladder carry on exactly as before. A call is open only to the division its
+opener was in, resolved once when the call goes up so a role change mid-lobby
+cannot move the goalposts under people already in it. Holding two division
+roles resolves to the highest, so a promotion works before staff strip the old
+one.
+
+Staff mode is also the only mode where the per-rank channels below are locked
+to their role.
+
 ## A channel per rank
 
 Off by default, and most servers should leave it that way. On, Quorum keeps a
@@ -149,10 +169,12 @@ shorten the ladder, because the ladder is what decides.
 the per-format spread is ignored and the dashboard says so. Your saved spread
 comes back untouched when you turn the mode off.
 
-Channels are deliberately **not** locked to their rank role. A player has no
-rank role until their first match finishes, so locking would leave every new
-player unable to see a queue they are allowed to join. The gate refuses them
-anyway; the names and the pings are the signpost.
+Channels are locked to their rank role **only when staff assign divisions**. On
+automatic ranks a player holds no role until their first match finishes, so
+locking would leave every new player staring at a server with no queue they can
+see. With staff handing roles out first that deadlock cannot happen, so the
+channels become private to their division - which is the point of splitting
+them.
 
 The honest trade-off: this divides your queue by the number of ranks times the
 number of formats, and thin queues are how pick-up games die. One shared channel

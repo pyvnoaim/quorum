@@ -394,16 +394,20 @@ precision highp float;
 
 // SideRays. Knobs are the component's props; INTENSITY and OPACITY are well
 // under its defaults because this sits behind a dashboard you have to read.
-#define SPEED       2.5
-#define INTENSITY   1.1
-#define SPREAD      2.0
+#define SPEED       1.6
+#define INTENSITY   1.35
+// a wider fan and a slower falloff are what make the shafts read as long
+// throws of light rather than a glow stuck in the corner
+#define SPREAD      3.4
 #define FLIP_X      0.0
 #define FLIP_Y      0.0
 #define TILT        0.0
-#define SATURATION  1.4
-#define BLEND       0.75
-#define FALLOFF     1.6
-#define OPACITY     0.5
+// real sunlight is close to white with the colour only in the falloff, so the
+// saturation stays low and the two layers stay near each other in hue
+#define SATURATION  0.55
+#define BLEND       0.6
+#define FALLOFF     0.95
+#define OPACITY     0.42
 
 uniform vec2 iResolution;
 uniform float iTime;
@@ -419,7 +423,9 @@ float rayStrength(vec2 src, vec2 dir, vec2 coord, float seedA, float seedB, floa
     (0.45 + 0.15 * sin(cosAngle * seedA + iTime * speed)) +
     (0.3 + 0.2 * cos(-cosAngle * seedB + iTime * speed)),
     0.0, 1.0) *
-    clamp((iResolution.x - length(toCoord)) / iResolution.x, 0.5, 1.0);
+    // the original clamps this at 0.5, which crops every shaft the same distance
+    // out. Reaching further keeps them running to the far edge.
+    clamp((iResolution.x * 2.2 - length(toCoord)) / (iResolution.x * 2.2), 0.25, 1.0);
 }
 
 void main() {
@@ -428,7 +434,9 @@ void main() {
   if (FLIP_Y > 0.5) frag.y = iResolution.y - frag.y;
 
   vec2 coord = vec2(frag.x, iResolution.y - frag.y);
-  vec2 rayPos = vec2(iResolution.x * 1.1, -0.5 * iResolution.y);
+  // pushed further out than the component's default: a distant source throws
+  // longer, straighter shafts instead of a fan blooming out of the corner.
+  vec2 rayPos = vec2(iResolution.x * 1.45, -1.15 * iResolution.y);
 
   float tiltRad = TILT * 3.14159265 / 180.0;
   float cs = cos(tiltRad), sn = sin(tiltRad);
@@ -705,8 +713,10 @@ function renderLogin() {
 const startWaves = () =>
   startShader('fs', { uWave: [0.322, 0.153, 1], uCrest: [1, 0.624, 0.988], dpr: 1.5 });
 // Rays are a cheap two-sample shader, so they can have the full pixel ratio.
+// warm white and a cool white, the way daylight actually splits: colour lives
+// in the falloff, not in the beam.
 const startRays = () =>
-  startShader('fs2', { uRay1: [0.322, 0.153, 1], uRay2: [1, 0.624, 0.988], dpr: 2 });
+  startShader('fs2', { uRay1: [1, 0.925, 0.78], uRay2: [0.82, 0.88, 1], dpr: 2 });
 
 /** Draws one of the background shaders full-bleed behind the page. No WebGL2,
  *  no background - the page just stays its background colour, which is what
@@ -982,7 +992,8 @@ async function renderGuild(guild) {
 
     <section id="ranks">
     <h2>ranks</h2>
-    <p class="muted">Each rank becomes a Discord role, named and coloured to match, handed out when someone's rating crosses it. Saving here creates them; a call then pings the ones it can admit, which is what keeps one shared queue channel workable.</p>
+    <p class="muted">Each rank is a Discord role, named and coloured to match. Saving here creates them; a call then pings the ones it can admit, which is what keeps one shared queue channel workable.</p>
+    <div class="cat" id="modebox"></div>
     <table><tbody id="ranklist"></tbody></table>
     <div class="bar">
       <button class="btn" id="addrank">Add rank</button>
@@ -1166,13 +1177,45 @@ async function renderGuild(guild) {
   };
   drawMatches(data.matches);
 
+  let mode = data.mode ?? 'auto';
+  const drawMode = () => {
+    const manual = mode === 'manual';
+    document.getElementById('modebox').innerHTML = \`
+      <div class="cat-top">
+        <strong>who decides a division</strong>
+        <span class="tag">\${manual ? 'staff' : 'rating'}</span>
+        <button class="btn" id="modebtn" style="margin-left:auto">\${
+          manual ? 'Hand it back to ratings' : 'Let staff assign it'}</button>
+      </div>
+      <p class="muted" style="margin:0">\${manual
+        ? 'Staff give out the division roles and Quorum never touches them. You queue with the role you hold: no role, no queue. Ratings below are ignored, and a call is open only to the division its opener is in.'
+        : "Quorum hands out the division roles itself as ratings cross the thresholds below, and a queue admits whatever the queues pane allows."}</p>
+      \${manual ? '<p class="muted" style="margin:8px 0 0">Split channels are locked to their role while this is on, so people only see the queue they belong to.</p>' : ''}
+      <span class="status" id="modestatus"></span>\`;
+
+    document.getElementById('modebtn').onclick = async () => {
+      const el = document.getElementById('modestatus');
+      el.textContent = 'saving…';
+      const res = await fetch(\`/api/guild/\${guild.id}/mode\`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode: manual ? 'auto' : 'manual' }),
+      });
+      if (!res.ok) { el.textContent = 'failed'; return; }
+      mode = (await res.json()).mode;
+      drawMode();
+      drawRanks();
+    };
+  };
+
   let ranks = data.ranks.slice();
   const drawRanks = () => {
     document.getElementById('ranklist').innerHTML = ranks.map((r, n) => \`
       <tr>
         <td>\${colorField(r.color, \`data-n="\${n}"\`)}</td>
         <td style="width:100%"><input type="text" value="\${h(r.name)}" data-n="\${n}" data-k="name" /></td>
-        <td><input type="number" value="\${Number(r.min_elo)}" data-n="\${n}" data-k="min_elo" /></td>
+        <td>\${mode === 'manual'
+          ? '<span class="hint">rating ignored</span>'
+          : \`<input type="number" value="\${Number(r.min_elo)}" data-n="\${n}" data-k="min_elo" />\`}</td>
         <td><button class="icon-btn" data-del="\${n}" title="remove">×</button></td>
       </tr>\`).join('');
     wireColors(document.getElementById('ranklist'));
@@ -1189,6 +1232,7 @@ async function renderGuild(guild) {
       el.onclick = () => { ranks.splice(Number(el.dataset.del), 1); drawRanks(); };
     });
   };
+  drawMode();
   drawRanks();
   document.getElementById('addrank').onclick = () => {
     ranks.push({ name: 'New rank', min_elo: 0, color: '#888888' });

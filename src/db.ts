@@ -85,6 +85,8 @@ for (const stmt of [
   'alter table player add column voltaic_at integer',
   'alter table rank add column channels text',
   'alter table guild_config add column split_channels integer',
+  'alter table guild_config add column rank_mode text',
+  'alter table match add column division_role_id text',
 ]) {
   try {
     db.exec(stmt);
@@ -130,6 +132,10 @@ export interface Match {
   started_at: number | null;
   ended_at: number | null;
   voice_channel_id: string | null;
+  /** The division this call belongs to, in manual mode: the Discord role its
+   *  opener held. Resolved once at open time, so a role change mid-lobby can't
+   *  move the goalposts under people already in. Null in automatic mode. */
+  division_role_id: string | null;
 }
 
 export interface GuildConfig {
@@ -142,7 +148,15 @@ export interface GuildConfig {
   rank_spread: string | null;
   /** 1 = a queue channel per rank per format, instead of one shared channel. */
   split_channels: number | null;
+  /** 'manual' = staff hand out the division roles and the bot never touches
+   *  them; a player queues with the role they hold. Default 'auto': the bot
+   *  assigns roles off Elo and the gate measures rank bands. */
+  rank_mode: string | null;
 }
+
+export type RankMode = 'auto' | 'manual';
+export const getRankMode = (guildId: string): RankMode =>
+  getConfig(guildId).rank_mode === 'manual' ? 'manual' : 'auto';
 
 export const isSplit = (guildId: string) => !!getConfig(guildId).split_channels;
 
@@ -220,6 +234,7 @@ export function getConfig(guildId: string): GuildConfig {
       ping_role_id: null,
       rank_spread: null,
       split_channels: null,
+      rank_mode: null,
     }
   );
 }
@@ -229,15 +244,16 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
   db.prepare(
     `insert into guild_config
        (guild_id, panel_channel_id, results_channel_id, voice_category_id, ping_role_id,
-        rank_spread, split_channels)
-     values (?, ?, ?, ?, ?, ?, ?)
+        rank_spread, split_channels, rank_mode)
+     values (?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
        voice_category_id = excluded.voice_category_id,
        ping_role_id = excluded.ping_role_id,
        rank_spread = excluded.rank_spread,
-       split_channels = excluded.split_channels`,
+       split_channels = excluded.split_channels,
+       rank_mode = excluded.rank_mode`,
   ).run(
     guildId,
     next.panel_channel_id,
@@ -246,6 +262,7 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.ping_role_id,
     next.rank_spread,
     next.split_channels,
+    next.rank_mode,
   );
   return next;
 }

@@ -29,6 +29,19 @@ export function canPlay(ranks: Band[], eloA: number, eloB: number, spread: numbe
   return Math.abs(a - b) <= spread;
 }
 
+/** The division someone is in when staff hand the roles out: the highest band
+ *  whose role they actually hold. Highest wins so a promotion works the moment
+ *  the new role is added, without staff having to remove the old one first. */
+export function divisionFor<T extends Band & { discord_role_id?: string | null }>(
+  ranks: T[],
+  roleIds: Iterable<string>,
+): T | undefined {
+  const held = new Set(roleIds);
+  return [...ranks]
+    .sort((a, b) => b.min_elo - a.min_elo)
+    .find((r) => r.discord_role_id && held.has(r.discord_role_id));
+}
+
 /** The bands a queue at this spread will admit, given one player's rating.
  *  Same index arithmetic as canPlay, so what gets pinged is exactly what gets
  *  let in - the two must never disagree. */

@@ -5,6 +5,7 @@ import { FORMATS, TIERS, guildAllowed, type Format, type Tier } from './config.j
 import {
   getConfig,
   getMatch,
+  getRankMode,
   getRankSpread,
   getRanks,
   isSplit,
@@ -164,15 +165,16 @@ const slug = (name: string) =>
  *  created twice - a channel we already have an id for is edited, never
  *  replaced, so a server's history survives a rename.
  *
- *  Channels are deliberately NOT locked to their rank role. A player has no
- *  rank role until their first match finishes, so locking would leave a new
- *  player unable to see any queue they could join. The gate already refuses
- *  them; the names and the pings are the signpost. */
+ *  Locking a channel to its rank role is only safe in MANUAL mode. On automatic
+ *  ranks a player holds no role until their first match finishes, so locking
+ *  would leave every new player staring at a server with no queue they can see.
+ *  With staff handing roles out first, that deadlock cannot happen. */
 async function syncRankChannelsToDiscord(
   guild: Guild,
   ranks: Rank[],
   orphaned: Rank[],
   split: boolean,
+  lockToRole: boolean,
 ) {
   const drop = async (rank: Rank) => {
     const { category, ...rest } = rankChannels(rank);
@@ -195,13 +197,24 @@ async function syncRankChannelsToDiscord(
     const have = rankChannels(rank);
     const next: RankChannels = {};
 
+    // Children inherit the category, so the lock is set once, here.
+    const locked =
+      lockToRole && rank.discord_role_id
+        ? [
+            { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+            { id: rank.discord_role_id, allow: [PermissionFlagsBits.ViewChannel] },
+          ]
+        : [{ id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel] }];
+
     const category =
       (have.category && guild.channels.cache.get(have.category)) ||
       (await guild.channels
-        .create({ name: rank.name, type: ChannelType.GuildCategory })
+        .create({ name: rank.name, type: ChannelType.GuildCategory, permissionOverwrites: locked })
         .catch(() => null));
     if (!category) continue;
-    if (category.name !== rank.name) await category.edit({ name: rank.name }).catch(() => {});
+    await category
+      .edit({ name: rank.name, permissionOverwrites: locked })
+      .catch(() => {});
     next.category = category.id;
 
     const kinds = [...(Object.keys(FORMATS) as Format[]), 'results' as const];
@@ -210,7 +223,9 @@ async function syncRankChannelsToDiscord(
       const existing = have[kind] && guild.channels.cache.get(have[kind]!);
       if (existing) {
         if (existing.name !== name || existing.parentId !== category.id) {
-          await existing.edit({ name, parent: category.id }).catch(() => {});
+          // lockPermissions re-inherits from the category, which is where the
+          // lock lives - so a mode change reaches the children too.
+          await existing.edit({ name, parent: category.id, lockPermissions: true }).catch(() => {});
         }
         next[kind] = existing.id;
         continue;
@@ -453,6 +468,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           formats: Object.keys(FORMATS),
           spread: getRankSpread(guildId),
           split: isSplit(guildId),
+          mode: getRankMode(guildId),
           stats: guildStats(guildId),
           top: leaderboard(guildId, 5),
           matches: listOpenMatches(guildId).map((m) => ({
@@ -514,8 +530,25 @@ export function startWeb(client: Client, hooks: Hooks) {
         }
         const { ranks, orphaned } = setRanks(guildId, clean);
         await syncRankRolesToDiscord(guild, ranks, orphaned);
-        await syncRankChannelsToDiscord(guild, getRanks(guildId), orphaned, isSplit(guildId));
+        await syncRankChannelsToDiscord(
+          guild,
+          getRanks(guildId),
+          orphaned,
+          isSplit(guildId),
+          getRankMode(guildId) === 'manual',
+        );
         json(res, 200, { ranks: getRanks(guildId) });
+        return;
+      }
+
+      if (action === '/mode' && req.method === 'POST') {
+        const body = await readJson(req);
+        const manual = body.mode === 'manual';
+        setConfig(guildId, { rank_mode: manual ? 'manual' : 'auto' });
+        // Roles must exist for staff to hand out either way; only the locking
+        // of any split channels changes with the mode.
+        await syncRankChannelsToDiscord(guild, getRanks(guildId), [], isSplit(guildId), manual);
+        json(res, 200, { mode: manual ? 'manual' : 'auto' });
         return;
       }
 
@@ -525,7 +558,13 @@ export function startWeb(client: Client, hooks: Hooks) {
         setConfig(guildId, { split_channels: on ? 1 : 0 });
         // Turning it off deletes the channels it made. Everything it created is
         // tracked, so nothing else in the server is touched.
-        await syncRankChannelsToDiscord(guild, getRanks(guildId), [], on);
+        await syncRankChannelsToDiscord(
+          guild,
+          getRanks(guildId),
+          [],
+          on,
+          getRankMode(guildId) === 'manual',
+        );
         json(res, 200, { split: on, ranks: getRanks(guildId) });
         return;
       }
