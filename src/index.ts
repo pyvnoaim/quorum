@@ -214,6 +214,9 @@ function splitResultsChannel(match: Match) {
  *  match message, which is the best Discord allows. */
 async function openVoice(guild: Guild, match: Match, rows: MatchPlayer[]) {
   const category = getConfig(guild.id).voice_category_id;
+  // No voice category is a setting, not a fault - the match just runs without
+  // one. A category that is set and still won't take a channel is a fault, and
+  // used to look identical from the outside.
   if (!category) return null;
   const channel = await guild.channels
     .create({
@@ -222,7 +225,10 @@ async function openVoice(guild: Guild, match: Match, rows: MatchPlayer[]) {
       parent: category,
       userLimit: rows.length,
     })
-    .catch(() => null);
+    .catch((err) => {
+      console.error(`match ${match.id}: no voice channel in ${category}:`, err.message);
+      return null;
+    });
   if (!channel) return null;
 
   await Promise.all(
