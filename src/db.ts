@@ -497,6 +497,19 @@ export function guildStats(guildId: string) {
   };
 }
 
+/** Everything a server configured, and nothing that belongs to a player.
+ *
+ *  Ratings are global and a finished match is the record of games people
+ *  actually played, so both outlive the bot's stay - deleting them would edit
+ *  other servers' ladders from here. */
+export function purgeGuild(guildId: string) {
+  tx(() => {
+    for (const table of ['guild_config', 'rank', 'scenario']) {
+      db.prepare(`delete from ${table} where guild_id = ?`).run(guildId);
+    }
+  });
+}
+
 export function leaderboard(guildId: string, limit = 20) {
   return db
     .prepare(

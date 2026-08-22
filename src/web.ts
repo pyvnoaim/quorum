@@ -23,6 +23,7 @@ import {
   playersInGuild,
   matchPlayers,
   getPlayer,
+  purgeGuild,
   setConfig,
   setRankChannels,
   setRankRole,
@@ -288,8 +289,8 @@ async function syncRankChannelsToDiscord(
  *  Manage Messages can delete one - and a repair tool has to be safe to press
  *  twice. Only the bot's own panels go; a call carries `pug:join`, not
  *  `pug:open`, and must survive. */
-async function postPanel(channel: GuildBasedChannel | undefined, formats: readonly Format[]) {
-  if (!channel?.isSendable()) return false;
+async function clearPanels(channel: GuildBasedChannel | undefined) {
+  if (!channel?.isSendable()) return;
   const recent = await channel.messages.fetch({ limit: 30 }).catch(() => null);
   for (const msg of recent?.values() ?? []) {
     const mine = msg.author.id === channel.client.user?.id;
@@ -299,6 +300,11 @@ async function postPanel(channel: GuildBasedChannel | undefined, formats: readon
     );
     if (mine && isPanel) await msg.delete().catch(() => {});
   }
+}
+
+async function postPanel(channel: GuildBasedChannel | undefined, formats: readonly Format[]) {
+  if (!channel?.isSendable()) return false;
+  await clearPanels(channel);
   // A refused send is nearly always a missing Send Messages in that one
   // channel. It must not take the other twenty down with it, and it must not
   // be swallowed either - a queue channel with no panel is a dead queue, and
@@ -743,6 +749,37 @@ export function startWeb(client: Client, hooks: Hooks) {
           return;
         }
         json(res, 200, { ok: true, posted: 1 });
+        return;
+      }
+
+      // Quorum leaves, optionally taking everything it made with it.
+      //
+      // This has to be a button here rather than something that fires when the
+      // bot is kicked: Discord tells a bot it has been removed, it does not let
+      // it act afterwards. By the time `guildDelete` arrives there is no
+      // permission left to delete a single role. So the tidy-up happens while
+      // it is still a member, and leaving is the last thing it does.
+      if (action === '/leave' && req.method === 'POST') {
+        const body = await readJson(req);
+        if (body.purge) {
+          // Calls first. Cancelling one deletes its message and its voice
+          // channel, neither of which the rank sweep below knows anything about.
+          for (const open of listOpenMatches(guildId)) await hooks.cancelMatch(open);
+          const ranks = getRanks(guildId);
+          await syncRankChannelsToDiscord(guild, [], ranks, false, false);
+          await syncRankRolesToDiscord(guild, [], ranks);
+          // A panel outlives the bot as a message with buttons that answer
+          // nobody. Split channels are gone wholesale, so this is the shared one.
+          const panel = getConfig(guildId).panel_channel_id;
+          await clearPanels(panel ? guild.channels.cache.get(panel) : undefined);
+          purgeGuild(guildId);
+        }
+        const left = await guild.leave().then(() => true).catch(() => false);
+        if (!left) {
+          json(res, 502, { error: "Discord wouldn't let the bot leave - remove it by hand" });
+          return;
+        }
+        json(res, 200, { ok: true });
         return;
       }
 

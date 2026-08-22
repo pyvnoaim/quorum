@@ -969,6 +969,23 @@ async function renderGuild(guild) {
       <button class="btn" id="panelbtn">Post panel</button>
       <span class="status" id="status"></span>
     </div>
+
+    <div class="cat" style="margin-top:32px">
+      <div class="cat-top"><strong>remove Quorum</strong></div>
+      <p class="muted" style="margin:0 0 12px">Quorum leaves the server. Do it here rather than kicking it from
+      Discord: a bot is told it has been removed, never asked first, so once it is out it cannot delete a single
+      thing it made. This is the only moment its roles and channels can go with it.</p>
+      <label class="muted" style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+        <input type="checkbox" id="purge" checked />
+        also delete the roles, categories and channels it created, and this server's settings
+      </label>
+      <p class="muted" style="margin:0 0 12px">Ratings and match history stay either way - they are global, and
+      deleting them would rewrite other servers' ladders from here.</p>
+      <div class="bar">
+        <button class="btn" id="leavebtn">Remove Quorum</button>
+        <span class="status" id="leavestatus"></span>
+      </div>
+    </div>
     </section>
 
     <section id="queues">
@@ -1406,6 +1423,25 @@ async function renderGuild(guild) {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     });
     status(res.ok ? 'saved' : 'save failed');
+  };
+
+  document.getElementById('leavebtn').onclick = async () => {
+    const el = document.getElementById('leavestatus');
+    // Typing the name, not an "are you sure" nobody reads. This deletes roles
+    // and channels in a live Discord server and there is no undo.
+    const typed = await ask('Type the server name to confirm', '');
+    if (typed === null) return;
+    if (typed !== guild.name) { el.textContent = "that isn't the server name"; return; }
+    el.textContent = 'removing…';
+    const res = await fetch(\`/api/guild/\${guild.id}/leave\`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ purge: document.getElementById('purge').checked }),
+    });
+    if (!res.ok) {
+      el.textContent = (await res.json().catch(() => ({}))).error ?? 'failed';
+      return;
+    }
+    location.href = '/';
   };
 
   document.getElementById('panelbtn').onclick = async () => {

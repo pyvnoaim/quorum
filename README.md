@@ -130,6 +130,12 @@ without the bot link straight to the invite; the rest open a settings page:
 - **Players** - Elo, rank, Voltaic S5 standing, and the tier of anyone who
   hasn't played yet
 - **Overview** - the server's numbers and what is still unconfigured
+- **Remove Quorum** - at the foot of the setup pane, with a tickbox to take its
+  roles, categories and channels with it. Use this rather than kicking the bot:
+  Discord tells a bot it has been removed, it never asks first, so after a kick
+  there is no permission left to delete anything and the ladder's roles and
+  channels stay in the server forever. Ratings and match history survive either
+  way - they are global, and wiping them would edit other servers' ladders
 
 Then hit **Post panel** and the queue message goes up. That's the whole setup;
 there are no configuration commands.
