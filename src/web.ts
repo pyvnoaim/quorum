@@ -636,8 +636,12 @@ export function startWeb(client: Client, hooks: Hooks) {
         await refreshVoltaic(players);
         json(res, 200, {
           config: getConfig(guildId),
+          // Announcement channels count: a server that keeps one is exactly the
+          // server that wants setup changes posted into it.
           channels: guild.channels.cache
-            .filter((c) => c.type === ChannelType.GuildText)
+            .filter(
+              (c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement,
+            )
             .map((c) => ({ id: c.id, name: c.name })),
           roles: guild.roles.cache
             .filter((r) => r.id !== guild.id && !r.managed)
@@ -720,10 +724,13 @@ export function startWeb(client: Client, hooks: Hooks) {
         const role = (v: unknown) => (typeof v === 'string' && guild.roles.cache.has(v) ? v : null);
         // Same reasoning as the category: checked against THIS guild's channels,
         // so a well-formed id from another server cannot be announced into.
-        const textChannel = (v: unknown) =>
-          typeof v === 'string' && guild.channels.cache.get(v)?.type === ChannelType.GuildText
+        const postable = (v: unknown) => {
+          if (typeof v !== 'string') return null;
+          const type = guild.channels.cache.get(v)?.type;
+          return type === ChannelType.GuildText || type === ChannelType.GuildAnnouncement
             ? v
             : null;
+        };
         const ttl = (v: unknown) => {
           if (v == null) return null;
           const n = Math.round(Number(v));
@@ -740,7 +747,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           split_category_id:
             category(body.category_id) ?? category(getConfig(guildId).split_category_id),
           ping_role_id: role(body.ping_role_id),
-          announce_channel_id: textChannel(body.announce_channel_id),
+          announce_channel_id: postable(body.announce_channel_id),
           // 0 is off and null is "use the default", so both have to survive the
           // trip. Anything else is clamped: a one-minute window bins calls
           // before anyone sees them, and a one-year one is off with extra steps.

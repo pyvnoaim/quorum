@@ -76,6 +76,8 @@ const channels = new Collection<string, any>([
   ['201', channel('201', 'queue', 0)],
   ['202', channel('202', 'results', 0)],
   ['204', channel('204', 'announcements', 0)],
+  // type 5 is a Discord announcement channel - the setup select has to offer it
+  ['205', channel('205', 'news', 5)],
   ['203', channel('203', 'Quorum', 4)],
 ]);
 const roles = new Collection<string, any>([
