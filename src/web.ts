@@ -93,13 +93,15 @@ async function syncRankRolesToDiscord(guild: Guild, ranks: Rank[], orphaned: Ran
     const color = Number.parseInt(rank.color.slice(1), 16);
     const existing = rank.discord_role_id ? guild.roles.cache.get(rank.discord_role_id) : null;
     if (existing) {
-      if (existing.name !== rank.name || existing.color !== color) {
-        await existing.edit({ name: rank.name, color }).catch(() => {});
+      if (existing.name !== rank.name || existing.color !== color || !existing.mentionable) {
+        await existing.edit({ name: rank.name, color, mentionable: true }).catch(() => {});
       }
       continue;
     }
     const role = await guild.roles
-      .create({ name: rank.name, color, hoist: true, mentionable: false })
+      // mentionable, because the bot has no Mention Everyone permission and a
+      // call has to be able to ping the bands it will admit.
+      .create({ name: rank.name, color, hoist: true, mentionable: true })
       .catch(() => null);
     if (role) setRankRole(rank.id, role.id);
   }

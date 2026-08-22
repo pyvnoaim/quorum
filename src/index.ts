@@ -42,7 +42,7 @@ import {
 import { banEmbed, liveEmbed, openEmbed, resultsEmbed } from './embeds.js';
 import { startWeb } from './web.js';
 import { kovaaksAccountForDiscordId, scoreInWindow } from './kovaaks.js';
-import { banTurn, canPlay, eloDeltas, placings, rankFor, rankName } from './rating.js';
+import { bandsInReach, banTurn, canPlay, eloDeltas, placings, rankFor, rankName } from './rating.js';
 
 const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set');
@@ -688,7 +688,7 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
     await i.reply({ content: lookupError(account.kind), flags: MessageFlags.Ephemeral });
     return;
   }
-  ensurePlayer(i.user.id, account.username, account.steamId);
+  const opener = ensurePlayer(i.user.id, account.username, account.steamId);
 
   const { lastInsertRowid } = db
     .prepare(
@@ -701,11 +701,27 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
     i.user.id,
   );
 
-  const pingRole = getConfig(i.guildId).ping_role_id;
+  // Ping the bands this queue would actually admit, rather than everyone. That
+  // is the whole reason not to split the queue into a channel per rank: the
+  // notification is targeted, the pool of takers stays whole.
+  const reach = bandsInReach(
+    getRanks(i.guildId),
+    opener.elo,
+    getRankSpread(i.guildId)[format],
+  )
+    .map((r) => r.discord_role_id)
+    .filter((id): id is string => !!id);
+  // the configured role is an opt-in "tell me about every call", on top.
+  const always = getConfig(i.guildId).ping_role_id;
+  const mentions = [...new Set([...(always ? [always] : []), ...reach])];
+
   await i.reply({
     ...render(getMatch(matchId)!),
-    ...(pingRole
-      ? { content: `<@&${pingRole}>`, allowedMentions: { roles: [pingRole] } }
+    ...(mentions.length
+      ? {
+          content: mentions.map((id) => `<@&${id}>`).join(' '),
+          allowedMentions: { roles: mentions },
+        }
       : {}),
   });
   const msg = await i.fetchReply();

@@ -887,7 +887,9 @@ async function renderGuild(guild) {
       \${step(!!data.config.results_channel_id, 'results channel', 'setup')}
       \${step(!!data.config.voice_category_id, 'voice category', 'setup')}
       \${step(data.scenarios.length > 0, \`scenario pool (\${data.scenarios.length})\`, 'pool')}
-      \${step(data.ranks.length > 0, \`rank ladder (\${data.ranks.length})\`, 'ranks')}
+      \${step(data.ranks.some((r) => r.discord_role_id),
+              \`rank roles (\${data.ranks.filter((r) => r.discord_role_id).length}/\${data.ranks.length})\`,
+              'ranks')}
     </div>
 
     <h2>top of the ladder</h2>
@@ -926,7 +928,7 @@ async function renderGuild(guild) {
       </div>
     </div>
     <div class="field">
-      <label>Ping role <span class="hint">- pinged when someone opens a call</span></label>
+      <label>Extra ping role <span class="hint">- for people who want every call. The ranks a call can admit are already pinged.</span></label>
       \${selectField('ping', NONE.concat(data.roles), data.config.ping_role_id)}
     </div>
     <div class="bar">
@@ -938,7 +940,7 @@ async function renderGuild(guild) {
 
     <section id="queues">
     <h2>queues</h2>
-    <p class="muted">How far apart two people's ranks may be for a queue to let them in. It is checked against everyone already in the lobby, not just whoever opened it.</p>
+    <p class="muted">How far apart two people's ranks may be for a queue to let them in, checked against everyone already in the lobby rather than just whoever opened it. Opening a call pings exactly these ranks, so nobody is notified about a game they'd be turned away from.</p>
     <div id="queuebox"></div>
     <div class="bar">
       <button class="btn solid" id="savequeues">Save queues</button>
@@ -954,7 +956,7 @@ async function renderGuild(guild) {
 
     <section id="ranks">
     <h2>ranks</h2>
-    <p class="muted">Each rank becomes a Discord role, named and coloured to match, handed out when someone's rating crosses it.</p>
+    <p class="muted">Each rank becomes a Discord role, named and coloured to match, handed out when someone's rating crosses it. Saving here creates them; a call then pings the ones it can admit, which is what keeps one shared queue channel workable.</p>
     <table><tbody id="ranklist"></tbody></table>
     <div class="bar">
       <button class="btn" id="addrank">Add rank</button>

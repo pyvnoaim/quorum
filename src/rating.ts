@@ -29,6 +29,16 @@ export function canPlay(ranks: Band[], eloA: number, eloB: number, spread: numbe
   return Math.abs(a - b) <= spread;
 }
 
+/** The bands a queue at this spread will admit, given one player's rating.
+ *  Same index arithmetic as canPlay, so what gets pinged is exactly what gets
+ *  let in - the two must never disagree. */
+export function bandsInReach<T extends Band>(ranks: T[], elo: number, spread: number): T[] {
+  const order = [...ranks].sort((a, b) => b.min_elo - a.min_elo);
+  const at = order.findIndex((r) => elo >= r.min_elo);
+  if (at < 0) return [];
+  return order.slice(Math.max(0, at - spread), at + spread + 1);
+}
+
 /** Whose turn it is and how many bans are left, from nothing but how much of
  *  the pool is gone. Deriving both is what keeps a ban phase to one column and
  *  makes it impossible for the turn to drift out of sync with the pool. */

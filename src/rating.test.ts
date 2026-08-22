@@ -1,7 +1,7 @@
 // ponytail: one runnable check, no framework. `npx tsx src/rating.test.ts`.
 import assert from 'node:assert/strict';
 import { DEFAULT_RANKS } from './config.js';
-import { banTurn, canPlay, eloDeltas, placings, rankName } from './rating.js';
+import { bandsInReach, banTurn, canPlay, eloDeltas, placings, rankName } from './rating.js';
 import type { Entrant } from './rating.js';
 
 const scenarios = ['a', 'b', 'c'];
@@ -95,6 +95,25 @@ assert.ok(!canPlay(ladder, 1250, 1050, 1), 'two bands apart, spread 1');
 assert.ok(canPlay(ladder, 1250, 1050, 2), 'two bands apart, spread 2');
 // an unsorted ladder must gate the same way the dashboard's does
 assert.ok(!canPlay([...ladder].reverse(), 1250, 1150, 0), 'order must not matter');
+
+// Pinged bands and admitted bands must be the same set. If they drift, a call
+// either pings people it will turn away or hides itself from people it wants.
+for (const spread of [0, 1, 2]) {
+  for (const elo of [1300, 1250, 1150, 1050, 900, 0]) {
+    const reach = bandsInReach(ladder, elo, spread).map((r) => r.name);
+    const admitted = ladder
+      .filter((r) => canPlay(ladder, elo, r.min_elo, spread))
+      .map((r) => r.name);
+    assert.deepEqual(
+      [...reach].sort(),
+      [...admitted].sort(),
+      `ping and gate disagree at elo ${elo}, spread ${spread}`,
+    );
+  }
+}
+assert.deepEqual(bandsInReach(ladder, 1250, 0).map((r) => r.name), ['Gold']);
+assert.deepEqual(bandsInReach(ladder, 1250, 1).map((r) => r.name), ['Gold', 'Silver']);
+assert.deepEqual(bandsInReach([], 1250, 1), [], 'no ladder, nothing to ping');
 
 // ban phase: 7 candidates down to 3 is 4 bans, alternating, team 0 first
 const bans = [7, 6, 5, 4, 3].map((left) => banTurn(left, 7, 3));

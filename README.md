@@ -52,7 +52,8 @@ without the bot link straight to the invite; the rest open a settings page:
 - **Results channel** - where finished matches get posted
 - **Voice category** - where match voice channels are made, with a button to
   create one if you haven't
-- **Ping role** - pinged whenever someone opens a call
+- **Extra ping role** - for people who want notifying about every call. The
+  ranks a call can actually admit are pinged automatically
 - **Ranks** - add, remove, rename, recolour and set the threshold of every rank.
   Each one becomes a real Discord role, created and kept in sync by the bot
 - **Scenario pool** - categories you add and remove, each holding scenarios
@@ -74,7 +75,9 @@ The panel is one message with a **1v1** and a **2v2** button that stays in the
 queue channel forever. Then:
 
 1. Someone hits **1v1**. The bot posts their call in the channel: _looking for a
-   1v1_.
+   1v1_, and pings the rank roles that queue would admit - not everyone, and
+   not a channel per rank. One queue channel keeps the pool of takers whole;
+   the ping is what makes it findable.
 2. Someone else hits **Join** on it. That's the whole matchmaking.
 3. The moment it fills it starts itself - teams drawn, a temporary voice
    channel made and everyone dragged in.
