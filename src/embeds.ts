@@ -1,5 +1,5 @@
-import { EmbedBuilder } from 'discord.js';
-import { FORMATS, type Format } from './config.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
+import { FORMATS, PANEL_FORMATS, type Format } from './config.js';
 import type { Match, MatchPlayer, Player } from './db.js';
 import { rankName } from './rating.js';
 
@@ -27,13 +27,26 @@ export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string
     });
 }
 
-export function panelEmbed() {
-  return new EmbedBuilder()
-    .setTitle('Scrims')
-    .setColor(BLURPLE)
-    .setDescription(
-      "Pick a format and the bot posts your call in this channel. When someone takes it you'll be pulled into a voice channel and your scenarios go up.\n\nScores are read from KovaaK's — there's nothing to submit.",
-    );
+/** The panel is one static message that never changes - its buttons carry the
+ *  format, so it survives restarts with nothing stored about it. */
+export function panelMessage() {
+  return {
+    embeds: [
+      new EmbedBuilder()
+        .setTitle('Scrims')
+        .setColor(BLURPLE)
+        .setDescription(
+          "Pick a format and the bot posts your call in this channel. When someone takes it you'll be pulled into a voice channel and your scenarios go up.\n\nScores are read from KovaaK's — there's nothing to submit.",
+        ),
+    ],
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        PANEL_FORMATS.map((f) =>
+          new ButtonBuilder().setCustomId(`pug:open:${f}`).setLabel(f).setStyle(ButtonStyle.Primary),
+        ),
+      ),
+    ],
+  };
 }
 
 export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {

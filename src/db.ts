@@ -24,6 +24,7 @@ db.exec(`
     format     text not null,
     status     text not null default 'lobby',
     scenarios  text not null default '[]',
+    created_at integer not null default 0,
     started_at integer,
     ended_at   integer,
     voice_channel_id text
@@ -37,6 +38,12 @@ db.exec(`
     elo_before integer,
     elo_after  integer,
     primary key (match_id, discord_id)
+  );
+  create table if not exists guild_config (
+    guild_id           text primary key,
+    panel_channel_id   text,
+    results_channel_id text,
+    voice_category_id  text
   );
 `);
 
@@ -57,9 +64,43 @@ export interface Match {
   format: Format;
   status: 'lobby' | 'live' | 'done' | 'cancelled';
   scenarios: string;
+  created_at: number;
   started_at: number | null;
   ended_at: number | null;
   voice_channel_id: string | null;
+}
+
+export interface GuildConfig {
+  guild_id: string;
+  panel_channel_id: string | null;
+  results_channel_id: string | null;
+  voice_category_id: string | null;
+}
+
+export function getConfig(guildId: string): GuildConfig {
+  return (
+    (db.prepare('select * from guild_config where guild_id = ?').get(guildId) as
+      | GuildConfig
+      | undefined) ?? {
+      guild_id: guildId,
+      panel_channel_id: null,
+      results_channel_id: null,
+      voice_category_id: null,
+    }
+  );
+}
+
+export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'guild_id'>>) {
+  const next = { ...getConfig(guildId), ...patch };
+  db.prepare(
+    `insert into guild_config (guild_id, panel_channel_id, results_channel_id, voice_category_id)
+     values (?, ?, ?, ?)
+     on conflict(guild_id) do update set
+       panel_channel_id = excluded.panel_channel_id,
+       results_channel_id = excluded.results_channel_id,
+       voice_category_id = excluded.voice_category_id`,
+  ).run(guildId, next.panel_channel_id, next.results_channel_id, next.voice_category_id);
+  return next;
 }
 export interface MatchPlayer {
   match_id: number;

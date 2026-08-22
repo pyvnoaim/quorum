@@ -22,10 +22,27 @@ process — back that file up, it's the whole ladder.
 
 `npm test` runs the rating self-check.
 
+## Setup (the dashboard)
+
+Open `WEB_URL` in a browser and sign in with Discord. You get the servers where
+you have **Manage Server** — the same bar Discord uses for adding a bot. Servers
+without the bot link straight to the invite; the rest open a settings page:
+
+- **Queue channel** — where the panel and open calls live
+- **Results channel** — where finished matches get posted
+- **Voice category** — where match voice channels are made, with a button to
+  create one if you haven't
+
+Then hit **Post panel** and the queue message goes up. That's the whole setup;
+there are no configuration commands.
+
+Add `WEB_URL/callback` to the OAuth redirects on your Discord application, and
+give the bot **Manage Channels** + **Move Members** for the voice half.
+
 ## How a match runs
 
-`/pug panel` once, in the queue channel — one message with a **1v1** and a
-**2v2** button that stays there forever. Then:
+The panel is one message with a **1v1** and a **2v2** button that stays in the
+queue channel forever. Then:
 
 1. Someone hits **1v1**. The bot posts their call in the channel: _looking for a
    1v1_.
@@ -37,13 +54,15 @@ process — back that file up, it's the whole ladder.
 5. **Finish** posts placings and Elo changes to the results channel, deletes the
    call message, and deletes the voice channel.
 
+A call nobody takes within an hour is cancelled and its message deleted, so the
+queue channel only ever shows calls that are actually live.
+
 Other commands: `/pug score`, `/pug stats`, `/pug leaderboard`, and
 `/pug tier @player <tier>` for staff. Everything else is a button.
 
-Set `VOICE_CATEGORY_ID` for the voice half. The bot needs **Manage Channels**
-and **Move Members** for it, and only someone already sitting in a voice channel
-can be dragged — everyone else gets the channel link in the match message,
-which is as far as Discord lets a bot go.
+Only someone already sitting in a voice channel can be dragged into the match
+VC — everyone else gets the channel link in the match message, which is as far
+as Discord lets a bot go.
 
 ## Tiers
 

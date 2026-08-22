@@ -13,20 +13,19 @@ import {
   type Interaction,
 } from 'discord.js';
 import {
+  CALL_TTL_MS,
   CATEGORIES,
   FORMATS,
-  PANEL_FORMATS,
-  RESULTS_CHANNEL_ID,
   ROUNDS,
   TIERS,
   TIER_SEED,
-  VOICE_CATEGORY_ID,
   type Format,
   type Tier,
 } from './config.js';
 import {
   db,
   ensurePlayer,
+  getConfig,
   getMatch,
   getPlayer,
   leaderboard,
@@ -34,7 +33,8 @@ import {
   type Match,
   type MatchPlayer,
 } from './db.js';
-import { liveEmbed, openEmbed, panelEmbed, resultsEmbed } from './embeds.js';
+import { liveEmbed, openEmbed, resultsEmbed } from './embeds.js';
+import { startWeb } from './web.js';
 import { kovaaksNameForDiscordId, scoreInWindow } from './kovaaks.js';
 import { canPlay, eloDeltas, placings, rankName } from './rating.js';
 
@@ -53,9 +53,6 @@ const NO_LINK =
 const command = new SlashCommandBuilder()
   .setName('pug')
   .setDescription('pick-up games')
-  .addSubcommand((s) =>
-    s.setName('panel').setDescription('post the queue panel in this channel (staff)'),
-  )
   .addSubcommand((s) => s.setName('score').setDescription('refresh the scoreboard'))
   .addSubcommand((s) =>
     s
@@ -88,24 +85,6 @@ function rollScenarios() {
     if (pool.length) out.push(pool[Math.floor(Math.random() * pool.length)]);
   }
   return out;
-}
-
-/** The panel is one static message that never changes - its buttons carry the
- *  format, so it survives restarts with nothing stored about it. */
-function panel() {
-  return {
-    embeds: [panelEmbed()],
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        PANEL_FORMATS.map((f) =>
-          new ButtonBuilder()
-            .setCustomId(`pug:open:${f}`)
-            .setLabel(f)
-            .setStyle(ButtonStyle.Primary),
-        ),
-      ),
-    ],
-  };
 }
 
 function render(match: Match) {
@@ -153,12 +132,13 @@ function render(match: Match) {
  *  already sitting in voice can be moved - the rest get the channel link in the
  *  match message, which is the best Discord allows. */
 async function openVoice(guild: Guild, match: Match, rows: MatchPlayer[]) {
-  if (!VOICE_CATEGORY_ID) return null;
+  const category = getConfig(guild.id).voice_category_id;
+  if (!category) return null;
   const channel = await guild.channels
     .create({
       name: `${match.format} #${match.id}`,
       type: ChannelType.GuildVoice,
-      parent: VOICE_CATEGORY_ID,
+      parent: category,
       userLimit: rows.length,
     })
     .catch(() => null);
@@ -273,8 +253,26 @@ function activeMatchFor(discordId: string, guildId: string) {
     .get(discordId, guildId) as Match | undefined;
 }
 
+/** An open call nobody took in an hour is stale - drop it and delete its
+ *  message, so the queue channel only ever shows calls that are actually live. */
+async function expireStaleCalls() {
+  const stale = db
+    .prepare("select * from match where status = 'lobby' and created_at < ?")
+    .all(Date.now() - CALL_TTL_MS) as unknown as Match[];
+  for (const match of stale) {
+    db.prepare("update match set status = 'cancelled' where id = ?").run(match.id);
+    if (!match.message_id) continue;
+    const channel = await client.channels.fetch(match.channel_id).catch(() => null);
+    if (!channel?.isTextBased()) continue;
+    const msg = await channel.messages.fetch(match.message_id).catch(() => null);
+    await msg?.delete().catch(() => {});
+  }
+}
+
 client.once('clientReady', async (c) => {
   await c.application.commands.set([command.toJSON()]);
+  startWeb(c);
+  setInterval(() => void expireStaleCalls().catch(console.error), 5 * 60 * 1000).unref();
   console.log(`ready as ${c.user.tag}`);
 });
 
@@ -294,15 +292,6 @@ client.on('interactionCreate', async (i: Interaction) => {
 
 async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const sub = i.options.getSubcommand();
-
-  if (sub === 'panel') {
-    if (!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-      await i.reply({ content: 'Staff only.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-    await i.reply(panel());
-    return;
-  }
 
   if (sub === 'leaderboard') {
     const rows = leaderboard();
@@ -477,7 +466,7 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
     const rowsDone = matchPlayers(done.id);
     const players = new Map(rowsDone.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
 
-    const channelId = RESULTS_CHANNEL_ID ?? done.channel_id;
+    const channelId = getConfig(done.guild_id).results_channel_id ?? done.channel_id;
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (channel?.isSendable()) {
       await channel.send({ embeds: [resultsEmbed(done, rowsDone, players, deltas)] });
@@ -506,8 +495,10 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   ensurePlayer(i.user.id, name);
 
   const { lastInsertRowid } = db
-    .prepare('insert into match (guild_id, channel_id, host_id, format) values (?, ?, ?, ?)')
-    .run(i.guildId, i.channelId, i.user.id, format);
+    .prepare(
+      'insert into match (guild_id, channel_id, host_id, format, created_at) values (?, ?, ?, ?, ?)',
+    )
+    .run(i.guildId, i.channelId, i.user.id, format, Date.now());
   const matchId = Number(lastInsertRowid);
   db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(
     matchId,

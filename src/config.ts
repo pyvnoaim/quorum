@@ -65,6 +65,5 @@ export const ROUNDS = 3;
 /** Which formats get a button on the queue panel. */
 export const PANEL_FORMATS: Format[] = ['1v1', '2v2'];
 
-export const RESULTS_CHANNEL_ID = process.env.RESULTS_CHANNEL_ID ?? null;
-/** Category to make a match's temporary voice channel in. Unset = no voice. */
-export const VOICE_CATEGORY_ID = process.env.VOICE_CATEGORY_ID ?? null;
+/** How long an untaken call stays up before the sweep bins it. */
+export const CALL_TTL_MS = 60 * 60 * 1000;
