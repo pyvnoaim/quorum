@@ -436,12 +436,15 @@ export const PAGE = /* html */ `<!doctype html>
   .hx > td { padding: 0; border: 0; }
   .hx:not(.open) { display: none; }
   .hx.open > td { padding: 4px 0 16px; }
-  /* not the full-width table the pane's other tables are: this one is a small
-     block of numbers and should sit against the left edge, not be stretched
-     across the pane with the name column soaking up every spare pixel. */
-  .hgrid { width: auto; }
-  .hgrid td { padding: 4px 0 4px 22px; font-size: 12px; white-space: nowrap; text-align: right; }
-  .hgrid td:first-child { padding-left: 0; text-align: left; color: var(--muted); }
+  /* Full width, like the row it opens under - but fixed, or the name column
+     soaks up every spare pixel and leaves the scores huddled on the right.
+     Fixed splits what is left equally, so the columns line up with each other
+     however long the scenario names are. */
+  .hgrid { width: 100%; table-layout: fixed; }
+  .hgrid td { padding: 4px 0 4px 22px; font-size: 12px; text-align: right; }
+  .hgrid td:first-child { width: 22%; padding-left: 0; text-align: left; color: var(--muted); }
+  /* a score never wraps; a long scenario name in the header may */
+  .hgrid tr:not(.th) td { white-space: nowrap; }
   .hgrid .won { color: var(--fg); font-weight: 500; }
   .banned { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
   .chip.out { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
