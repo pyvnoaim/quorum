@@ -111,11 +111,22 @@ export const PAGE = /* html */ `<!doctype html>
     /* full-bleed on a phone: a fixed frame with its own scrollbar inside the
        page's scrollbar is two scrollbars for one column of content. */
     main:has(.dash) { height: auto; }
-    #pane { overflow: visible; }
+    /* No inner scrollbar here, so no gutter to reserve either - left on, that
+       14px was an inset down the right of every pane and nothing down the left,
+       which reads as the content sitting crooked in the frame. */
+    #pane { overflow: visible; padding-right: 0; scrollbar-gutter: auto; }
+    main:has(.dash) header { padding-right: 0; }
     .dash { grid-template-columns: 1fr; gap: 28px; }
     /* narrow enough that five across squeezes the labels - let them wrap here. */
     .stats { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
-    #side { position: static; grid-auto-flow: column; justify-content: start; overflow-x: auto; }
+    /* Wrapped, not scrolled sideways: eight panes in a strip that runs off the
+       edge hides half the dashboard behind a gesture nothing on the page hints
+       at. Two or three rows of them are all visible at once. */
+    #side {
+      position: static; display: flex; flex-wrap: wrap; gap: 6px;
+      padding-bottom: 4px; border-bottom: 1px solid var(--line);
+    }
+    #side a { padding: 7px 10px; }
     #side .server, #side .back { display: none; }
   }
   svg { width: 15px; height: 15px; flex: none; }
@@ -305,6 +316,19 @@ export const PAGE = /* html */ `<!doctype html>
   .cat.danger .cat-top strong { color: var(--bad); }
   .cat.danger .bar { margin-top: 16px; flex-wrap: wrap; }
   .cat.danger .bar .opt { margin-right: auto; }
+  /* Something is wrong in the server rather than in the settings - a missing
+     permission breaks whatever it is asked for next, so it says so above the
+     fields that would otherwise fail quietly. */
+  .notice {
+    border: 1px solid color-mix(in srgb, var(--bad) 45%, var(--line));
+    background: color-mix(in srgb, var(--bad) 12%, var(--panel));
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 22px; font-size: 13px;
+  }
+  .notice strong { display: block; font-size: 14px; color: var(--bad); margin-bottom: 6px; }
+  .notice p { color: var(--muted); }
+  .notice p + p { margin-top: 6px; }
+  .notice b { color: var(--fg); font-weight: 500; }
+  .notice .btn { margin-top: 12px; }
   /* a radio list where every option carries its own description */
   .opts { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
   .opts button {
@@ -512,6 +536,57 @@ export const PAGE = /* html */ `<!doctype html>
   .icon-btn:hover { color: var(--fg); }
   .muted { color: var(--muted); font-size: 13px; margin: -6px 0 14px; }
   .login p { color: var(--muted); margin-bottom: 24px; font-size: 14px; }
+  /* Phones. Everything above this point assumes a row has somewhere to put its
+     third column; here it hasn't, so the rules below either fold the row or
+     drop what a phone can do without. Nothing is hidden that is the reason
+     someone opened the pane, and nothing is left to run off the edge - a page
+     that scrolls sideways is one where half the controls are somewhere you
+     cannot see. */
+  @media (max-width: 620px) {
+    header { margin-bottom: 32px; gap: 12px; }
+    /* the name is the first thing that can go: the avatar already says who is
+       signed in, and Sign out must stay reachable. */
+    .who { min-width: 0; }
+    .who .name { min-width: 0; }
+    .who .name strong, .who .name span {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    /* an action bar that cannot fit its buttons puts them on the next line
+       rather than off the edge. */
+    .bar, .match-top, .cat-top, .reach { flex-wrap: wrap; }
+    /* "Cancel a call after [30] minutes without a taker" is a sentence with a
+       field in it - it wraps like one. */
+    .opt.boxed { flex-wrap: wrap; row-gap: 6px; }
+    .opt input[type=number] { margin-left: 0; }
+    /* Tables lose a column rather than gaining a scrollbar. A scroll container
+       here would clip the pickers that open downwards out of a cell - the seed
+       picker in Players sits in the last column of one - and trade one row too
+       wide for a second scrollbar on every pane. So: drop what a phone can do
+       without, let names wrap, and let the inputs shrink with their column. */
+    .ladder td, .hist td { overflow-wrap: anywhere; }
+    #ranklist input[type=text] { width: 100%; }
+    #ranklist input[type=number] { width: 68px; }
+    /* Voltaic standing is an outside benchmark sitting beside this ladder's own
+       rank and rating; on a phone those two come first. */
+    .ladder td:nth-child(3) { display: none; }
+    /* The match number and the scenario count are both in the row when you open
+       it, so the closed row can spend its width on who played. Scoped to the
+       row: the cell under it holds the whole opened match, and the one in an
+       empty table holds the only sentence there is. */
+    .hist .hrow td:nth-child(1), .hist .hrow td:nth-child(4) { display: none; }
+    /* The score grid under an open match splits what is left equally between
+       the scenarios played, so on a phone a four-scenario match hands each
+       column about 60px. The gutter has to come down with it or the scores,
+       which never wrap, spill out of the columns holding them. */
+    .hgrid td { padding-left: 10px; font-size: 11px; }
+  }
+  /* Narrower than a phone in portrait with the keyboard's language bar up. The
+     signed-in name goes entirely; the avatar and Sign out are the two things
+     that have to survive to the last pixel. */
+  @media (max-width: 430px) {
+    .who .name { display: none; }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
 </style>
 </head>
 <body>
@@ -1204,12 +1279,41 @@ async function renderGuild(guild) {
   const live = data.matches.filter((m) => m.status === 'live').length;
   // ranks come back highest-first, so the first one you clear is yours.
   const rankOf = (elo) => data.ranks.find((r) => elo >= r.min_elo);
-  const STEPS = 3;
-  const todo = [
-    !data.config.split_category_id,
-    !data.scenarios.length,
-    !data.ranks.some((r) => r.discord_role_id),
-  ].filter(Boolean).length;
+  const perms = data.permissions ?? { missing: [], outranked: [], invite: '' };
+  // Permissions lead: none of the three below can be done by a bot that has not
+  // got them, so a server missing one is not three jobs away from running, it
+  // is one job away from the other three being possible.
+  const checks = [
+    { ok: !perms.missing.length && !perms.outranked.length, label: 'Bot permissions', to: 'setup' },
+    { ok: !!data.config.split_category_id, label: 'Queue channels', to: 'setup' },
+    { ok: data.scenarios.length > 0, label: \`Scenario pool (\${data.scenarios.length})\`, to: 'pool' },
+    { ok: data.ranks.some((r) => r.discord_role_id),
+      label: \`Rank roles (\${data.ranks.filter((r) => r.discord_role_id).length}/\${data.ranks.length})\`,
+      to: 'ranks' },
+  ];
+  const STEPS = checks.length;
+  const todo = checks.filter((c) => !c.ok).length;
+
+  /* Said where it can be acted on, and only when it is true. Two different
+     faults with two different fixes: a permission is a checkbox, and being
+     outranked is a drag in the role list - the invite link cannot fix that one,
+     so it is not offered as though it could. */
+  const permNotice = () => {
+    if (!perms.missing.length && !perms.outranked.length) return '';
+    const names = (list) => list.map((n) => \`<b>\${h(n)}</b>\`).join(', ');
+    return \`<div class="notice">
+      <strong>Quorum cannot finish the job here</strong>
+      \${perms.missing.length ? \`<p>It is missing \${names(perms.missing)} in this server.
+         Tick them on its role in Server Settings → Roles, or re-invite it - the link asks for
+         exactly what it needs and nothing more.</p>\` : ''}
+      \${perms.outranked.length ? \`<p>Its own role sits below \${names(perms.outranked)}.
+         Discord will not let it touch a role above its own, so those ranks cannot be renamed,
+         recoloured or handed out. Drag <b>Quorum</b> above them in Server Settings → Roles.</p>\` : ''}
+      \${perms.missing.length && perms.invite
+        ? \`<a class="btn" href="\${h(perms.invite)}" target="_blank" rel="noopener">Re-invite Quorum</a>\`
+        : ''}
+    </div>\`;
+  };
 
   box.innerHTML = \`
     <section id="overview">
@@ -1228,13 +1332,7 @@ async function renderGuild(guild) {
       ? \`\${todo} thing\${todo > 1 ? 's' : ''} left before Quorum can run a match here.\`
       : 'Everything is set. Post the queue panel and you are live.'}</p>
     <div class="progress"><i style="width:\${((STEPS - todo) / STEPS) * 100}%"></i></div>
-    <div class="check">
-      \${step(!!data.config.split_category_id, 'Queue channels', 'setup')}
-      \${step(data.scenarios.length > 0, \`Scenario pool (\${data.scenarios.length})\`, 'pool')}
-      \${step(data.ranks.some((r) => r.discord_role_id),
-              \`Rank roles (\${data.ranks.filter((r) => r.discord_role_id).length}/\${data.ranks.length})\`,
-              'ranks')}
-    </div>
+    <div class="check">\${checks.map((c) => step(c.ok, c.label, c.to)).join('')}</div>
 
     <h2>Top of the ladder</h2>
     \${data.top.length
@@ -1257,14 +1355,24 @@ async function renderGuild(guild) {
 
     <section id="setup">
     <h2>Setup</h2>
+    \${permNotice()}
     <div class="field">
       <label>Category <span class="hint">- Quorum fills it with a results channel and one queue channel per rank</span></label>
       \${selectField('category', [{ id: '', name: 'Create one for me' }].concat(data.categories),
                      data.config.split_category_id)}
     </div>
     <div class="field">
+      <label>Who can see it <span class="hint">- the category and the results in it. A queue channel is private to its rank either way</span></label>
+      \${selectField('visible', [{ id: '', name: 'Everyone' }].concat(data.roles),
+                     data.config.visible_role_id)}
+    </div>
+    <div class="field">
       <label>Extra ping role <span class="hint">- for people who want every call, on top of the ranks already pinged</span></label>
       \${selectField('ping', NONE.concat(data.roles), data.config.ping_role_id)}
+    </div>
+    <div class="field">
+      <label>Leaderboard <span class="hint">- one message Quorum keeps up to date as ratings move, with the rest of the ladder a button away</span></label>
+      \${selectField('leaderboard', NONE.concat(data.channels), data.config.leaderboard_channel_id)}
     </div>
     <div class="field">
       <label>Announcements <span class="hint">- Quorum posts here whenever staff change the format, the pool or the ladder</span></label>
@@ -1893,8 +2001,10 @@ async function renderGuild(guild) {
         ? Number(document.getElementById('ttlmin').value)
         : 0,
       category_id: document.getElementById('category').dataset.value || null,
+      visible_role_id: document.getElementById('visible').dataset.value || null,
       ping_role_id: document.getElementById('ping').dataset.value || null,
       announce_channel_id: document.getElementById('announce').dataset.value || null,
+      leaderboard_channel_id: document.getElementById('leaderboard').dataset.value || null,
     };
     const res = await fetch('/api/guild/' + guild.id, {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),

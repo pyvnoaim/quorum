@@ -116,6 +116,11 @@ without the bot link straight to the invite; the rest open a settings page:
 
 - **Category** - the Discord category Quorum fills with a results channel and
   one queue channel per rank. Pick an existing one or let it make a `Quorum`
+- **Who can see it** - everyone, or one role and nobody else. This is the
+  category and the `#results` inside it; a queue channel stays private to its
+  rank either way (below)
+- **Leaderboard** - a channel to keep one standing ladder message in, kept
+  current as ratings move
 - **Auto-cancel** - how long an untaken call stays up, or off entirely
 - **Extra ping role** - for people who want notifying about every call. The
   ranks a call can actually admit are pinged automatically
@@ -150,6 +155,14 @@ it Administrator.**
 If the bot was invited before this was fixed it is still holding the old, wrong
 set: re-run the invite from the dashboard, which updates the role in place.
 
+**The dashboard checks what it is actually holding**, on every load, because a
+permission can be taken away long after the invite. **Bot permissions** is the
+first line of the Overview checklist, and the setup pane names what is missing
+and offers the invite that fixes it. It also says when Quorum's own role has
+been left *below* a rank role: Discord refuses to touch a role above your
+highest, and the refusal looks exactly like a bot doing nothing at all. No
+checkbox fixes that one - drag Quorum up the role list.
+
 ## Division roles
 
 Quorum owns them. It hands them out and moves people between them as ratings
@@ -167,9 +180,17 @@ time: a call belongs to the channel its button was pressed in, and there is no
 limit on how many are open at once.
 
 **Results are never split.** Every finished match, whatever rank played it, is
-posted to `#results`, which stays visible to the whole server. A ladder is only
-a ladder if everyone can read it, and a Champion result nobody in Bronze can see
-is a private message with extra steps.
+posted to `#results`. A ladder is only a ladder if everyone can read it, and a
+Champion result nobody in Bronze can see is a private message with extra steps.
+
+**Private if you want it.** By default the category, and so `#results`, is open
+to the server. **Who can see it** in setup hands it to one role instead and
+takes it from `@everyone` - everything Quorum makes lives in that category, so
+that one answer closes the lot. It is the room, not the queue: a rank channel
+carries its own overwrites and stays private to the ranks it admits whatever
+this says. Discord has no "this role *and* that one" - a role allow always beats
+a role deny - so those are two separate questions and the dashboard asks them
+separately.
 
 **A rank channel is visible to exactly the ranks its queue admits.** Not just
 its own: the per-format spreads in the queues pane already say who may play
@@ -203,6 +224,21 @@ The honest trade-off: this divides your queue by the number of ranks, and thin
 queues are how scrims die. Widening the spread in the queues pane widens
 who can see each channel, which is the lever for pulling a thin ladder back
 together.
+
+## The leaderboard
+
+Point setup's **Leaderboard** at a channel and Quorum keeps one message in it:
+the top ten with their rating, rank and record, edited in place as matches
+finish rather than reposted every time someone wins.
+
+**Back** and **Next** under it hand you the rest of the ladder privately. The
+message in the channel does not turn over - it is one message the whole server
+is looking at, and a page that moves under everyone whenever anyone reads it is
+a page nobody can read. `/scrim leaderboard` answers with the same board.
+
+Delete the message by hand and the next tick puts it back; move the channel and
+the old one is taken down with it; remove Quorum and it goes. A ladder short
+enough to fit on one page gets no buttons at all.
 
 ## How a match runs
 

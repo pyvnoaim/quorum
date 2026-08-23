@@ -128,6 +128,13 @@ for (const stmt of [
   // Which of the three fixed mains a category rolls up into. A category named
   // after a main is its own main; everything else is a subcategory of one.
   'alter table scenario add column main text',
+  // Optional: the one role the Quorum category shows to. Null = the whole
+  // server sees it.
+  'alter table guild_config add column visible_role_id text',
+  // Optional: a channel holding one standing leaderboard message, and the id of
+  // that message so the tick can edit it rather than post a second one.
+  'alter table guild_config add column leaderboard_channel_id text',
+  'alter table guild_config add column leaderboard_msg_id text',
 ]) {
   try {
     db.exec(stmt);
@@ -235,6 +242,15 @@ export interface GuildConfig {
   panel_msgs: string | null;
   /** Where setup changes are announced. Null = don't announce. */
   announce_channel_id: string | null;
+  /** Where the standing leaderboard lives, and the message it is. Null = the
+   *  server doesn't want one. The message id is Quorum's, not the server's: it
+   *  edits that message every tick and deletes it when the channel changes. */
+  leaderboard_channel_id: string | null;
+  leaderboard_msg_id: string | null;
+  /** Who may see the Quorum category, and so the results channel inside it.
+   *  Null = the whole server. A queue channel is private to its rank whatever
+   *  this says - see syncRankChannelsToDiscord(). */
+  visible_role_id: string | null;
 }
 
 export const getSeedMode = (guildId: string): SeedMode => {
@@ -422,6 +438,9 @@ export function getConfig(guildId: string): GuildConfig {
       format_cfg: null,
       panel_msgs: null,
       announce_channel_id: null,
+      visible_role_id: null,
+      leaderboard_channel_id: null,
+      leaderboard_msg_id: null,
     }
   );
 }
@@ -432,8 +451,9 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     `insert into guild_config
        (guild_id, panel_channel_id, results_channel_id, ping_role_id,
         rank_spread, split_channels, seed_mode, call_ttl_min,
-        split_category_id, split_results_id, format_cfg, panel_msgs, announce_channel_id)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        split_category_id, split_results_id, format_cfg, panel_msgs, announce_channel_id,
+        visible_role_id, leaderboard_channel_id, leaderboard_msg_id)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
@@ -446,7 +466,10 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
        split_results_id = excluded.split_results_id,
        format_cfg = excluded.format_cfg,
        panel_msgs = excluded.panel_msgs,
-       announce_channel_id = excluded.announce_channel_id`,
+       announce_channel_id = excluded.announce_channel_id,
+       visible_role_id = excluded.visible_role_id,
+       leaderboard_channel_id = excluded.leaderboard_channel_id,
+       leaderboard_msg_id = excluded.leaderboard_msg_id`,
   ).run(
     guildId,
     next.panel_channel_id,
@@ -461,6 +484,9 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.format_cfg,
     next.panel_msgs,
     next.announce_channel_id,
+    next.visible_role_id,
+    next.leaderboard_channel_id,
+    next.leaderboard_msg_id,
   );
   return next;
 }
@@ -813,7 +839,7 @@ export function purgeGuild(guildId: string) {
   });
 }
 
-export function leaderboard(guildId: string, limit = 20) {
+export function leaderboard(guildId: string, limit = 20, offset = 0) {
   return db
     .prepare(
       `select p.* from player p
@@ -821,7 +847,23 @@ export function leaderboard(guildId: string, limit = 20) {
          select 1 from match_player mp join match m on m.id = mp.match_id
          where mp.discord_id = p.discord_id and m.guild_id = ?
        )
-       order by p.elo desc, p.wins desc limit ?`,
+       order by p.elo desc, p.wins desc limit ? offset ?`,
     )
-    .all(guildId, limit) as unknown as Player[];
+    .all(guildId, limit, offset) as unknown as Player[];
+}
+
+/** How many players the ladder has, which is how many pages it is. Counted
+ *  rather than measured off a fetched page: the last page has to know it is the
+ *  last one before it is drawn, or the Next button lies. */
+export function ladderSize(guildId: string): number {
+  const row = db
+    .prepare(
+      `select count(*) as n from player p
+       where p.wins + p.losses > 0 and exists (
+         select 1 from match_player mp join match m on m.id = mp.match_id
+         where mp.discord_id = p.discord_id and m.guild_id = ?
+       )`,
+    )
+    .get(guildId) as { n: number };
+  return row?.n ?? 0;
 }

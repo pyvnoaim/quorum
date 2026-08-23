@@ -5,6 +5,8 @@ import {
   getPlayer,
   getRanks,
   guildStats,
+  ladderSize,
+  leaderboard,
   type Match,
   type MatchPlayer,
   type Player,
@@ -160,6 +162,83 @@ export function panelMessage(formats: readonly Format[] = PANEL_FORMATS, guildId
       ),
     ],
   };
+}
+
+/** Discord's "Unknown Message" (10008) - the one refusal that means a message
+ *  really is gone, rather than that we could not reach it just now.
+ *
+ *  Every other failure has to be read as "still there". The standing
+ *  leaderboard reposts itself when its message has been deleted, and a rate
+ *  limit or a blip taken for a deletion leaves two boards in the channel with
+ *  only one of them ever updated again. */
+export const messageGone = (err: unknown) =>
+  typeof err === 'object' && err !== null && (err as { code?: number }).code === 10008;
+
+/** Ten to a page: a phone shows about that many lines of a Discord embed before
+ *  it starts scrolling, and a leaderboard you have to scroll is one nobody
+ *  reads past third place. */
+export const LADDER_PAGE = 10;
+
+/** The ladder, one page of it, with the buttons that turn the page.
+ *
+ *  Drawn from the database on every call rather than from a stored page, so a
+ *  board someone left open overnight and a board posted this second say the
+ *  same thing. The page number rides in the button's id - there is nowhere else
+ *  to keep it that survives a restart, and it is the only state a page has. */
+export function leaderboardMessage(guildId: string, page = 0) {
+  const total = ladderSize(guildId);
+  const pages = Math.max(1, Math.ceil(total / LADDER_PAGE));
+  // Clamped, not trusted: the id comes back off a button that may be older than
+  // the last three players to leave the ladder.
+  const at = Math.min(Math.max(page, 0), pages - 1);
+  const rows = leaderboard(guildId, LADDER_PAGE, at * LADDER_PAGE);
+  const ranks = getRanks(guildId);
+
+  const line = (p: Player, n: number) => {
+    const games = p.wins + p.losses;
+    const rate = games ? ` (${Math.round((p.wins / games) * 100)}%)` : '';
+    // The top three are the only rows worth a marker - a medal beside eleventh
+    // place is decoration, and it pushes the name out of line with the rest.
+    const place = ['🥇', '🥈', '🥉'][n] ?? `**${n + 1}.**`;
+    return `${place} <@${p.discord_id}> - **${p.elo}** ${rankName(ranks, p.elo)} · ` +
+      `${p.wins}W ${p.losses}L${rate}`;
+  };
+
+  const embed = new EmbedBuilder()
+    .setTitle('Ladder')
+    .setColor(BLURPLE)
+    .setDescription(
+      rows.length
+        ? rows.map((p, n) => line(p, at * LADDER_PAGE + n)).join('\n')
+        : '_no games played yet_',
+    )
+    .setFooter({
+      text: total
+        ? `Page ${at + 1} of ${pages} · ${total} ranked · powered by kova`
+        : footer().text,
+    });
+
+  // A one-page ladder gets no buttons at all: two dead controls under it say
+  // there is more to see when there isn't.
+  const components =
+    pages > 1
+      ? [
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`pug:lb:${at - 1}`)
+              .setLabel('Back')
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(at === 0),
+            new ButtonBuilder()
+              .setCustomId(`pug:lb:${at + 1}`)
+              .setLabel('Next')
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(at >= pages - 1),
+          ),
+        ]
+      : [];
+
+  return { embeds: [embed], components };
 }
 
 export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {

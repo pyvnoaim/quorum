@@ -41,32 +41,75 @@ globalThis.fetch = (async (input: any, init?: any) => {
 const { db, ensurePlayer } = await import('./src/db.js');
 const { startWeb } = await import('./src/web.js');
 
-const channel = (id: string, name: string, type: number, parentId: string | null = null) => ({
+const channel = (id: string, name: string, type: number, parentId: string | null = null) => {
+  // What has been posted in here, so messages.fetch can find it again. The real
+  // thing keeps its own; without this the standing leaderboard has nothing to
+  // edit in dev and reposts itself every save.
+  const posted = new Collection<string, any>();
+  return {
   id,
   name,
   type,
   parentId,
   isSendable: () => true,
+  isTextBased: () => type === 0 || type === 5,
+  messages: {
+    fetch: async (what: any) => {
+      if (what && typeof what === 'object') return posted;
+      const msg = posted.get(String(what));
+      // Discord rejects on a message that is not there, and the bot tells that
+      // refusal apart from every other one by its code - so the fake carries the
+      // code too, or nothing it does here is the thing being tested.
+      if (!msg) throw Object.assign(new Error('Unknown Message'), { code: 10008 });
+      return msg;
+    },
+  },
   send: (msg: any) => {
     const embed = msg?.embeds?.[0]?.data ?? msg?.embeds?.[0];
     console.log(`  #${name} <- ${embed?.title ?? 'message'}`);
     if (embed?.description) console.log(`     ${embed.description.replace(/\n/g, '\n     ')}`);
-    return Promise.resolve({ id: String(nextId++) });
+    const made = {
+      id: String(nextId++),
+      author: { id: '999000000000000001' },
+      components: msg?.components ?? [],
+      edit: async (next: any) => {
+        const e = next?.embeds?.[0]?.data ?? next?.embeds?.[0];
+        console.log(`  #${name} ~~ ${e?.title ?? 'message'}`);
+        return made;
+      },
+      delete: async () => {
+        posted.delete(made.id);
+        console.log(`  #${name} deleted a message`);
+      },
+    };
+    posted.set(made.id, made);
+    return Promise.resolve(made);
   },
   edit: async (patch: any) => {
     console.log(`  edit ${name} -> ${JSON.stringify(patch)}`);
     return null;
   },
+  // the real thing on every guild channel; the sync writes the category's
+  // "who can see this" through it.
+  permissionOverwrites: {
+    edit: async (target: string, bits: any) =>
+      console.log(`  perms ${name} ${target} -> ${JSON.stringify(bits)}`),
+    delete: async (target: string) => console.log(`  perms ${name} ${target} dropped`),
+  },
   delete: async () => {
     channels.delete(id);
     console.log(`  deleted ${type === 4 ? 'category ' : '#'}${name}`);
   },
-});
-const role = (id: string, name: string, color = 0) => ({
+  };
+};
+const role = (id: string, name: string, color = 0, position = 1) => ({
   id,
   name,
   color,
   managed: false,
+  // the dashboard compares this against the bot's own highest role to warn
+  // about a rank it would be refused permission to touch.
+  position,
   edit: async (patch: any) => console.log(`role ${name} -> ${JSON.stringify(patch)}`),
   delete: async () => console.log(`role ${name} deleted`),
 });
@@ -99,8 +142,16 @@ const guild: any = {
     },
   },
   // the bot's own member, named in every locked channel's overwrite so it does
-  // not hide the channel from itself.
-  members: { me: { id: '999000000000000001' } },
+  // not hide the channel from itself. Fully permissioned and top of the role
+  // list here: DEV_UNPERMISSIONED=1 takes it all away instead, which is how the
+  // dashboard's "Quorum cannot finish the job here" notice gets looked at.
+  members: {
+    me: {
+      id: '999000000000000001',
+      permissions: { has: () => !process.env.DEV_UNPERMISSIONED },
+      roles: { highest: { position: process.env.DEV_UNPERMISSIONED ? 0 : 99 } },
+    },
+  },
   roles: {
     cache: roles,
     // discord.js always has this; the sync reads it to build permission

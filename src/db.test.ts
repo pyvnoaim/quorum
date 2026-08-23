@@ -16,6 +16,7 @@ const {
   getRankSpread,
   guildStats,
   headToHead,
+  ladderSize,
   leaderboard,
   recentMatches,
   rankChannels,
@@ -128,6 +129,31 @@ assert.deepEqual(
   'the ladder is scoped too',
 );
 assert.equal(guildStats('gA').rated, 1, 'and so is the rated count');
+
+// The standing leaderboard is one page of that ladder plus a count of how many
+// pages there are. The count has to be of the whole ladder, not of the page in
+// hand, or the last page draws a Next button with nothing behind it.
+for (let n = 0; n < 12; n++) {
+  ensurePlayer(`pg${n}`, `pager${n}`, null, { elo: 1000 + n, from: 'flat' });
+  db.prepare(
+    "insert into match (id, guild_id, channel_id, host_id, format, status) values (?,'gpage','c',?,'1v1','done')",
+  ).run(300 + n, `pg${n}`);
+  db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(300 + n, `pg${n}`);
+}
+db.prepare("update player set wins = 1 where discord_id like 'pg%'").run();
+
+assert.equal(ladderSize('gpage'), 12, 'every ranked player is counted, page or no page');
+assert.equal(ladderSize('gA'), 1, "and only the players who have been in it");
+const page1 = leaderboard('gpage', 10, 0);
+const page2 = leaderboard('gpage', 10, 10);
+assert.equal(page1.length, 10);
+assert.equal(page2.length, 2, 'the last page is however much is left');
+assert.equal(page1[0].discord_id, 'pg11', 'highest rated first');
+assert.deepEqual(
+  page2.map((p) => p.discord_id),
+  ['pg1', 'pg0'],
+  'and the second page carries on where the first stopped',
+);
 
 // Channels follow the ladder exactly as roles do: a surviving rank keeps its
 // channels across a rewrite, a removed one hands them back to be deleted.

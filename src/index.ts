@@ -38,15 +38,17 @@ import {
   getRanks,
   getScenarios,
   headToHead,
-  leaderboard,
   matchPlayers,
   recentMatches,
   seedPlayer,
+  setConfig,
   type Match,
   type MatchPlayer,
 } from './db.js';
 import {
+  leaderboardMessage,
   liveEmbed,
+  messageGone,
   noContestEmbed,
   openEmbed,
   panelMessage,
@@ -728,8 +730,56 @@ async function refreshPanels() {
   }
 }
 
+/** What each server's board last said, same trick as the panels above: the
+ *  ladder only moves when a match ends, so a quiet server costs no requests. */
+const ladderText = new Map<string, string>();
+
+/** Keeps the standing leaderboard standing.
+ *
+ *  Reposted, not just edited, when the message is gone - someone with Manage
+ *  Messages can delete it, and a leaderboard channel with no leaderboard in it
+ *  is the one state this feature must not settle into. */
+async function refreshLeaderboards() {
+  for (const [guildId] of client.guilds.cache) {
+    const cfg = getConfig(guildId);
+    if (!cfg.leaderboard_channel_id) continue;
+    const body = leaderboardMessage(guildId);
+    // Footer as well as body: the page count and the number of ranked players
+    // live down there, and both move without a single row changing.
+    const next = `${body.embeds[0].data.description ?? ''}|${body.embeds[0].data.footer?.text ?? ''}`;
+    if (ladderText.get(guildId) === next) continue;
+
+    const channel = await client.channels.fetch(cfg.leaderboard_channel_id).catch(() => null);
+    if (!channel?.isTextBased() || !channel.isSendable()) continue;
+    let msg = null;
+    if (cfg.leaderboard_msg_id) {
+      try {
+        msg = await channel.messages.fetch(cfg.leaderboard_msg_id);
+      } catch (err) {
+        // Deleted for good is a repost. Anything else - a rate limit, a blip -
+        // leaves this guild alone until the next tick rather than risking a
+        // second board beside the first.
+        if (!messageGone(err)) continue;
+      }
+    }
+    if (msg) {
+      // Remembered as posted only if it actually went through: a channel that
+      // refuses one edit - permissions changed under us, Discord having a
+      // moment - should be tried again next tick, not written off as current.
+      const edited = await msg.edit(body).then(() => true, () => false);
+      if (!edited) continue;
+    } else {
+      const posted = await channel.send(body).catch(() => null);
+      setConfig(guildId, { leaderboard_msg_id: posted?.id ?? null });
+      if (!posted) continue;
+    }
+    ladderText.set(guildId, next);
+  }
+}
+
 async function tick() {
   await refreshPanels();
+  await refreshLeaderboards();
   await expireStaleCalls();
   await expireStalePicks();
   const live = db
@@ -782,27 +832,9 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
   const sub = i.options.getSubcommand();
 
   if (sub === 'leaderboard') {
-    // this server's ladder, not every server's - the rank names below come
+    // this server's ladder, not every server's - the rank names inside come
     // from this guild's ranks, so the rows must too.
-    const rows = leaderboard(i.guildId!);
-    const ranks = getRanks(i.guildId!);
-    await i.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle('Ladder')
-          .setColor(0x5865f2)
-          .setDescription(
-            rows.length
-              ? rows
-                  .map(
-                    (p, n) =>
-                      `**${n + 1}.** <@${p.discord_id}> - **${p.elo}** ${rankName(ranks, p.elo)} · ${p.wins}W ${p.losses}L (${Math.round((p.wins / (p.wins + p.losses)) * 100)}%)`,
-                  )
-                  .join('\n')
-              : '_no games played yet_',
-          ),
-      ],
-    });
+    await i.reply(leaderboardMessage(i.guildId!));
     return;
   }
 
@@ -903,10 +935,27 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
   if (fresh.status === 'live') await editMatchMessage(fresh);
 }
 
+/** Page two of a leaderboard nobody else asked for.
+ *
+ *  Pressing Next on the board in the channel does NOT turn that message over -
+ *  it is one message the whole server is looking at, and a page that moves
+ *  under everyone whenever anyone reads it is a page nobody can read. The press
+ *  answers privately instead, and from there Back and Next edit that private
+ *  copy, which is yours to move. The board in the channel stays on the page it
+ *  exists to show. */
+async function onLeaderboardPage(i: import('discord.js').ButtonInteraction, page: number) {
+  const body = leaderboardMessage(i.guildId!, Number.isFinite(page) ? page : 0);
+  if (i.message.flags.has(MessageFlags.Ephemeral)) await i.update(body);
+  else await i.reply({ ...body, flags: MessageFlags.Ephemeral });
+}
+
 async function onButton(i: import('discord.js').ButtonInteraction) {
   const [, action, arg, extra] = i.customId.split(':');
 
   if (action === 'open') return onOpen(i, arg as Format);
+  // Not a match id, so it has to answer before the lookup below turns it into
+  // "That match is gone."
+  if (action === 'lb') return onLeaderboardPage(i, Number(arg));
 
   const match = getMatch(Number(arg));
   if (!match) {

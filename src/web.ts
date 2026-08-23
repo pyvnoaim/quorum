@@ -45,12 +45,13 @@ import {
   setRanks,
   setScenarios,
   seedPlayer,
+  type GuildConfig,
   type Match,
   type Player,
   type Rank,
   type RankChannels,
 } from './db.js';
-import { changeEmbed, panelMessage } from './embeds.js';
+import { changeEmbed, leaderboardMessage, messageGone, panelMessage } from './embeds.js';
 import { bandsInReach } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
 import { PAGE } from './page.js';
@@ -60,21 +61,70 @@ const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET ?? '';
 const BASE_URL = (process.env.WEB_URL ?? 'http://localhost:3000').replace(/\/$/, '');
 const PORT = Number(process.env.PORT ?? 3000);
 const REDIRECT = `${BASE_URL}/callback`;
-/** What the dashboard's invite link asks for, built from the flags rather than
- *  written as a number - the old hand-typed one asked for Stream (bit 9) where
- *  it meant ViewChannel (bit 10), and nothing noticed for months. */
-const INVITE_PERMISSIONS = [
-  PermissionFlagsBits.ManageChannels,
-  PermissionFlagsBits.ManageRoles,
-  PermissionFlagsBits.ViewChannel,
-  PermissionFlagsBits.SendMessages,
-  PermissionFlagsBits.EmbedLinks,
-  PermissionFlagsBits.ReadMessageHistory,
+/** Everything Quorum needs a server to grant it, under the names Discord's own
+ *  permissions screen uses - the invite link asks for exactly this list and the
+ *  dashboard checks the same one, so what it asked for and what it says is
+ *  missing cannot drift apart.
+ *
+ *  `builds` marks the three it cannot make the ladder's roles and channels
+ *  without. The rest break a part each - no Embed Links is a panel with no
+ *  embed in it - and are reported without stopping the build.
+ *
+ *  Built from the flags rather than written as a number: the old hand-typed one
+ *  asked for Stream (bit 9) where it meant ViewChannel (bit 10), and nothing
+ *  noticed for months. */
+const NEEDED_PERMISSIONS: { flag: bigint; name: string; builds?: boolean }[] = [
+  { flag: PermissionFlagsBits.ManageChannels, name: 'Manage Channels', builds: true },
+  { flag: PermissionFlagsBits.ManageRoles, name: 'Manage Roles', builds: true },
+  { flag: PermissionFlagsBits.ViewChannel, name: 'View Channels', builds: true },
+  { flag: PermissionFlagsBits.SendMessages, name: 'Send Messages' },
+  { flag: PermissionFlagsBits.EmbedLinks, name: 'Embed Links' },
+  { flag: PermissionFlagsBits.ReadMessageHistory, name: 'Read Message History' },
   // A match runs in its own private thread: make it, talk in it, delete it.
-  PermissionFlagsBits.CreatePrivateThreads,
-  PermissionFlagsBits.SendMessagesInThreads,
-  PermissionFlagsBits.ManageThreads,
-].reduce((all, flag) => all | flag, 0n).toString();
+  { flag: PermissionFlagsBits.CreatePrivateThreads, name: 'Create Private Threads' },
+  { flag: PermissionFlagsBits.SendMessagesInThreads, name: 'Send Messages in Threads' },
+  { flag: PermissionFlagsBits.ManageThreads, name: 'Manage Threads' },
+];
+const INVITE_PERMISSIONS = NEEDED_PERMISSIONS.reduce((all, p) => all | p.flag, 0n).toString();
+const inviteUrl = (guildId: string) =>
+  `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=${INVITE_PERMISSIONS}&guild_id=${guildId}&disable_guild_select=true`;
+
+/** What Quorum hasn't got here, by name.
+ *
+ *  Read off the bot's own member rather than trusted from the invite: the
+ *  invite is a request, and an admin can strip a permission from the bot's role
+ *  the day after granting it. Every Discord call in this file ends in a
+ *  `.catch(() => {})`, which is right - one refused edit must not take the
+ *  other twenty down - but it also means a server with the wrong permissions
+ *  sees a bot that quietly does nothing. This is what turns that into a
+ *  sentence someone can act on. */
+function missingPermissions(guild: Guild, onlyBuilds = false): string[] {
+  const me = guild.members.me;
+  const wanted = NEEDED_PERMISSIONS.filter((p) => !onlyBuilds || p.builds);
+  // No member for ourselves means the gateway hasn't caught up; claiming
+  // everything is missing would be a false alarm, so say nothing.
+  if (!me) return [];
+  return wanted.filter((p) => !me.permissions.has(p.flag)).map((p) => p.name);
+}
+
+const listOf = (names: string[]) =>
+  names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0];
+
+/** Discord refuses to touch a role above the bot's own highest one, and the
+ *  refusal looks exactly like a bot doing nothing at all: the rank exists in
+ *  the dashboard, the role never moves. Worth saying out loud, because no
+ *  permission checkbox fixes it - dragging Quorum's role up the list does. */
+function rolesOutOfReach(guild: Guild, ranks: Rank[]): string[] {
+  const mine = guild.members.me?.roles?.highest?.position;
+  if (mine == null) return [];
+  return ranks
+    .filter((r) => {
+      const role = r.discord_role_id ? guild.roles.cache.get(r.discord_role_id) : null;
+      return role ? role.position >= mine : false;
+    })
+    .map((r) => r.name);
+}
+
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
 interface Session {
@@ -130,6 +180,10 @@ async function discord<T>(path: string, accessToken: string): Promise<T | null> 
  *  match, created on first save and edited after. Deleting a rank deletes its
  *  role, so an old band can't linger on people forever. */
 async function syncRankRolesToDiscord(guild: Guild, ranks: Rank[], orphaned: Rank[]) {
+  // Without Manage Roles every call below is refused, and a refusal here is
+  // silent by design. The channel sync runs next and says so out loud; this
+  // just declines to ask fifty times first.
+  if (!guild.members.me?.permissions.has(PermissionFlagsBits.ManageRoles)) return;
   for (const rank of ranks) {
     const color = Number.parseInt(rank.color.slice(1), 16);
     const existing = rank.discord_role_id ? guild.roles.cache.get(rank.discord_role_id) : null;
@@ -242,6 +296,17 @@ async function syncRankChannelsToDiscord(
   }
   if (!ranks.length) return { ok: true };
 
+  // Checked before anything is created, not discovered halfway through: a
+  // half-built ladder - a category with two of seven channels under it - is
+  // worse than one that never started and said why.
+  const cannot = missingPermissions(guild, true);
+  if (cannot.length) {
+    return {
+      ok: false,
+      error: `Quorum needs ${listOf(cannot)} in this server before it can build the channels`,
+    };
+  }
+
   // Nothing is built until every rank has its Discord role. The channels are
   // locked to those roles, so making them first would either publish a wall of
   // channels to the whole server or leave them locked to nothing - and the
@@ -257,30 +322,50 @@ async function syncRankChannelsToDiscord(
     };
   }
 
-  // The bot names itself in the overwrite. Denying @everyone would hide the
-  // channel from the bot too, and a channel the bot cannot see is one it cannot
-  // put a panel in - or find again to delete when the rank goes, which is how a
-  // server ends up with the old ladder's channels beside the new one's.
-  const open = [{ id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel] }];
-
-  // A rank channel is private to its rank. The bot names itself in the deny, or
-  // it loses sight of a channel it still has to post panels in and delete later.
+  // The bot names itself in every overwrite it writes. Denying @everyone would
+  // hide the channel from the bot too, and a channel the bot cannot see is one
+  // it cannot put a panel in - or find again to delete when the rank goes,
+  // which is how a server ends up with the old ladder's channels beside the new
+  // one's.
   const me = guild.members.me?.id;
+  const meAllowed = me
+    ? [
+        {
+          id: me,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ManageChannels,
+          ],
+        },
+      ]
+    : [];
+
+  // Who the category shows to: the whole server, or one role and nobody else.
+  // A role that has since been deleted in Discord reads as "everyone" rather
+  // than locking the category to an id nothing holds - that would be a category
+  // only the bot can see, and no way back to it from the dashboard.
+  const viewer =
+    cfg.visible_role_id && guild.roles.cache.has(cfg.visible_role_id) ? cfg.visible_role_id : null;
+  // What a category Quorum MAKES starts as: open to the server, or shut to
+  // everyone but the named role. Only ever written at creation - see below for
+  // why a category the server handed us is treated differently.
+  const categoryPerms = viewer
+    ? [
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: viewer, allow: [PermissionFlagsBits.ViewChannel] },
+        ...meAllowed,
+      ]
+    : [{ id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel] }, ...meAllowed];
+
+  // A rank channel is private to its rank, whoever the category shows to: the
+  // two are separate questions, and Discord cannot ask both at once - a role
+  // allow always beats a role deny, so there is no "this role AND that one".
+  // The category setting is about the room; this is about the queue in it.
   const onlyRank = (roleIds: string[]) => [
     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     ...roleIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel] })),
-    ...(me
-      ? [
-          {
-            id: me,
-            allow: [
-              PermissionFlagsBits.ViewChannel,
-              PermissionFlagsBits.SendMessages,
-              PermissionFlagsBits.ManageChannels,
-            ],
-          },
-        ]
-      : []),
+    ...meAllowed,
   ];
 
   // One category for the whole thing, whichever the server picked - or one of
@@ -292,9 +377,38 @@ async function syncRankChannelsToDiscord(
   const category =
     (picked && picked.type === ChannelType.GuildCategory ? picked : null) ||
     (await guild.channels
-      .create({ name: 'Quorum', type: ChannelType.GuildCategory, permissionOverwrites: open })
+      .create({
+        name: 'Quorum',
+        type: ChannelType.GuildCategory,
+        permissionOverwrites: categoryPerms,
+      })
       .catch(() => null));
   if (!category) return { ok: false, error: 'could not create the Quorum category' };
+
+  // Locking is re-applied every sync - the server can change who may see it
+  // from the dashboard, and a category picked out of the server's own list
+  // arrives with whatever permissions it already had.
+  //
+  // Locking only. "Everyone" writes nothing here, because a category the server
+  // picked may be one it deliberately keeps private, and a save that quietly
+  // published a staff category to the whole server would be the most expensive
+  // thing on this page. Unlocking is the one that has to be undone, and it is -
+  // by the save that changes the setting, which is the only place that knows
+  // the lock was ours to lift.
+  //
+  // One overwrite at a time rather than set(), which would replace the lot: the
+  // server's own overwrites on its own category are none of our business.
+  if (viewer && 'permissionOverwrites' in category) {
+    await category.permissionOverwrites
+      .edit(guild.roles.everyone.id, { ViewChannel: false })
+      .catch(() => {});
+    await category.permissionOverwrites.edit(viewer, { ViewChannel: true }).catch(() => {});
+    if (me) {
+      await category.permissionOverwrites
+        .edit(me, { ViewChannel: true, SendMessages: true, ManageChannels: true })
+        .catch(() => {});
+    }
+  }
 
   // One results channel, first in the category: every rank's results land here,
   // because a ladder is only a ladder if the whole server can read it.
@@ -366,6 +480,47 @@ async function syncRankChannelsToDiscord(
     }
   }
   return { ok: true };
+}
+
+/** Puts the standing leaderboard where the dashboard says it goes - and takes
+ *  it away from where it used to be.
+ *
+ *  One message, owned by Quorum: the tick edits it as ratings move, so it is
+ *  posted once here and then left alone. Moving the board deletes the old one
+ *  rather than leaving a stale ladder sitting in a channel nobody is updating
+ *  any more. Returns what to tell the admin, or nothing when it went fine. */
+async function syncLeaderboardMessage(guild: Guild, was: GuildConfig) {
+  const cfg = getConfig(guild.id);
+  const moved = was.leaderboard_channel_id !== cfg.leaderboard_channel_id;
+
+  if (moved && was.leaderboard_channel_id && was.leaderboard_msg_id) {
+    const old = guild.channels.cache.get(was.leaderboard_channel_id);
+    if (old?.isTextBased()) {
+      const msg = await old.messages.fetch(was.leaderboard_msg_id).catch(() => null);
+      await msg?.delete().catch(() => {});
+    }
+    setConfig(guild.id, { leaderboard_msg_id: null });
+  }
+  if (!cfg.leaderboard_channel_id) return;
+
+  const channel = guild.channels.cache.get(cfg.leaderboard_channel_id);
+  if (!channel?.isSendable()) return 'Quorum cannot post in that channel';
+  // Still up where it was? Leave it: reposting on every save would walk the
+  // board down the channel one save at a time. And a fetch that fails for any
+  // reason other than "that message is gone" is not evidence that it isn't
+  // there - the tick will post one if it really has been deleted.
+  if (!moved && cfg.leaderboard_msg_id) {
+    try {
+      await channel.messages.fetch(cfg.leaderboard_msg_id);
+      return;
+    } catch (err) {
+      if (!messageGone(err)) return;
+    }
+  }
+
+  const posted = await channel.send(leaderboardMessage(guild.id)).catch(() => null);
+  setConfig(guild.id, { leaderboard_msg_id: posted?.id ?? null });
+  if (!posted) return 'Quorum cannot post in that channel';
 }
 
 /** Puts a panel at the bottom of a channel, taking any older one with it.
@@ -588,7 +743,7 @@ export function startWeb(client: Client, hooks: Hooks) {
             // the thread permissions for a match's own room, and View/Send/Embed/History so the
             // bot holds those itself. It cannot lean on @everyone for them: the
             // first thing a locked rank category does is take them away.
-            invite: `https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=${INVITE_PERMISSIONS}&guild_id=${g.id}&disable_guild_select=true`,
+            invite: inviteUrl(g.id),
           })),
         });
         return;
@@ -654,9 +809,18 @@ export function startWeb(client: Client, hooks: Hooks) {
 
       if (!action && req.method === 'GET') {
         const players = playersInGuild(guildId);
+        const ranks = getRanks(guildId);
         await refreshVoltaic(players);
         json(res, 200, {
           config: getConfig(guildId),
+          // What Quorum cannot do here, and the link that fixes it. Sent on
+          // every load: a permission can be taken away long after the invite,
+          // and until now the only symptom was a bot that stopped working.
+          permissions: {
+            missing: missingPermissions(guild),
+            outranked: rolesOutOfReach(guild, ranks),
+            invite: inviteUrl(guildId),
+          },
           // Announcement channels count: a server that keeps one is exactly the
           // server that wants setup changes posted into it.
           channels: guild.channels.cache
@@ -667,7 +831,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           roles: guild.roles.cache
             .filter((r) => r.id !== guild.id && !r.managed)
             .map((r) => ({ id: r.id, name: r.name })),
-          ranks: getRanks(guildId),
+          ranks,
           scenarios: getScenarios(guildId),
           players: players.map((p) => ({
             ...p,
@@ -761,7 +925,8 @@ export function startWeb(client: Client, hooks: Hooks) {
           if (!Number.isFinite(n) || n <= 0) return 0;
           return Math.min(Math.max(n, 5), 1440);
         };
-        const wasAnnounce = getConfig(guildId).announce_channel_id;
+        const before = getConfig(guildId);
+        const wasAnnounce = before.announce_channel_id;
         setConfig(guildId, {
           // Naming no category keeps the one already in use, and only falls
           // through to null - "make one" - when there is none, or when the one
@@ -772,6 +937,11 @@ export function startWeb(client: Client, hooks: Hooks) {
             category(body.category_id) ?? category(getConfig(guildId).split_category_id),
           ping_role_id: role(body.ping_role_id),
           announce_channel_id: postable(body.announce_channel_id),
+          // Null is "everyone", which is a real answer here rather than a
+          // missing one - so a deleted or foreign role lands as everyone, not
+          // as a category nobody but the bot can open.
+          visible_role_id: role(body.visible_role_id),
+          leaderboard_channel_id: postable(body.leaderboard_channel_id),
           // 0 is off and null is "use the default", so both have to survive the
           // trip. Anything else is clamped: a one-minute window bins calls
           // before anyone sees them, and a one-year one is off with extra steps.
@@ -785,12 +955,31 @@ export function startWeb(client: Client, hooks: Hooks) {
         ) {
           await announce(guild, session.user.id, ['This channel now gets every setup change.']);
         }
+        // Taking a lock off again. Only this save knows the category was locked
+        // and by which role, so only this save can undo it: the role's overwrite
+        // goes, and @everyone's View Channel is UNSET rather than allowed, which
+        // puts the category back to whatever the server's own default is instead
+        // of publishing one that may never have been open in the first place.
+        const nowViewer = getConfig(guildId).visible_role_id;
+        const cat = before.split_category_id
+          ? guild.channels.cache.get(before.split_category_id)
+          : null;
+        if (before.visible_role_id && before.visible_role_id !== nowViewer && cat &&
+            'permissionOverwrites' in cat) {
+          await cat.permissionOverwrites.delete(before.visible_role_id).catch(() => {});
+          if (!nowViewer) {
+            await cat.permissionOverwrites
+              .edit(guild.roles.everyone.id, { ViewChannel: null })
+              .catch(() => {});
+          }
+        }
+        const board = await syncLeaderboardMessage(guild, before);
         // A different category means the channels move into it, so the save has
         // to reach Discord and not just the database. Awaited, so a failure is
         // reported rather than swallowed into a background promise, and so two
         // saves in a row cannot have their syncs interleave.
         const built = await syncRankChannelsToDiscord(guild, getRanks(guildId), []);
-        json(res, 200, { ...getConfig(guildId), error: built.error });
+        json(res, 200, { ...getConfig(guildId), error: built.error ?? board });
         return;
       }
 
@@ -993,6 +1182,17 @@ export function startWeb(client: Client, hooks: Hooks) {
           // Calls first. Cancelling one deletes its message and its thread,
           // neither of which the rank sweep below knows anything about.
           for (const open of listOpenMatches(guildId)) await hooks.cancelMatch(open);
+          // The leaderboard sits in one of the server's OWN channels, so it is
+          // not carried off by the category sweep below - and a board left
+          // behind is a ladder frozen at the moment the bot left.
+          const board = getConfig(guildId);
+          if (board.leaderboard_channel_id && board.leaderboard_msg_id) {
+            const where = guild.channels.cache.get(board.leaderboard_channel_id);
+            if (where?.isTextBased()) {
+              const msg = await where.messages.fetch(board.leaderboard_msg_id).catch(() => null);
+              await msg?.delete().catch(() => {});
+            }
+          }
           const ranks = getRanks(guildId);
           await syncRankChannelsToDiscord(guild, [], ranks, true);
           await syncRankRolesToDiscord(guild, [], ranks);
