@@ -50,6 +50,7 @@ import {
 } from './db.js';
 import {
   leaderboardMessage,
+  rankLabel,
   liveEmbed,
   messageGone,
   noContestEmbed,
@@ -885,11 +886,15 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
       return;
     }
     const games = p.wins + p.losses;
+    const band = rankLabel(i.guildId!, target.id, p.elo, i.guild);
     const embed = new EmbedBuilder()
       .setTitle(p.kovaaks_username)
       .setColor(0x5865f2)
       .setDescription(
-        `**${p.elo}** ${rankName(getRanks(i.guildId!), p.elo)}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
+        // One player, so the bracket can come off their role where Quorum has
+        // seen them - unlike the leaderboard, there is no other row to be
+        // inconsistent with.
+        `**${p.elo}**${band ? ` ${band}` : ''}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
       );
 
     const recent = recentMatches(target.id, i.guildId!);

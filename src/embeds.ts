@@ -1,8 +1,15 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  type Guild,
+} from 'discord.js';
 import { FORMATS, PANEL_FORMATS, ROUNDS, RUNS_PER_SCENARIO, type Format } from './config.js';
 import {
   getFormat,
   getPlayer,
+  getRankMode,
   getRanks,
   guildStats,
   ladderSize,
@@ -11,7 +18,7 @@ import {
   type MatchPlayer,
   type Player,
 } from './db.js';
-import { rankFor, rankName } from './rating.js';
+import { rankFor, rankForRoles, rankName } from './rating.js';
 
 const BLURPLE = 0x5865f2;
 const GREEN = 0x57f287;
@@ -171,6 +178,24 @@ export function panelMessage(formats: readonly Format[] = PANEL_FORMATS, guildId
   };
 }
 
+/** What to call someone's rank.
+ *
+ *  With staff-owned brackets the ROLE is the bracket, so a name read off Elo
+ *  would print one nobody is in - a Champion who has had a bad month is still
+ *  Champion. Quorum runs on the Guilds intent alone and so only knows the roles
+ *  of people it has actually seen; where it cannot see them it says nothing,
+ *  because a rating on its own beats a confident wrong bracket.
+ *
+ *  Pass the guild only where every row can be resolved the same way. The
+ *  leaderboard deliberately does not: half a board labelled and half not reads
+ *  as a bug. */
+export function rankLabel(guildId: string, discordId: string, elo: number, guild?: Guild | null) {
+  const ranks = getRanks(guildId);
+  if (getRankMode(guildId) !== 'manual') return rankName(ranks, elo);
+  const held = guild?.members.cache.get(discordId)?.roles.cache;
+  return held ? (rankForRoles(ranks, held.map((r) => r.id) as string[])?.name ?? '') : '';
+}
+
 /** Discord's "Unknown Message" (10008) - the one refusal that means a message
  *  really is gone, rather than that we could not reach it just now.
  *
@@ -199,7 +224,6 @@ export function leaderboardMessage(guildId: string, page = 0) {
   // the last three players to leave the ladder.
   const at = Math.min(Math.max(page, 0), pages - 1);
   const rows = leaderboard(guildId, LADDER_PAGE, at * LADDER_PAGE);
-  const ranks = getRanks(guildId);
 
   const line = (p: Player, n: number) => {
     const games = p.wins + p.losses;
@@ -207,7 +231,8 @@ export function leaderboardMessage(guildId: string, page = 0) {
     // The top three are the only rows worth a marker - a medal beside eleventh
     // place is decoration, and it pushes the name out of line with the rest.
     const place = ['🥇', '🥈', '🥉'][n] ?? `**${n + 1}.**`;
-    return `${place} <@${p.discord_id}> - **${p.elo}** ${rankName(ranks, p.elo)} · ` +
+    const band = rankLabel(guildId, p.discord_id, p.elo);
+    return `${place} <@${p.discord_id}> - **${p.elo}**${band ? ` ${band}` : ''} · ` +
       `${p.wins}W ${p.losses}L${rate}`;
   };
 
