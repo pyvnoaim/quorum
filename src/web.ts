@@ -45,6 +45,7 @@ import {
   setVoltaic,
   setRanks,
   setScenarios,
+  resetRatings,
   seedPlayer,
   type GuildConfig,
   type Match,
@@ -1050,6 +1051,20 @@ export function startWeb(client: Client, hooks: Hooks) {
               ],
         );
         json(res, 200, { mode });
+        return;
+      }
+
+      // A season reset: the standings start over, the history does not.
+      if (action === '/reset' && req.method === 'POST') {
+        const wiped = resetRatings(guildId);
+        // Auto mode: everyone is back at the starting rating, so their rank
+        // roles have to follow or the ladder says one thing and Discord another.
+        // In manual mode this call knows to do nothing.
+        if (wiped.length) await hooks.syncRankRoles(guildId, wiped);
+        await announce(guild, session.user.id, [
+          `Ratings reset - ${wiped.length} player${wiped.length === 1 ? '' : 's'} back to the starting rating`,
+        ]);
+        json(res, 200, { reset: wiped.length });
         return;
       }
 

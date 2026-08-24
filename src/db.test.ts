@@ -13,6 +13,7 @@ const {
   getScenarios,
   getRankMode,
   poolFor,
+  resetRatings,
   getConfig,
   getFormat,
   getRankSpread,
@@ -308,6 +309,26 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   ).run('d1', 0, 1, 1000, 1016);
   deleteMatch(201);
   assert.equal(getPlayer('d1')!.wins, 0, 'wins floor at zero');
+}
+
+// A season reset: standings start over, the matches that made them do not.
+{
+  db.prepare(
+    "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at) values (900,'gr','c','r1','1v1','done',7000)",
+  ).run();
+  ensurePlayer('r1', 'R1');
+  db.prepare(
+    'insert into match_player (match_id, discord_id, team, placing) values (900,?,0,1)',
+  ).run('r1');
+  db.prepare("update player set elo = 1400, wins = 9, losses = 2, seeded_from = 'Legend' where discord_id = 'r1'").run();
+
+  assert.deepEqual(resetRatings('gr'), ['r1'], 'everyone this server has played');
+  const back = getPlayer('r1')!;
+  assert.equal(back.elo, 1050, 'back to the starting rating');
+  assert.equal(back.wins + back.losses, 0, 'and unplayed again');
+  assert.equal(back.seeded_from, null, 'so a starting rank can be set afresh');
+  assert.ok(getMatch(900), 'the match itself stays - it is the record, not the rating');
+  assert.deepEqual(resetRatings('gone'), [], 'a server with nobody resets nobody');
 }
 
 console.log('db ok');

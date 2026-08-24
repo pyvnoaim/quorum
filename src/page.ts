@@ -483,6 +483,9 @@ export const PAGE = /* html */ `<!doctype html>
   .sel-btn[aria-expanded="true"] svg { transform: rotate(180deg); }
   .sel-list {
     position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0;
+    /* the button can be narrower than its longest option, and a table cell does
+       not wrap: without this the list is clipped by the edge of the pane */
+    min-width: max-content;
     max-height: 260px; overflow-y: auto; list-style: none;
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px;
     box-shadow: 0 12px 32px rgb(0 0 0 / .45);
@@ -493,6 +496,8 @@ export const PAGE = /* html */ `<!doctype html>
   }
   .sel-list li:hover, .sel-list li:focus { color: var(--fg); background: var(--bg); }
   .sel-list li[aria-selected="true"] { color: var(--fg); }
+  /* last column of a table: open inwards, or it opens off the right edge */
+  td .sel-list { left: auto; right: 0; }
   /* the dialog that replaced prompt() */
   dialog {
     /* the reset's zeroed margin kills the UA's margin:auto, which is the only
@@ -1476,6 +1481,17 @@ async function renderGuild(guild) {
       <button class="btn solid" id="savetiers">Save starting ranks</button>
       <span class="status" id="tierstatus"></span>
     </div>
+
+    <div class="cat danger" style="margin-top:32px">
+      <div class="cat-top"><strong>Reset ratings</strong></div>
+      <p class="muted" style="margin:0 0 12px">Every rating back to the start, and everyone unplayed again so
+      starting ranks can be handed out afresh. Matches already played stay in History - a new season does not
+      undo what happened, it starts the standings over. This cannot be undone.</p>
+      <div class="bar">
+        <span class="status" id="resetstatus"></span>
+        <button class="btn bad" id="resetbtn">Reset ratings</button>
+      </div>
+    </div>
     </section>\`;
 
   // One pane visible at a time, remembered in the hash so a pane is linkable
@@ -2033,7 +2049,7 @@ async function renderGuild(guild) {
         <td style="white-space:nowrap">\${seedMode !== 'staff'
           ? \`<span class="hint">\${p.wins + p.losses ? '' : h(p.seeded_from ?? 'flat')}</span>\`
           : p.wins + p.losses
-            ? '<span class="hint" title="they have played, so their record is their rating now">played</span>'
+            ? \`<span class="hint" title="their record is their rating now - a starting rank only applies before the first match">seeded \${h(p.seeded_from ?? 'flat')}</span>\`
             : selectField('sd-' + p.discord_id, data.ranks.map((r) => r.name),
                 seeds[p.discord_id] ?? p.seeded_from ?? '',
                 \`data-id="\${h(p.discord_id)}"\`)}</td>
@@ -2060,6 +2076,26 @@ async function renderGuild(guild) {
     el.textContent = res.ok ? 'Saved' : 'Save failed';
   };
 
+  // Same dialog as removing the bot: no undo, so it spells out what goes and
+  // asks for the server's name before it will do it.
+  document.getElementById('resetbtn').onclick = async () => {
+    const el = document.getElementById('resetstatus');
+    const ok = await confirmDanger({
+      title: \`Reset every rating in \${guild.name}?\`,
+      body: 'Every player goes back to the starting rating with no wins or losses, and can be given a starting rank again. Matches already played stay in History.',
+      name: guild.name,
+      confirm: 'Reset ratings',
+    });
+    if (!ok) return;
+    el.textContent = 'Resetting…';
+    const res = await fetch(\`/api/guild/\${guild.id}/reset\`, { method: 'POST' });
+    if (!res.ok) {
+      el.textContent = (await res.json().catch(() => ({}))).error ?? 'Failed';
+      return;
+    }
+    location.reload();
+  };
+
   document.getElementById('save').onclick = async () => {
     const body = {
       // off is 0, not null - null would hand the server back the default
@@ -2084,7 +2120,7 @@ async function renderGuild(guild) {
     // This deletes roles and channels in a live Discord server and there is no
     // undo, so the dialog spells out what goes and asks for the name.
     const ok = await confirmDanger({
-      title: \`Remove Quorum from \${h(guild.name)}?\`,
+      title: \`Remove Quorum from \${guild.name}?\`,
       body: purge
         ? "Its rank roles, categories and channels are deleted with it, along with this server's settings. This cannot be undone."
         : 'It leaves the server. The roles and channels it made stay behind, and it will not be able to delete them later.',

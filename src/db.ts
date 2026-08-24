@@ -629,6 +629,23 @@ export function listOpenMatches(guildId: string) {
  *  through seedPlayer rewrite, the record of players who have never set foot
  *  in it. Anyone linked but not yet queued here is reachable via `/scrim seed`,
  *  which Discord already scopes to the server it was run in. */
+/** Season reset: every rating in this server back to the start, and everyone
+ *  unplayed again so the seeding rules apply to them afresh.
+ *
+ *  The matches stay. They are the record of what happened, which a new season
+ *  does not undo - only the standings start over. Returns who was reset, so the
+ *  caller can put their rank roles back where the new ratings say. */
+export function resetRatings(guildId: string): string[] {
+  const ids = playersInGuild(guildId).map((p) => p.discord_id);
+  const stmt = db.prepare(
+    'update player set elo = ?, wins = 0, losses = 0, seeded_from = null where discord_id = ?',
+  );
+  tx(() => {
+    for (const id of ids) stmt.run(BASE_ELO, id);
+  });
+  return ids;
+}
+
 export function playersInGuild(guildId: string) {
   return db
     .prepare(
