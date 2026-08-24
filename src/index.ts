@@ -760,6 +760,8 @@ async function refreshPanels() {
 /** What each server's board last said, same trick as the panels above: the
  *  ladder only moves when a match ends, so a quiet server costs no requests. */
 const ladderText = new Map<string, string>();
+/** Ticks since boot, so one pass in ten checks the board is still there. */
+let ladderPass = 0;
 
 /** Keeps the standing leaderboard standing.
  *
@@ -767,6 +769,12 @@ const ladderText = new Map<string, string>();
  *  Messages can delete it, and a leaderboard channel with no leaderboard in it
  *  is the one state this feature must not settle into. */
 async function refreshLeaderboards() {
+  // The memo says the TEXT has not changed, not that the message is still
+  // there - so a board deleted on a server where nothing else is happening
+  // would never come back. Every tenth pass looks anyway.
+  // ponytail: a counter, not an event: messageDelete only fires for messages
+  // discord.js happens to have cached, which a board posted last week is not.
+  const look = ladderPass++ % 10 === 0;
   for (const [guildId] of client.guilds.cache) {
     const cfg = getConfig(guildId);
     if (!cfg.leaderboard_channel_id) continue;
@@ -774,7 +782,8 @@ async function refreshLeaderboards() {
     // Footer as well as body: the page count and the number of ranked players
     // live down there, and both move without a single row changing.
     const next = `${body.embeds[0].data.description ?? ''}|${body.embeds[0].data.footer?.text ?? ''}`;
-    if (ladderText.get(guildId) === next) continue;
+    const unchanged = ladderText.get(guildId) === next;
+    if (unchanged && !look) continue;
 
     const channel = await client.channels.fetch(cfg.leaderboard_channel_id).catch(() => null);
     if (!channel?.isTextBased() || !channel.isSendable()) continue;
@@ -790,6 +799,9 @@ async function refreshLeaderboards() {
       }
     }
     if (msg) {
+      // Still up and still saying the right thing: this pass only came here to
+      // check it had not been deleted, so it costs one fetch and no edit.
+      if (unchanged) continue;
       // Remembered as posted only if it actually went through: a channel that
       // refuses one edit - permissions changed under us, Discord having a
       // moment - should be tried again next tick, not written off as current.
