@@ -27,6 +27,7 @@ import {
   getRanks,
   rankChannels,
   getScenarios,
+  getRankMode,
   guildStats,
   leaderboard,
   listOpenMatches,
@@ -847,6 +848,7 @@ export function startWeb(client: Client, hooks: Hooks) {
             .filter((c) => c.type === ChannelType.GuildCategory)
             .map((c) => ({ id: c.id, name: c.name })),
           seedMode: getSeedMode(guildId),
+          rankMode: getRankMode(guildId),
           format: getFormat(guildId),
           seedModes: SEED_MODES,
           stats: guildStats(guildId),
@@ -1004,6 +1006,13 @@ export function startWeb(client: Client, hooks: Hooks) {
           json(res, 400, { error: 'a ladder tops out at 50 ranks' });
           return;
         }
+        // The thresholds are what order the ladder, in both modes - two ranks
+        // sharing one leaves "the bracket above" undefined, and with it the
+        // queue gate and every channel's permissions.
+        if (new Set(clean.map((r: { min_elo: number }) => r.min_elo)).size !== clean.length) {
+          json(res, 400, { error: 'two ranks cannot share a threshold - it is what orders them' });
+          return;
+        }
         const wasLadder = getRanks(guildId).map((r) => `${r.name} (${r.min_elo})`);
         const { ranks, orphaned } = setRanks(guildId, clean);
         const ladderDiff = listDiff(wasLadder, ranks.map((r) => `${r.name} (${r.min_elo})`));
@@ -1016,6 +1025,31 @@ export function startWeb(client: Client, hooks: Hooks) {
         await syncRankRolesToDiscord(guild, ranks, orphaned);
         const built = await syncRankChannelsToDiscord(guild, getRanks(guildId), orphaned);
         json(res, 200, { ranks: getRanks(guildId), error: built.error });
+        return;
+      }
+
+      // Who owns the division roles. Manual hands them to staff: the bot stops
+      // promoting and demoting, and a call carries the bracket it was opened in.
+      if (action === '/rankmode' && req.method === 'POST') {
+        const mode = String((await readJson(req)).mode ?? '');
+        if (mode !== 'auto' && mode !== 'manual') {
+          json(res, 400, { error: 'unknown rank mode' });
+          return;
+        }
+        const wasMode = getRankMode(guildId);
+        setConfig(guildId, { rank_mode: mode });
+        await announce(
+          guild,
+          session.user.id,
+          wasMode === mode
+            ? []
+            : [
+                mode === 'manual'
+                  ? 'Divisions are now handed out by staff - Quorum no longer moves anyone'
+                  : 'Quorum now assigns division roles off Elo again',
+              ],
+        );
+        json(res, 200, { mode });
         return;
       }
 
@@ -1101,7 +1135,8 @@ export function startWeb(client: Client, hooks: Hooks) {
               : isMain(r.main)
                 ? r.main
                 : MAIN_CATEGORIES[0];
-            return { category, name: String(r.name ?? '').trim().slice(0, 120), main };
+            const min_elo = Math.max(0, Math.trunc(Number(r.min_elo)) || 0);
+            return { category, name: String(r.name ?? '').trim().slice(0, 120), main, min_elo };
           })
           .filter((r: { category: string; name: string }) => r.category && r.name);
         // An empty pool would start matches with nothing to play, so it is

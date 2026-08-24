@@ -13,6 +13,19 @@ export function rankFor<T extends Band>(ranks: T[], elo: number): T | undefined 
   return [...ranks].sort((a, b) => b.min_elo - a.min_elo).find((r) => elo >= r.min_elo);
 }
 
+/** The band a member's DIVISION ROLE puts them in - manual mode's answer to
+ *  rankFor(). Highest wins, so an old role left on someone can't demote them.
+ *  Undefined means staff have not placed them yet, which is not a queue. */
+export function rankForRoles<T extends Band & { discord_role_id: string | null }>(
+  ranks: T[],
+  held: Iterable<string>,
+): T | undefined {
+  const have = new Set(held);
+  return [...ranks]
+    .sort((a, b) => b.min_elo - a.min_elo)
+    .find((r) => r.discord_role_id && have.has(r.discord_role_id));
+}
+
 export function rankName(ranks: Band[], elo: number) {
   return rankFor(ranks, elo)?.name ?? '';
 }

@@ -36,6 +36,9 @@ import {
   getSeedMode,
   getRankSpread,
   getRanks,
+  getRankMode,
+  poolFor,
+  rankChannels,
   getScenarios,
   headToHead,
   matchPlayers,
@@ -68,6 +71,7 @@ import {
   pickTurn,
   placings,
   rankFor,
+  rankForRoles,
   rankName,
   scorable,
   type PickPhase,
@@ -117,10 +121,29 @@ const command = new SlashCommandBuilder()
       ),
   );
 
+/** The rank a call belongs to: its division in manual mode, otherwise the rank
+ *  that owns the channel it was opened in. Undefined in a shared channel on
+ *  automatic ranks, where nothing but the players decides the level. */
+function callRank(match: Match) {
+  const ranks = getRanks(match.guild_id);
+  return (
+    (match.division_role_id &&
+      ranks.find((r) => r.discord_role_id === match.division_role_id)) ||
+    ranks.find((r) => rankChannels(r).queue === match.channel_id)
+  );
+}
+
+/** The slice of the pool this match plays from. A bracket draws what is filed
+ *  at or below it; with no bracket to go on, the host's rating stands in. */
+function matchPool(match: Match) {
+  const floor = callRank(match)?.min_elo ?? getPlayer(match.host_id)?.elo ?? 0;
+  return poolFor(getScenarios(match.guild_id), floor);
+}
+
 /** One scenario per main, cycling, so a match is never three of the same
  *  thing. Falls back to whatever is left if the pool is smaller than ROUNDS. */
-function rollScenarios(guildId: string, want = ROUNDS) {
-  const pool = getScenarios(guildId);
+function rollScenarios(match: Match, want = ROUNDS) {
+  const pool = matchPool(match);
   // Only mains a server has actually put scenarios under: an empty Tracking
   // would otherwise take a round and roll nothing into it.
   const cats = MAIN_CATEGORIES.filter((m) => pool.some((s) => s.main === m)).map((m) =>
@@ -145,8 +168,8 @@ const shuffle = <T>(items: T[]) => [...items].sort(() => Math.random() - 0.5);
  *
  *  Only mains the pool actually has scenarios under, and a server with fewer of
  *  those than ROUNDS sees one come round again rather than no match at all. */
-function rollCategories(guildId: string, want = ROUNDS) {
-  const pool = getScenarios(guildId);
+function rollCategories(match: Match, want = ROUNDS) {
+  const pool = matchPool(match);
   const all = shuffle(MAIN_CATEGORIES.filter((m) => pool.some((s) => s.main === m)));
   if (!all.length) return [];
   return Array.from({ length: want }, (_, i) => all[i % all.length]);
@@ -156,8 +179,8 @@ function rollCategories(guildId: string, want = ROUNDS) {
  *  filed under it, whichever subcategory it sits in. A main with nothing left to
  *  offer falls back to the whole pool: a thin main must not be able to leave a
  *  match with no scenario to play. */
-function shortlist(guildId: string, main: string, want: number, taken: string[]) {
-  const pool = getScenarios(guildId).filter((s) => !taken.includes(s.name));
+function shortlist(match: Match, main: string, want: number, taken: string[]) {
+  const pool = matchPool(match).filter((s) => !taken.includes(s.name));
   const mine = pool.filter((s) => s.main === main);
   return shuffle((mine.length ? mine : pool).map((s) => s.name)).slice(0, want);
 }
@@ -327,13 +350,13 @@ async function startMatch(guild: Guild, match: Match) {
   // nobody to alternate with - either way the match just plays a plain roll
   // rather than stalling on setup.
   const fmt = getFormat(guild.id);
-  const cats = rollCategories(guild.id, fmt.rounds);
-  const first = shortlist(guild.id, cats[0] ?? '', fmt.pickPool, []);
+  const cats = rollCategories(match, fmt.rounds);
+  const first = shortlist(match, cats[0] ?? '', fmt.pickPool, []);
   // sides from the shuffle above, not from `rows` - those were read before the
   // teams were written, so every one of them still says 0.
   const sides = Math.ceil(shuffled.length / teamSize);
   if (first.length < 2 || sides !== 2) {
-    return moveIntoThread(beginPlay(getMatch(match.id)!, rollScenarios(guild.id, fmt.rounds)));
+    return moveIntoThread(beginPlay(getMatch(match.id)!, rollScenarios(match, fmt.rounds)));
   }
   const phase: PickPhase = { picked: [], cats, pool: first, size: first.length };
   // ban_pool is the record of everything that was on the table; the dashboard
@@ -395,7 +418,7 @@ function applyPick(match: Match, index: number) {
   const next = advancePick(
     phase,
     index,
-    (category, want, taken) => shortlist(match.guild_id, category, want, taken),
+    (category, want, taken) => shortlist(match, category, want, taken),
     fmt.rounds,
     fmt.pickPool,
   );
@@ -552,6 +575,10 @@ async function finishMatch(match: Match) {
  *  they've earned. Never roles.set([rankRole]) - that would strip everything
  *  else they hold. */
 async function syncRankRoles(guildId: string, discordIds: string[]) {
+  // Manual mode: staff own the brackets. Ratings still move underneath - they
+  // are the evidence a promotion is made on - but nothing here moves a role,
+  // so one bad night can't drop somebody out of the bracket they were put in.
+  if (getRankMode(guildId) === 'manual') return;
 
   const guild = client.guilds.cache.get(guildId);
   if (!guild) return;
@@ -917,7 +944,14 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
     // channel is private to its role, so a seeded player holding none would be
     // seeded into a queue they cannot see.
     await syncRankRoles(i.guildId!, [target.id]);
-    await i.reply(`<@${target.id}> starts at **${rank.min_elo}** (${rank.name}).`);
+    // In manual mode that call deliberately did nothing - the roles are staff's,
+    // and a seed that quietly hands one out would be the bot moving people again.
+    await i.reply(
+      `<@${target.id}> starts at **${rank.min_elo}** (${rank.name}).` +
+        (getRankMode(i.guildId!) === 'manual'
+          ? ` Give them the ${rank.name} role yourself - divisions are staff-owned here.`
+          : ''),
+    );
     return;
   }
 
@@ -1030,12 +1064,28 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
     }
 
     if (match.division_role_id) {
-      // Manual mode: one role, one queue. Nothing to compare across the lobby,
-      // because the call itself carries the division.
+      // Manual mode: the call carries its division, so the gate is roles all
+      // the way down - nothing here reads Elo. The spread still applies, in
+      // ladder positions: at 1 the bracket either side may join too.
+      const spread = getRankSpread(match.guild_id)[match.format];
+      const home = ranks.find((r) => r.discord_role_id === match.division_role_id);
+      // A division whose rank has since left the ladder gets the role it was
+      // opened with and nothing else. Reaching bands around a floor of 0 would
+      // open a Champion call to the bottom of the ladder, which is the one way
+      // this gate must never fail.
+      const admits = new Set(
+        home
+          ? bandsInReach(ranks, home.min_elo, spread)
+              .map((r) => r.discord_role_id)
+              .filter((id): id is string => !!id)
+          : [match.division_role_id],
+      );
       const held = i.member?.roles && 'cache' in i.member.roles ? i.member.roles.cache : null;
-      if (!held?.has(match.division_role_id)) {
+      if (!held?.some((r) => admits.has(r.id))) {
         await i.reply({
-          content: `That queue is <@&${match.division_role_id}> only.`,
+          content: `That queue is <@&${match.division_role_id}>${
+            spread ? ` and the ${spread === 1 ? 'bracket' : `${spread} brackets`} either side` : ''
+          } only.`,
           flags: MessageFlags.Ephemeral,
           allowedMentions: { parse: [] },
         });
@@ -1145,12 +1195,39 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   );
 
   const ranks = getRanks(i.guildId);
-  const match = createCall(i.guildId, i.channelId, i.user.id, format);
+  // Manual mode: the call is opened INTO a bracket - the channel's, or the one
+  // the opener holds a role for in a shared channel. Nobody unplaced queues,
+  // because placing people is the whole point of staff-owned brackets.
+  const manual = getRankMode(i.guildId) === 'manual';
+  const held = i.member?.roles && 'cache' in i.member.roles ? i.member.roles.cache : null;
+  const division = manual
+    ? ranks.find((r) => rankChannels(r).queue === i.channelId) ??
+      rankForRoles(ranks, held?.map((r) => r.id) ?? [])
+    : undefined;
+  if (manual && !division?.discord_role_id) {
+    await i.reply({
+      content: 'You need a division role to queue - ask staff to place you.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const match = createCall(
+    i.guildId,
+    i.channelId,
+    i.user.id,
+    format,
+    division?.discord_role_id ?? null,
+  );
 
   // Ping the bands this queue would actually admit, rather than everyone. That
   // is the whole reason not to split the queue into a channel per rank: the
   // notification is targeted, the pool of takers stays whole.
-  const reach = bandsInReach(ranks, opener.elo, getRankSpread(i.guildId)[format])
+  //
+  // In split mode the CHANNEL is the rank, so the ping is centred on it and not
+  // on the opener's rating - a fresh Champion still sitting at base Elo opening
+  // in #champion must not summon the bottom of the ladder.
+  const owner = division ?? ranks.find((r) => rankChannels(r).queue === i.channelId);
+  const reach = bandsInReach(ranks, owner?.min_elo ?? opener.elo, getRankSpread(i.guildId)[format])
     .map((r) => r.discord_role_id)
     .filter((id): id is string => !!id);
   // the configured role is an opt-in "tell me about every call", on top.
@@ -1172,13 +1249,19 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
 
 /** A lobby row with its opener already seated. The panel and Rematch both land
  *  here, so a call is created in exactly one place. */
-function createCall(guildId: string, channelId: string, hostId: string, format: Format) {
+function createCall(
+  guildId: string,
+  channelId: string,
+  hostId: string,
+  format: Format,
+  divisionRoleId: string | null = null,
+) {
   const { lastInsertRowid } = db
     .prepare(
-      `insert into match (guild_id, channel_id, host_id, format, created_at)
-       values (?, ?, ?, ?, ?)`,
+      `insert into match (guild_id, channel_id, host_id, format, division_role_id, created_at)
+       values (?, ?, ?, ?, ?, ?)`,
     )
-    .run(guildId, channelId, hostId, format, Date.now());
+    .run(guildId, channelId, hostId, format, divisionRoleId, Date.now());
   const id = Number(lastInsertRowid);
   db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(id, hostId);
   return getMatch(id)!;
@@ -1207,7 +1290,13 @@ async function onRematch(i: import('discord.js').ButtonInteraction, old: Match) 
     });
     return;
   }
-  const match = createCall(old.guild_id, old.channel_id, i.user.id, old.format);
+  const match = createCall(
+    old.guild_id,
+    old.channel_id,
+    i.user.id,
+    old.format,
+    old.division_role_id,
+  );
   const others = was.map((r) => r.discord_id).filter((id) => id !== i.user.id);
   const msg = await channel.send({
     ...render(match),

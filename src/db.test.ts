@@ -11,6 +11,8 @@ const {
   matchPlayers,
   getRanks,
   getScenarios,
+  getRankMode,
+  poolFor,
   getConfig,
   getFormat,
   getRankSpread,
@@ -75,8 +77,8 @@ assert.ok(seededPool.every((s) => s.main === 'Switching'), 'the defaults file un
 // A subcategory keeps its own name and rolls up into the main it was filed
 // under - that is the whole two-level shape.
 const pool = setScenarios(G, [
-  { category: 'Clicking', name: '1w4ts', main: 'Clicking' },
-  { category: 'Dynamic', name: 'Pasu VP', main: 'Clicking' },
+  { category: 'Clicking', name: '1w4ts', main: 'Clicking', min_elo: 0 },
+  { category: 'Dynamic', name: 'Pasu VP', main: 'Clicking', min_elo: 1500 },
 ]);
 // node:sqlite hands back null-prototype rows, so compare the fields
 assert.equal(pool.length, 2);
@@ -84,6 +86,23 @@ assert.equal(pool[0].category, 'Clicking');
 assert.equal(pool[0].name, '1w4ts');
 assert.equal(pool[1].category, 'Dynamic', 'the sub keeps its own name');
 assert.equal(pool[1].main, 'Clicking', 'and rolls up into its main');
+
+// A category held back to a rank is only drawn by brackets at or above it.
+assert.deepEqual(poolFor(pool, 0).map((s) => s.name), ['1w4ts'], 'the low bracket skips it');
+assert.equal(poolFor(pool, 1500).length, 2, 'the high one draws both');
+// ...and a floor that would leave a bracket with nothing to play falls back to
+// the whole pool rather than to a match with no scenarios in it.
+assert.equal(
+  poolFor([{ category: 'Clicking', name: 'x', main: 'Clicking', min_elo: 1500 }], 0).length,
+  1,
+  'never an empty pool',
+);
+
+// Ranks are Quorum's to move until a server says otherwise.
+assert.equal(getRankMode(G), 'auto');
+setConfig(G, { rank_mode: 'manual' });
+assert.equal(getRankMode(G), 'manual', 'staff own the brackets once set');
+setConfig(G, { rank_mode: null });
 
 // Seeding sets the starting rating - but only for someone who hasn't played,
 // or it would wipe a real record.

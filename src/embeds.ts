@@ -23,9 +23,16 @@ const GREEN = 0x57f287;
  *  a job of its own, saying whether a match is running, scored, or neither.
  *  Falls back to blurple for a host who has somehow left the ladder. */
 function matchColor(match: Match) {
+  const ranks = getRanks(match.guild_id);
   const host = getPlayer(match.host_id);
-  const band = host ? rankFor(getRanks(match.guild_id), host.elo) : undefined;
-  const parsed = band ? Number.parseInt(band.color.slice(1), 16) : NaN;
+  // A call that carries its own division is painted in that bracket's colour:
+  // with staff-owned brackets the role is the truth, not the rating under it.
+  const band = match.division_role_id
+    ? ranks.find((r) => r.discord_role_id === match.division_role_id)
+    : host
+      ? rankFor(ranks, host.elo)
+      : undefined;
+  const parsed = band?.color ? Number.parseInt(band.color.slice(1), 16) : NaN;
   return Number.isFinite(parsed) ? parsed : BLURPLE;
 }
 

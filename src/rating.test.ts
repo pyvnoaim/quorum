@@ -5,6 +5,7 @@ import {
   advancePick,
   allRunsUsed,
   bandsInReach,
+  rankForRoles,
   pickTurn,
   canPlay,
   eloDeltas,
@@ -257,3 +258,13 @@ assert.deepEqual(bandsInReach([], 1250, 1), [], 'no ladder, nothing to ping');
 }
 
 console.log('rating ok');
+
+// Manual mode reads the bracket off the roles someone holds, highest first, so
+// a stale lower role left on them cannot demote them.
+const withRoles = [
+  { name: 'Champion', min_elo: 1400, discord_role_id: 'r-champ' },
+  { name: 'Novice', min_elo: 0, discord_role_id: 'r-nov' },
+];
+assert.equal(rankForRoles(withRoles, ['r-nov', 'r-champ'])!.name, 'Champion');
+assert.equal(rankForRoles(withRoles, ['r-nov'])!.name, 'Novice');
+assert.equal(rankForRoles(withRoles, ['other']), undefined, 'unplaced is not a bracket');

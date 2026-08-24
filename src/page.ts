@@ -1446,7 +1446,8 @@ async function renderGuild(guild) {
 
     <section id="ranks">
     <h2>Ranks</h2>
-    <p class="muted">Each rank is a Discord role, named and coloured to match. Saving creates them, and Quorum moves people between them as ratings cross the floors.</p>
+    <p class="muted">Each rank is a Discord role, named and coloured to match. Saving creates them. Whether Quorum then moves anyone between them is the choice below - and either way the floors are what order the ladder, so no two may share one.</p>
+    <div class="cat" id="rankmodebox"></div>
     <div class="cat" id="modebox"></div>
     <table><tbody id="ranklist"></tbody></table>
     <div class="bar">
@@ -1458,7 +1459,7 @@ async function renderGuild(guild) {
 
     <section id="pool">
     <h2>Scenario pool</h2>
-    <p class="muted">A match rolls one scenario per main - Clicking, Tracking, Switching. Add subcategories to organise a main's pool; they file under it rather than taking a round of their own. Search pulls real names off KovaaK's, so a lookup can't miss on a typo.</p>
+    <p class="muted">A match rolls one scenario per main - Clicking, Tracking, Switching. Add subcategories to organise a main's pool; they file under it rather than taking a round of their own. Search pulls real names off KovaaK's, so a lookup can't miss on a typo. A category can be held back to one rank and up, so a bracket only ever draws what suits it.</p>
     <div id="poolbox"></div>
     <div class="bar">
       <button class="btn" id="addcat">Add subcategory</button>
@@ -1743,6 +1744,41 @@ async function renderGuild(guild) {
     ['staff', 'Staff', 'You pick a rank before their first match.'],
     ['voltaic', 'Voltaic S5', 'From their S5 standing, or flat without one.'],
   ];
+  let rankMode = data.rankMode ?? 'auto';
+  const RANK_OPTS = [
+    ['auto', 'Quorum', 'Ratings decide the rank, and the role moves with them.'],
+    ['manual', 'Staff', 'You hand out the division roles. Quorum never adds or removes one, and a queue is gated on the role rather than on Elo. Ratings still move, as the evidence you promote on.'],
+  ];
+  const drawRankMode = () => {
+    document.getElementById('rankmodebox').innerHTML = \`
+      <div class="cat-top">
+        <strong>Who moves people</strong>
+        <span class="status" id="rankmodestatus" style="margin-left:auto"></span>
+      </div>
+      <div class="opts" id="rankseg" role="radiogroup" aria-label="Who moves people">\${
+        RANK_OPTS.map(([m, name, desc]) => \`
+        <button type="button" role="radio" data-m="\${m}" aria-checked="\${m === rankMode}">
+          <span class="mark"></span>
+          <span class="oname">\${name}</span>
+          <span class="odesc">\${desc}</span>
+        </button>\`).join('')}</div>\`;
+
+    document.getElementById('rankseg').onclick = async (e) => {
+      const b = e.target.closest('[data-m]');
+      if (!b || b.dataset.m === rankMode) return;
+      const el = document.getElementById('rankmodestatus');
+      el.textContent = 'Saving…';
+      const res = await fetch(\`/api/guild/\${guild.id}/rankmode\`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode: b.dataset.m }),
+      });
+      if (!res.ok) { el.textContent = 'Failed'; return; }
+      rankMode = (await res.json()).mode;
+      drawRankMode();
+    };
+  };
+  drawRankMode();
+
   const drawMode = () => {
     const offered = data.seedModes ?? ['flat'];
     document.getElementById('modebox').innerHTML = \`
@@ -1827,12 +1863,29 @@ async function renderGuild(guild) {
   // something is put in it - the saved shape is a flat (category, name, main) list.
   const MAINS = data.mains ?? ['Clicking', 'Tracking', 'Switching'];
   let pool = data.scenarios.map((s) => ({ ...s }));
-  let cats = MAINS.map((m) => ({ name: m, main: m }));
+  let cats = MAINS.map((m) => ({ name: m, main: m, min_elo: 0 }));
   for (const s of pool) {
     if (!cats.some((c) => c.name === s.category)) {
-      cats.push({ name: s.category, main: MAINS.includes(s.main) ? s.main : MAINS[0] });
+      cats.push({
+        name: s.category,
+        main: MAINS.includes(s.main) ? s.main : MAINS[0],
+        min_elo: Number(s.min_elo) || 0,
+      });
     }
   }
+  // A category is offered from one rank up, and its rows carry that floor the
+  // same way they carry the main. \`All ranks\` is the floor of the ladder, so
+  // the bottom rank is not offered twice.
+  for (const c of cats) {
+    const mine = pool.filter((s) => s.category === c.name);
+    if (mine.length) c.min_elo = Number(mine[0].min_elo) || 0;
+  }
+  const FLOORS = [{ id: '0', name: 'All ranks' }].concat(
+    data.ranks
+      .filter((r) => Number(r.min_elo) > 0)
+      .sort((a, b) => a.min_elo - b.min_elo)
+      .map((r) => ({ id: String(r.min_elo), name: r.name + ' and up' })),
+  );
   let openCat = null;
   const poolBox = document.getElementById('poolbox');
 
@@ -1849,6 +1902,8 @@ async function renderGuild(guild) {
               : \`<span class="hint">rolls into</span>\${
                   selectField('catmain-' + ci, MAINS, cat.main, \`data-ci="\${ci}"\`)}\`}
             <span class="hint">\${rows.length} scenario\${rows.length === 1 ? '' : 's'}</span>
+            <span class="hint">offered to</span>\${
+              selectField('catfloor-' + ci, FLOORS, String(cat.min_elo), \`data-fi="\${ci}"\`)}
             \${isMainCat
               ? ''
               : \`<button class="icon-btn" data-delcat="\${h(cat.name)}" title="Remove category">\${icon('x')}</button>\`}
@@ -1877,6 +1932,12 @@ async function renderGuild(guild) {
       cat.main = el.dataset.value;
       // the rows carry the main, so re-filing the category re-files its pool
       for (const s of pool) if (s.category === cat.name) s.main = cat.main;
+      drawPool();
+    }));
+    poolBox.querySelectorAll('[data-fi]').forEach((el) => (el.onchange = () => {
+      const cat = cats[Number(el.dataset.fi)];
+      cat.min_elo = Number(el.dataset.value) || 0;
+      for (const s of pool) if (s.category === cat.name) s.min_elo = cat.min_elo;
       drawPool();
     }));
     poolBox.querySelectorAll('[data-del]').forEach((el) => (el.onclick = () => {
@@ -1915,7 +1976,12 @@ async function renderGuild(guild) {
             // the row carries the main, so it is stamped from the category it
             // is being dropped into rather than worked out again at save time
             const into = cats.find((c) => c.name === openCat);
-            pool.push({ category: openCat, name, main: into?.main ?? MAINS[0] });
+            pool.push({
+              category: openCat,
+              name,
+              main: into?.main ?? MAINS[0],
+              min_elo: into?.min_elo ?? 0,
+            });
           }
           openCat = null;
           drawPool();
@@ -1930,7 +1996,7 @@ async function renderGuild(guild) {
   document.getElementById('addcat').onclick = async () => {
     const name = (await ask('Subcategory name'))?.slice(0, 60);
     if (!name || cats.some((c) => c.name === name)) return;
-    cats.push({ name, main: MAINS[0] });
+    cats.push({ name, main: MAINS[0], min_elo: 0 });
     openCat = name;
     drawPool();
     poolBox.querySelector('.scn-q')?.focus();

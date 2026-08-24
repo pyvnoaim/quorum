@@ -125,6 +125,9 @@ for (const stmt of [
   // Optional: where the bot says what staff changed, so players hear about a
   // new scenario pool from the server rather than from losing a match on it.
   'alter table guild_config add column announce_channel_id text',
+  // The lowest rank a scenario is offered to, as that rank's Elo threshold.
+  // 0 is the whole ladder, which is what every scenario was before this.
+  'alter table scenario add column min_elo integer not null default 0',
   // Which of the three fixed mains a category rolls up into. A category named
   // after a main is its own main; everything else is a subcategory of one.
   'alter table scenario add column main text',
@@ -228,6 +231,7 @@ export interface GuildConfig {
   /** 'manual' = staff hand out the division roles and the bot never touches
    *  them; a player queues with the role they hold. Default 'auto': the bot
    *  assigns roles off Elo and the gate measures rank bands. */
+  rank_mode: string | null;
   /** How a new player's first rating is decided: flat | staff | voltaic. */
   seed_mode: string | null;
   /** The one category split mode puts everything in, and the results channel
@@ -252,6 +256,13 @@ export interface GuildConfig {
    *  this says - see syncRankChannelsToDiscord(). */
   visible_role_id: string | null;
 }
+
+/** Who owns the division roles. 'manual' means staff do: the bot never adds or
+ *  removes one, so a loss can never drop somebody out of the bracket they were
+ *  put in - or off the ladder entirely. Ratings still move underneath, as the
+ *  evidence staff promote on. */
+export const getRankMode = (guildId: string): 'auto' | 'manual' =>
+  getConfig(guildId).rank_mode === 'manual' ? 'manual' : 'auto';
 
 export const getSeedMode = (guildId: string): SeedMode => {
   const set = getConfig(guildId).seed_mode;
@@ -431,6 +442,7 @@ export function getConfig(guildId: string): GuildConfig {
       ping_role_id: null,
       rank_spread: null,
       split_channels: null,
+      rank_mode: null,
       seed_mode: null,
       split_category_id: null,
       split_results_id: null,
@@ -450,16 +462,17 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
   db.prepare(
     `insert into guild_config
        (guild_id, panel_channel_id, results_channel_id, ping_role_id,
-        rank_spread, split_channels, seed_mode, call_ttl_min,
+        rank_spread, split_channels, rank_mode, seed_mode, call_ttl_min,
         split_category_id, split_results_id, format_cfg, panel_msgs, announce_channel_id,
         visible_role_id, leaderboard_channel_id, leaderboard_msg_id)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
        ping_role_id = excluded.ping_role_id,
        rank_spread = excluded.rank_spread,
        split_channels = excluded.split_channels,
+       rank_mode = excluded.rank_mode,
        seed_mode = excluded.seed_mode,
        call_ttl_min = excluded.call_ttl_min,
        split_category_id = excluded.split_category_id,
@@ -477,6 +490,7 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.ping_role_id,
     next.rank_spread,
     next.split_channels,
+    next.rank_mode,
     next.seed_mode,
     next.call_ttl_min,
     next.split_category_id,
@@ -556,24 +570,33 @@ export interface PoolRow {
   category: string;
   name: string;
   main: string;
+  /** Lowest rank this is offered to, as that rank's Elo threshold. 0 = every
+   *  rank. Set per category in the dashboard; the rows carry it, same as
+   *  `main`, so one filter answers both. */
+  min_elo: number;
+}
+
+/** The scenarios a queue at this rank draws from - everything filed at or below
+ *  its threshold. A floor that leaves nothing at all falls back to the whole
+ *  pool: a bracket with no scenarios must not be a bracket with no matches. */
+export function poolFor(pool: PoolRow[], floor: number): PoolRow[] {
+  const mine = pool.filter((s) => s.min_elo <= floor);
+  return mine.length ? mine : pool;
 }
 
 /** The scenario pool, seeded from DEFAULT_CATEGORIES then owned by the dashboard. */
 export function getScenarios(guildId: string): PoolRow[] {
   const read = () =>
     db
-      .prepare('select category, name, main from scenario where guild_id = ? order by id')
+      .prepare('select category, name, main, min_elo from scenario where guild_id = ? order by id')
       .all(guildId) as unknown as PoolRow[];
   const rows = read();
   if (rows.length) return rows;
   for (const cat of DEFAULT_CATEGORIES) {
     for (const name of cat.scenarios) {
-      db.prepare('insert into scenario (guild_id, category, name, main) values (?, ?, ?, ?)').run(
-        guildId,
-        cat.name,
-        name,
-        cat.main,
-      );
+      db.prepare(
+        'insert into scenario (guild_id, category, name, main, min_elo) values (?, ?, ?, ?, 0)',
+      ).run(guildId, cat.name, name, cat.main);
     }
   }
   return read();
@@ -581,11 +604,11 @@ export function getScenarios(guildId: string): PoolRow[] {
 
 export function setScenarios(guildId: string, rows: PoolRow[]) {
   const insert = db.prepare(
-    'insert into scenario (guild_id, category, name, main) values (?, ?, ?, ?)',
+    'insert into scenario (guild_id, category, name, main, min_elo) values (?, ?, ?, ?, ?)',
   );
   tx(() => {
     db.prepare('delete from scenario where guild_id = ?').run(guildId);
-    for (const r of rows) insert.run(guildId, r.category, r.name, r.main);
+    for (const r of rows) insert.run(guildId, r.category, r.name, r.main, r.min_elo ?? 0);
   });
   return getScenarios(guildId);
 }
