@@ -377,7 +377,9 @@ export const PAGE = /* html */ `<!doctype html>
   .opt-hit { display: flex; align-items: center; gap: 9px; margin: 0; cursor: pointer; font-size: 14px; }
   .opt input[type=number] { width: 62px; margin: 0 9px; padding: 4px 8px; text-align: center; }
   /* sits next to the starting-rank picker, so it reads as the same control */
-  .seed-elo { width: 72px; margin-left: 8px; padding: 6px 8px; vertical-align: middle; }
+  .seed-cell { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .seed-cell .sel { flex: 1 1 auto; min-width: 130px; }
+  .seed-elo { flex: 0 0 74px; width: 74px; padding: 9px 10px; }
   .opt .unit { color: var(--muted); font-size: 13px; }
   /* Off replaces the sentence rather than trailing it: "Bin an untaken call
      after" says nothing once there is no number to follow it. */
@@ -2027,17 +2029,18 @@ async function renderGuild(guild) {
           ? \`<span class="hint">\${p.wins + p.losses ? '' : h(p.seeded_from ?? 'flat')}</span>\`
           : p.wins + p.losses
             ? \`<span class="hint" title="their record is their rating now - a starting rank only applies before the first match">seeded \${h(p.seeded_from ?? 'flat')}</span>\`
-            : selectField('sd-' + p.discord_id,
+            // One row, because they are one control: the rank sets the floor
+            // and the box overrides the number without moving the bracket. The
+            // picker is a full-width block on its own, so it needs the flex.
+            : \`<div class="seed-cell">\` +
+              selectField('sd-' + p.discord_id,
                 [{ id: '', name: 'Not set' }].concat(data.ranks.map((r) => ({ id: r.name, name: r.name }))),
                 seeds[p.discord_id] ?? p.seeded_from ?? '',
                 \`data-id="\${h(p.discord_id)}"\`) +
-              // The rank sets the floor; this overrides the number without
-              // moving anyone's bracket. For placing somebody who has already
-              // played elsewhere, where "bottom of Elite" is not what they are.
               \`<input class="seed-elo" type="number" min="0" max="5000" step="1"
                  data-id="\${h(p.discord_id)}" placeholder="floor"
                  title="Exact rating - leave empty for the rank's floor"
-                 value="\${seedElo[p.discord_id] ?? ''}" />\`}</td>
+                 value="\${seedElo[p.discord_id] ?? ''}" /></div>\`}</td>
         <td style="width:1px"><button class="icon-btn" data-reset="\${h(p.discord_id)}"
           data-name="\${h(p.kovaaks_username)}"\${canReset ? '' : ' disabled'}
           title="\${canReset ? 'Reset this rating' : 'Nothing to reset - no matches and no starting rank'}">\${icon('undo')}</button></td>
