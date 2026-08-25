@@ -11,6 +11,7 @@ import {
   PermissionFlagsBits,
   SlashCommandBuilder,
   type Guild,
+  type GuildMember,
   type Interaction,
 } from 'discord.js';
 import {
@@ -1007,6 +1008,7 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
   const [, action, arg, extra] = i.customId.split(':');
 
   if (action === 'open') return onOpen(i, arg as Format);
+  if (action === 'notify') return onNotify(i);
   // Not a match id, so it has to answer before the lookup below turns it into
   // "That match is gone."
   if (action === 'lb') return onLeaderboardPage(i, Number(arg));
@@ -1197,6 +1199,36 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
   }
 }
 
+/** Opting in and out of queue pings, on the panel where the queues are.
+ *
+ *  The bot owns this one role and nothing else about the member: never
+ *  roles.set(), which would strip everything they hold, and never a role the
+ *  server has not named as its ping role. */
+async function onNotify(i: import('discord.js').ButtonInteraction) {
+  const role = i.guildId ? getConfig(i.guildId).ping_role_id : null;
+  const member = i.member && 'cache' in (i.member.roles ?? {}) ? (i.member as GuildMember) : null;
+  if (!role || !member) {
+    await i.reply({
+      content: 'No notification role is set up here.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+  const had = member.roles.cache.has(role);
+  const done = await (had ? member.roles.remove(role) : member.roles.add(role)).then(
+    () => true,
+    () => false,
+  );
+  await i.reply({
+    content: !done
+      ? "Couldn't change that role - Quorum may sit below it in the role list."
+      : had
+        ? "Done - you won't be pinged for new queues."
+        : "Done - you'll be pinged when a queue goes up where you can see it.",
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
 async function onOpen(i: import('discord.js').ButtonInteraction, format: Format) {
   if (!FORMATS[format] || !i.guildId) {
     await i.reply({ content: 'Unknown format.', flags: MessageFlags.Ephemeral });
@@ -1247,12 +1279,21 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   // on the opener's rating - a fresh Champion still sitting at base Elo opening
   // in #champion must not summon the bottom of the ladder.
   const owner = division ?? ranks.find((r) => rankChannels(r).queue === i.channelId);
-  const reach = bandsInReach(ranks, owner?.min_elo ?? opener.elo, getRankSpread(i.guildId)[format])
-    .map((r) => r.discord_role_id)
-    .filter((id): id is string => !!id);
-  // the configured role is an opt-in "tell me about every call", on top.
-  const always = getConfig(i.guildId).ping_role_id;
-  const mentions = [...new Set([...(always ? [always] : []), ...reach])];
+  // An opt-in role REPLACES the bracket roles rather than adding to them: a
+  // server that has one has decided a queue ping is something you ask for, and
+  // pinging the bracket as well would be the thing they opted out of. It still
+  // only reaches the right people - the call is posted in a bracket's channel,
+  // and Discord does not notify anyone about a channel they cannot see.
+  const optIn = getConfig(i.guildId).ping_role_id;
+  const mentions = optIn
+    ? [optIn]
+    : [
+        ...new Set(
+          bandsInReach(ranks, owner?.min_elo ?? opener.elo, getRankSpread(i.guildId)[format])
+            .map((r) => r.discord_role_id)
+            .filter((id): id is string => !!id),
+        ),
+      ];
 
   await i.reply({
     ...render(match),

@@ -1387,7 +1387,8 @@ async function renderGuild(guild) {
                      data.config.visible_role_id)}
     </div>
     <div class="field">
-      <label>Extra ping role <span class="hint">- for people who want every call, on top of the ranks already pinged</span></label>
+      <label>Ping role <span class="hint">- set one and it is the only thing pinged for a new queue, with a Notify me
+      button on the panel to opt in and out. Leave it empty to ping the ranks that can join instead</span></label>
       \${selectField('ping', NONE.concat(data.roles), data.config.ping_role_id)}
     </div>
     <div class="field">

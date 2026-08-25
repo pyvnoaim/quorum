@@ -7,6 +7,7 @@ import {
 } from 'discord.js';
 import { FORMATS, PANEL_FORMATS, ROUNDS, RUNS_PER_SCENARIO, type Format } from './config.js';
 import {
+  getConfig,
   getFormat,
   getPlayer,
   getRankMode,
@@ -174,6 +175,19 @@ export function panelMessage(formats: readonly Format[] = PANEL_FORMATS, guildId
           new ButtonBuilder().setCustomId(`pug:open:${f}`).setLabel(f).setStyle(ButtonStyle.Primary),
         ),
       ),
+      // Only where there is a role to opt into. Self-serve, because the
+      // alternative is a second bot for role buttons or an admin handing out a
+      // notification role one person at a time.
+      ...(guildId && getConfig(guildId).ping_role_id
+        ? [
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
+              new ButtonBuilder()
+                .setCustomId('pug:notify')
+                .setLabel('Notify me')
+                .setStyle(ButtonStyle.Secondary),
+            ),
+          ]
+        : []),
     ],
   };
 }
