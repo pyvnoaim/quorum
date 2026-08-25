@@ -1291,6 +1291,14 @@ async function renderGuild(guild) {
   const live = data.matches.filter((m) => m.status === 'live').length;
   // ranks come back highest-first, so the first one you clear is yours.
   const rankOf = (elo) => data.ranks.find((r) => elo >= r.min_elo);
+  /** What bracket to show beside somebody. With staff-owned brackets the ROLE
+   *  is the bracket, so the rating cannot name one - on a ladder whose floors
+   *  exist only to order it, reading a name off Elo prints a bracket they are
+   *  not in. Nothing shown beats the wrong thing shown. */
+  const bandOf = (p) =>
+    data.rankMode === 'manual'
+      ? (p.division != null ? data.ranks.find((r) => r.id === p.division) : undefined)
+      : rankOf(p.elo);
   const perms = data.permissions ?? { missing: [], outranked: [], invite: '' };
   // Permissions lead: none of the three below can be done by a bot that has not
   // got them, so a server missing one is not three jobs away from running, it
@@ -1349,7 +1357,7 @@ async function renderGuild(guild) {
     <h2>Top of the ladder</h2>
     \${data.top.length
       ? '<table class="ladder"><tbody>' + data.top.map((p, n) => {
-          const rank = rankOf(p.elo);
+          const rank = bandOf(p);
           return \`
           <tr>
             <td class="hint" style="width:1px">\${n + 1}</td>
@@ -2050,7 +2058,7 @@ async function renderGuild(guild) {
     : data.players;
   document.getElementById('playerlist').innerHTML = shown.length
     ? shown.map((p) => {
-        const rank = rankOf(p.elo);
+        const rank = bandOf(p);
         return \`
       <tr>
         <td style="width:1px"><img class="pfp" src="\${avatarUrl({ id: p.discord_id, avatar: p.avatar })}" alt="" /></td>

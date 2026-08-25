@@ -54,7 +54,7 @@ import {
   type RankChannels,
 } from './db.js';
 import { changeEmbed, leaderboardMessage, messageGone, panelMessage } from './embeds.js';
-import { bandsInReach } from './rating.js';
+import { bandsInReach, rankForRoles } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
 import { PAGE } from './page.js';
 
@@ -823,6 +823,19 @@ export function startWeb(client: Client, hooks: Hooks) {
             .filter((p) => !client.users.cache.has(p.discord_id))
             .map((p) => client.users.fetch(p.discord_id).catch(() => null)),
         );
+        // With staff-owned brackets the ROLE is the bracket, so the list has to
+        // read it off the member rather than off the rating - a 1050 in a
+        // ladder whose top floor is 300 is not Elite, they are whatever you put
+        // them in. One member at a time by id, which needs no privileged
+        // intent, and discord.js caches each one after the first load.
+        const manual = getRankMode(guildId) === 'manual';
+        if (manual) {
+          await Promise.all(
+            players
+              .filter((p) => !guild.members.cache.has(p.discord_id))
+              .map((p) => guild.members.fetch(p.discord_id).catch(() => null)),
+          );
+        }
         json(res, 200, {
           config: getConfig(guildId),
           // What Quorum cannot do here, and the link that fixes it. Sent on
@@ -849,6 +862,16 @@ export function startWeb(client: Client, hooks: Hooks) {
             ...p,
             avatar: client.users.cache.get(p.discord_id)?.avatar ?? null,
             voltaic: readVoltaic(p.voltaic),
+            // Which bracket staff put them in, by rank id. Null in automatic
+            // mode, where the rating IS the rank, and null for somebody Discord
+            // would not hand over - the page then says nothing rather than
+            // naming a bracket they are not in.
+            division: manual
+              ? (rankForRoles(
+                  ranks,
+                  guild.members.cache.get(p.discord_id)?.roles.cache.map((r) => r.id) ?? [],
+                )?.id ?? null)
+              : null,
           })),
           formats: Object.keys(FORMATS),
           // fixed, and the pool pane draws a card for each whether or not the
@@ -863,7 +886,16 @@ export function startWeb(client: Client, hooks: Hooks) {
           format: getFormat(guildId),
           seedModes: SEED_MODES,
           stats: guildStats(guildId),
-          top: leaderboard(guildId, 5).map((p) => ({ ...p, voltaic: readVoltaic(p.voltaic) })),
+          top: leaderboard(guildId, 5).map((p) => ({
+            ...p,
+            voltaic: readVoltaic(p.voltaic),
+            division: manual
+              ? (rankForRoles(
+                  ranks,
+                  guild.members.cache.get(p.discord_id)?.roles.cache.map((r) => r.id) ?? [],
+                )?.id ?? null)
+              : null,
+          })),
           // One line per finished match: who played, where they placed, what it
           // cost them. Trimmed here because the page shows nothing else.
           history: matchHistory(guildId, 25).map(({ match, players }) => {
