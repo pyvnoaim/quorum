@@ -1310,6 +1310,17 @@ async function renderGuild(guild) {
         <span class="unit">minutes without a taker</span>
       </div>
     </div>
+    <div class="field">
+      <label>Pause queues <span class="hint">- nothing new can be opened or taken. Matches already running play out</span></label>
+      <div class="opt boxed">
+        <label class="opt-hit">
+          <input type="checkbox" id="pausequeues"\${data.paused ? ' checked' : ''} />
+          <span class="on-note">Paused - the panel says so and its buttons are dead</span>
+          <span class="off-note">Open - anyone in a rank can queue</span>
+        </label>
+        <span class="status" id="pausestatus"></span>
+      </div>
+    </div>
     <div class="bar">
       <button class="btn solid" id="save">Save</button>
       <button class="btn" id="panelbtn">Post panel</button>
@@ -1685,6 +1696,21 @@ async function renderGuild(guild) {
     box.querySelectorAll('[data-cancel]').forEach((el) => (el.onclick = () => act(el.dataset.cancel, 'cancel')));
   };
   drawMatches(data.matches);
+
+  // A running match changes under you - the bot re-reads KovaaK's every minute -
+  // so the card has to redraw or it is a screenshot of when the pane opened.
+  // Polling, because nothing here pushes; hidden tabs sit it out, and the
+  // interval clears itself once the pane is gone rather than being unhooked.
+  const mine = document.getElementById('matchlist');
+  const live = setInterval(async () => {
+    // Identity, not presence: rendering another server puts a NEW matchlist on
+    // the page, and a poller left over from the last one would keep writing its
+    // matches into it.
+    if (document.getElementById('matchlist') !== mine) return clearInterval(live);
+    if (document.hidden) return;
+    const res = await fetch(\`/api/guild/\${guild.id}/matches\`);
+    if (res.ok && document.getElementById('matchlist') === mine) drawMatches((await res.json()).matches);
+  }, 30_000);
 
   // All three options on screen with what each does, rather than a segmented
   // control plus a paragraph that changes under it: the choice is the content,
@@ -2128,6 +2154,26 @@ async function renderGuild(guild) {
       return;
     }
     location.href = '/';
+  };
+
+  // Saves on the flick rather than waiting for the Save button: pausing is
+  // something staff reach for while something is going wrong, and a pause that
+  // needed a second click would be a pause that did not happen.
+  document.getElementById('pausequeues').onchange = async (e) => {
+    const on = e.target.checked;
+    const el = document.getElementById('pausestatus');
+    el.textContent = 'Saving…';
+    const res = await fetch(\`/api/guild/\${guild.id}/pause\`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paused: on }),
+    });
+    if (!res.ok) {
+      e.target.checked = !on;
+      el.textContent = 'Failed';
+      return;
+    }
+    data.paused = on;
+    el.textContent = on ? 'Queues paused' : 'Queues open';
   };
 
   document.getElementById('panelbtn').onclick = async () => {

@@ -54,7 +54,7 @@ import {
   type RankChannels,
 } from './db.js';
 import { changeEmbed, leaderboardMessage, messageGone, panelMessage } from './embeds.js';
-import { bandsInReach, rankForRoles, scenarioWinners } from './rating.js';
+import { bandsInReach, forfeits, rankForRoles, scenarioWinners } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
 import { PAGE } from './page.js';
 
@@ -576,6 +576,77 @@ async function announce(guild: Guild, byId: string, lines: string[]) {
   await channel.send({ embeds: [changeEmbed(lines, byId)] }).catch(() => {});
 }
 
+/** Everything in play in one server, as the dashboard's match cards want it.
+ *  Its own function because the live pane re-reads it every half minute, and
+ *  going through the whole guild payload for that would drag the ladder, every
+ *  player and eight benchmark lookups along behind it. */
+function openMatches(guildId: string, client: Client) {
+  return listOpenMatches(guildId).map((m) => {
+    // A match still picking stores its phase here, not a list. What it
+    // has settled on so far is the honest answer for the page.
+    const stored: unknown = JSON.parse(m.scenarios);
+    const scenarios = Array.isArray(stored)
+      ? (stored as string[])
+      : ((stored as { picked?: string[] })?.picked ?? []);
+    const rows = matchPlayers(m.id);
+    const scores = new Map(
+      rows.map((r) => [
+        r.discord_id,
+        JSON.parse(r.scores) as Record<string, number | null>,
+      ]),
+    );
+    // Who leads each scenario, counted the way the result will count it
+    // - the page and the card in Discord must not disagree about who is
+    // ahead in the same match.
+    // ...forfeits included, which is the whole of "counted the way the result
+    // will count it": a scenario somebody is short on is one they are losing.
+    const forfeited = forfeits(
+      rows.map((r) => ({
+        id: r.discord_id,
+        scores: scores.get(r.discord_id)!,
+        runCounts: r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null,
+      })),
+      scenarios,
+      getFormat(guildId).runs,
+    );
+    const ahead = scenarioWinners(
+      rows.map((r) => ({
+        id: r.discord_id,
+        elo: 0,
+        team: r.team,
+        scores: forfeited.get(r.discord_id)!,
+      })),
+      scenarios,
+    );
+    return {
+      id: m.id,
+      format: m.format,
+      status: m.status,
+      started_at: m.started_at,
+      created_at: m.created_at,
+      scenarios,
+      // one entry per scenario: the team leading it, or null for a tie
+      // and for one nobody has run yet
+      ahead,
+      players: rows.map((r) => {
+        const used = JSON.parse(r.run_counts ?? '{}') as Record<string, number>;
+        return {
+          id: r.discord_id,
+          name: getPlayer(r.discord_id)?.kovaaks_username ?? r.discord_id,
+          // whatever the gateway already cached; the page falls back to
+          // Discord's default avatar rather than us fetching anyone.
+          avatar: client.users.cache.get(r.discord_id)?.avatar ?? null,
+          done: !!r.done,
+          team: r.team,
+          scores: scenarios.map((s) => scores.get(r.discord_id)![s] ?? null),
+          runs: scenarios.map((s) => used[s] ?? 0),
+          won: ahead.filter((w) => w === r.team).length,
+        };
+      }),
+    };
+  });
+}
+
 /** What is different between two lists, said the way a player would say it. */
 function listDiff(before: string[], after: string[]) {
   const added = after.filter((x) => !before.includes(x));
@@ -598,6 +669,9 @@ interface Hooks {
    *  a staff-seeded player holds their role before their first match - which is
    *  what makes locking a rank channel to its role safe. */
   syncRankRoles: (guildId: string, discordIds: string[]) => Promise<void>;
+  /** Redraw the queue panels now. The tick does it within the minute anyway;
+   *  pausing is the one change staff want to see land while they watch. */
+  refreshPanels: () => Promise<void>;
 }
 
 export function startWeb(client: Client, hooks: Hooks) {
@@ -890,6 +964,7 @@ export function startWeb(client: Client, hooks: Hooks) {
             .filter((c) => c.type === ChannelType.GuildCategory)
             .map((c) => ({ id: c.id, name: c.name })),
           seedMode: getSeedMode(guildId),
+          paused: !!getConfig(guildId).queues_paused,
           rankMode: getRankMode(guildId),
           format: getFormat(guildId),
           seedModes: SEED_MODES,
@@ -926,59 +1001,7 @@ export function startWeb(client: Client, hooks: Hooks) {
               })),
             };
           }),
-          matches: listOpenMatches(guildId).map((m) => {
-            // A match still picking stores its phase here, not a list. What it
-            // has settled on so far is the honest answer for the page.
-            const stored: unknown = JSON.parse(m.scenarios);
-            const scenarios = Array.isArray(stored)
-              ? (stored as string[])
-              : ((stored as { picked?: string[] })?.picked ?? []);
-            const rows = matchPlayers(m.id);
-            const scores = new Map(
-              rows.map((r) => [
-                r.discord_id,
-                JSON.parse(r.scores) as Record<string, number | null>,
-              ]),
-            );
-            // Who leads each scenario, counted the way the result will count it
-            // - the page and the card in Discord must not disagree about who is
-            // ahead in the same match.
-            const ahead = scenarioWinners(
-              rows.map((r) => ({
-                id: r.discord_id,
-                elo: 0,
-                team: r.team,
-                scores: scores.get(r.discord_id)!,
-              })),
-              scenarios,
-            );
-            return {
-              id: m.id,
-              format: m.format,
-              status: m.status,
-              started_at: m.started_at,
-              created_at: m.created_at,
-              scenarios,
-              // one entry per scenario: the team leading it, or null for a tie
-              // and for one nobody has run yet
-              ahead,
-              players: rows.map((r) => {
-                const used = JSON.parse(r.run_counts ?? '{}') as Record<string, number>;
-                return {
-                  id: r.discord_id,
-                  name: getPlayer(r.discord_id)?.kovaaks_username ?? r.discord_id,
-                  // whatever the gateway already cached; the page falls back to
-                  // Discord's default avatar rather than us fetching anyone.
-                  avatar: client.users.cache.get(r.discord_id)?.avatar ?? null,
-                  done: !!r.done,
-                  team: r.team,
-                  scores: scenarios.map((s) => scores.get(r.discord_id)![s] ?? null),
-                  runs: scenarios.map((s) => used[s] ?? 0),
-                  won: ahead.filter((w) => w === r.team).length,
-                };
-              }),
-            };
-          }),
+          matches: openMatches(guildId, client),
         });
         return;
       }
@@ -1157,6 +1180,37 @@ export function startWeb(client: Client, hooks: Hooks) {
           ]);
         }
         json(res, 200, { reset: reset.length, shared });
+        return;
+      }
+
+      // Just the live pane. The dashboard polls this every half minute while a
+      // match is up, and the full guild payload is far too much to rebuild for
+      // a scoreboard that moves.
+      if (action === '/matches' && req.method === 'GET') {
+        json(res, 200, { matches: openMatches(guildId, client) });
+        return;
+      }
+
+      // Pause: staff shut the queues without taking the panel down. Matches
+      // already running are left alone - this closes the door, it does not
+      // clear the room.
+      if (action === '/pause' && req.method === 'POST') {
+        const paused = !!(await readJson(req)).paused;
+        const was = !!getConfig(guildId).queues_paused;
+        setConfig(guildId, { queues_paused: paused ? 1 : 0 });
+        await announce(
+          guild,
+          session.user.id,
+          was === paused
+            ? []
+            : [
+                paused
+                  ? '**Queues are paused** - nothing new can be opened or taken. Matches already running play out.'
+                  : '**Queues are open again**',
+              ],
+        );
+        await hooks.refreshPanels();
+        json(res, 200, { paused });
         return;
       }
 

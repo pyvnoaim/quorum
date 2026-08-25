@@ -57,6 +57,7 @@ import {
   noContestEmbed,
   openEmbed,
   panelMessage,
+  runningEmbed,
   pickEmbed,
   rematchRow,
   resultsEmbed,
@@ -70,7 +71,7 @@ import {
   bandsInReach,
   canPlay,
   eloDeltas,
-  forfeitUnused,
+  forfeits,
   matchDeadline,
   pickTurn,
   placings,
@@ -97,6 +98,9 @@ const KOVAAKS_DOWN =
 
 /** Which of the two failures it was. Telling someone to go link an account
  *  they already linked is worse than saying nothing. */
+const QUEUES_PAUSED =
+  "Queues are paused - staff have closed them for now. Matches already running play out.";
+
 const lookupError = (kind: 'not-linked' | 'unreachable') =>
   kind === 'unreachable' ? KOVAAKS_DOWN : NO_LINK;
 
@@ -271,19 +275,38 @@ function render(match: Match) {
   };
 }
 
+/** The roles an interaction's member holds, or none where the gateway handed
+ *  back a partial member - Quorum runs on the Guilds intent alone. */
+function roleIds(member: Interaction['member']) {
+  return member?.roles && 'cache' in member.roles ? [...member.roles.cache.keys()] : [];
+}
+
 /** Where a brand new player's rating starts, per the server's setting.
  *
  *  Only ever the FIRST rating: ensurePlayer never touches the Elo of someone it
- *  has seen before, so nothing here can rewrite a record. 'staff' seeds flat
- *  and waits - staff move them from the players pane before they play - and
- *  'voltaic' falls back to flat when there is no S5 entry to read, which is
- *  most people. */
-async function seedFor(discordId: string, guildId: string, steamId: string | null) {
+ *  has seen before, so nothing here can rewrite a record. 'voltaic' falls back
+ *  to flat when there is no S5 entry to read, which is most people.
+ *
+ *  'staff' reads the division role they are already wearing. Handing someone a
+ *  bracket role IS staff saying where they belong, and starting them flat
+ *  anyway put everybody on the same rating regardless of rank until somebody
+ *  went and said it a second time in the dashboard. That pane still works, for
+ *  a player with no role yet. */
+async function seedFor(
+  discordId: string,
+  guildId: string,
+  steamId: string | null,
+  roleIds: string[] = [],
+) {
   // Nothing to work out for someone already on the books - ensurePlayer would
   // ignore the answer, and asking the benchmark index anyway would put a second
   // network round trip in front of every single button press.
   if (getPlayer(discordId)) return undefined;
   const mode = getSeedMode(guildId);
+  if (mode === 'staff') {
+    const band = rankForRoles(getRanks(guildId), roleIds);
+    if (band) return { elo: band.min_elo, from: band.name };
+  }
   if (mode !== 'voltaic' || !steamId) return { elo: BASE_ELO, from: mode };
   const s5 = await voltaicS5(steamId);
   const seed = s5 ? VOLTAIC_SEED[s5.rank] : undefined;
@@ -377,10 +400,24 @@ async function startMatch(guild: Guild, match: Match) {
   return moveIntoThread(getMatch(match.id)!);
 }
 
+/** Takes down the "match on" card in the queue channel. Every way a match can
+ *  end goes through here, so the channel can't be left advertising a game that
+ *  finished an hour ago. */
+async function dropNotice(match: Match) {
+  if (!match.notice_id) return;
+  const channel = await client.channels.fetch(match.channel_id).catch(() => null);
+  if (channel?.isTextBased()) {
+    const msg = await channel.messages.fetch(match.notice_id).catch(() => null);
+    await msg?.delete().catch(() => {});
+  }
+  db.prepare('update match set notice_id = null where id = ?').run(match.id);
+}
+
 /** The match moves into its thread the moment it starts: bans, scores and Done
  *  all happen where only its players can see them. The call in the queue
- *  channel has done its whole job by filling up, so it goes - leaving it would
- *  put a dead Join button under a game already in progress.
+ *  channel becomes a card saying a match is on - the Join button has to go
+ *  either way, but deleting the message outright left the channel looking
+ *  empty while a game was running in it.
  *
  *  No thread means no move. Everything carries on in the channel exactly as it
  *  did before, because a match that can't be private is still a match. */
@@ -397,7 +434,22 @@ async function moveIntoThread(match: Match) {
     const home = await client.channels.fetch(match.channel_id).catch(() => null);
     if (home?.isTextBased()) {
       const msg = await home.messages.fetch(call).catch(() => null);
-      await msg?.delete().catch(() => {});
+      // Edited, not replaced: the card belongs where the call was, and posting
+      // a fresh one would push the panel up the channel every single match.
+      const seated = matchPlayers(match.id);
+      const kept = await msg
+        ?.edit({
+          embeds: [
+            runningEmbed(
+              match,
+              new Map(seated.map((r) => [r.discord_id, getPlayer(r.discord_id)!])),
+            ),
+          ],
+          components: [],
+        })
+        .catch(() => null);
+      if (kept) db.prepare('update match set notice_id = ? where id = ?').run(kept.id, match.id);
+      else await msg?.delete().catch(() => {});
     }
   }
   return getMatch(match.id)!;
@@ -561,20 +613,25 @@ async function finishMatch(match: Match) {
   const rows = matchPlayers(done.id);
   const scenarios: string[] = JSON.parse(done.scenarios);
   const want = getFormat(done.guild_id).runs;
-  // Runs left unused score nothing - see forfeitUnused(). This is what stops a
-  // player fishing one run out of unlimited resets and sitting on it: the score
-  // only stands if they played the format out. A scenario never launched stays
+  // Runs left unused score nothing, and against somebody who used all of theirs
+  // the whole match does - see forfeits(). That is what stops a player fishing
+  // out of unlimited resets, whether they sit on one run or write off a whole
+  // scenario to buy the clock on the other two. A scenario never launched stays
   // null, so scorable() can still tell a no-show from a game somebody lost.
+  const forfeited = forfeits(
+    rows.map((r) => ({
+      id: r.discord_id,
+      scores: JSON.parse(r.scores) as Record<string, number | null>,
+      runCounts: r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null,
+    })),
+    scenarios,
+    want,
+  );
   const entrants = rows.map((r) => ({
     id: r.discord_id,
     elo: getPlayer(r.discord_id)!.elo,
     team: r.team,
-    scores: forfeitUnused(
-      JSON.parse(r.scores) as Record<string, number | null>,
-      r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null,
-      scenarios,
-      want,
-    ),
+    scores: forfeited.get(r.discord_id)!,
   }));
 
   // Only whoever actually ran something is scored - see scorable(). Not-played
@@ -658,7 +715,8 @@ async function cancelMatch(match: Match) {
     }
   }
   // With a thread there is no separate message to chase: deleting the thread
-  // deletes what is inside it.
+  // deletes what is inside it. The card in the queue channel is outside it.
+  await dropNotice(match);
   await closeThread(match);
 }
 
@@ -692,6 +750,7 @@ async function concludeMatch(match: Match) {
     done.message_id && home?.isTextBased()
       ? await home.messages.fetch(done.message_id).catch(() => null)
       : null;
+  await dropNotice(done);
   if (!posted) {
     await msg?.edit(message).catch(() => {});
   } else {
@@ -889,7 +948,7 @@ client.on('guildCreate', (guild) => void leaveIfNotAllowed(guild).catch(console.
 client.once('clientReady', async (c) => {
   for (const guild of c.guilds.cache.values()) await leaveIfNotAllowed(guild);
   await c.application.commands.set([command.toJSON()]);
-  startWeb(c, { concludeMatch, cancelMatch, syncRankRoles });
+  startWeb(c, { concludeMatch, cancelMatch, syncRankRoles, refreshPanels });
   setInterval(() => void tick().catch(console.error), TICK_MS).unref();
   console.log(`ready as ${c.user.tag}`);
 });
@@ -1100,12 +1159,26 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       await i.reply({ content: "You're already in it.", flags: MessageFlags.Ephemeral });
       return;
     }
+    // Taking one is queueing too. A call left open when staff paused would
+    // otherwise still start a match, which is the one thing pausing is for.
+    if (getConfig(match.guild_id).queues_paused) {
+      await i.reply({ content: QUEUES_PAUSED, flags: MessageFlags.Ephemeral });
+      return;
+    }
     const account = await kovaaksAccountForDiscordId(i.user.id);
     if (account.kind !== 'found') {
       await i.reply({ content: lookupError(account.kind), flags: MessageFlags.Ephemeral });
       return;
     }
-    const player = ensurePlayer(i.user.id, account.username, account.steamId);
+    // Seeded the same way the opener is: taking a call is as much a first game
+    // as making one, and skipping it here parked every player who only ever
+    // pressed Take on the flat rating whatever their bracket said.
+    const player = ensurePlayer(
+      i.user.id,
+      account.username,
+      account.steamId,
+      await seedFor(i.user.id, match.guild_id, account.steamId, roleIds(i.member)),
+    );
     const ranks = getRanks(match.guild_id);
 
     // The lookup above is a network hop and Join is a button people double-tap,
@@ -1321,6 +1394,12 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
     await i.reply({ content: 'Unknown format.', flags: MessageFlags.Ephemeral });
     return;
   }
+  // Checked before the KovaaK's lookup: a paused queue is a no whatever the
+  // account says, and there is no reason to spend a network hop finding out.
+  if (getConfig(i.guildId).queues_paused) {
+    await i.reply({ content: QUEUES_PAUSED, flags: MessageFlags.Ephemeral });
+    return;
+  }
   const account = await kovaaksAccountForDiscordId(i.user.id);
   if (account.kind !== 'found') {
     await i.reply({ content: lookupError(account.kind), flags: MessageFlags.Ephemeral });
@@ -1330,7 +1409,7 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
     i.user.id,
     account.username,
     account.steamId,
-    await seedFor(i.user.id, i.guildId, account.steamId),
+    await seedFor(i.user.id, i.guildId, account.steamId, roleIds(i.member)),
   );
 
   const ranks = getRanks(i.guildId);

@@ -277,6 +277,14 @@ kept the lobby open, because nothing ends a match while somebody still has runs
 left; now it just loses you the scenario. **Done** gives up the runs you have
 left, so it asks first if you have any.
 
+Against an opponent who played all three out, it loses you the **match**, not
+the scenario. Rounds are scored by placing and summed, so a scenario you never
+contest costs exactly one round - cheap enough that writing one off on purpose
+and spending the whole clock fishing the other two takes it 2-1. All or nothing
+is what makes "three runs each" a rule instead of a suggestion. Where *nobody*
+played it out there is nobody to have forfeited to, so it falls back to
+per-scenario and two half-played sides are scored on what they ran.
+
 **Finishing starts a clock.** Once the first player has used every run, everyone
 else gets fifteen minutes and then the match scores itself. Without it, playing
 promptly was punished: you sat there while whoever was stalling kept fishing,
@@ -284,6 +292,11 @@ right up to the time limit. A match still always runs at least twenty minutes,
 so nine deliberately terrible runs in four minutes can't cut short somebody
 whose game is still loading. Both windows, and the limit itself, are in the
 dashboard's format pane.
+
+**Pausing.** The setup pane has a switch that closes the queues: nothing new can
+be opened and an open call can't be taken, the panel says so and its buttons go
+dead, and it lands in the announcements channel if one is set. Matches already
+running play out - it closes the door, it doesn't clear the room.
 
 A call nobody takes is cancelled and its message deleted, so a rank channel
 only ever shows calls that are actually live. An hour out of the box; the setup

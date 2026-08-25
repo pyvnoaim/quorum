@@ -103,6 +103,27 @@ assert.equal(
   'never an empty pool',
 );
 
+// Editing the ladder rewrites its rows, so a category named to a bracket has
+// to follow its rank to the new id. Without that, changing one Elo floor
+// silently empties every restricted category out of the pool.
+{
+  const moved = setRanks(G, [
+    { id: ranks[0].id, name: 'Legend', min_elo: 1450, color: '#ff0000' },
+    { id: ranks[1].id, name: 'Rookie', min_elo: 0, color: '#00ff00' },
+  ]).ranks;
+  assert.notEqual(moved[0].id, top, 'the rewrite really does re-issue ids');
+  assert.deepEqual(
+    getScenarios(G).find((s) => s.name === 'Pasu VP')!.rank_ids,
+    [moved[0].id],
+    'and the category came with it',
+  );
+  // A bracket that was deleted takes its claim with it rather than leaving a
+  // dangling id behind, and a category left with none is open to everyone.
+  const gone = setRanks(G, [{ id: moved[1].id, name: 'Rookie', min_elo: 0, color: '#00ff00' }]).ranks;
+  assert.equal(getScenarios(G).find((s) => s.name === 'Pasu VP')!.rank_ids, null);
+  assert.equal(poolFor(getScenarios(G), gone[0].id).length, 2, 'so it is back in the pool');
+}
+
 // Ranks are Quorum's to move until a server says otherwise.
 assert.equal(getRankMode(G), 'auto');
 setConfig(G, { rank_mode: 'manual' });

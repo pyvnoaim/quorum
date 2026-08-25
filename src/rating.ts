@@ -178,6 +178,41 @@ export function forfeitUnused(
 }
 
 /**
+ * The forfeit as it actually applies, for everyone in the match at once.
+ *
+ * Per-scenario forfeits alone still leave a strategy: give up one scenario on
+ * purpose, spend the whole clock fishing the other two, and take it 2-1. Rounds
+ * are scored by placing and summed, so a round you never contest costs you
+ * exactly one round - a price somebody can decide is worth paying, which makes
+ * "three runs each" a suggestion.
+ *
+ * So it is all or nothing, but only against someone who played it out: if ANY
+ * player used every run on every scenario, a player who did not forfeits the
+ * whole match rather than the scenarios they were short on. Where nobody
+ * finished there is nobody to have beaten, and it falls back to the per-
+ * scenario forfeit so two half-played sides are still scored on what they ran.
+ *
+ * Whole-match forfeit is just forfeitUnused() with no runs to its name, which
+ * keeps one mechanism instead of two that have to agree.
+ */
+export function forfeits(
+  players: { id: string; scores: Record<string, number | null>; runCounts: Record<string, number> | null }[],
+  scenarios: string[],
+  want: number,
+): Map<string, Record<string, number | null>> {
+  // A row with no counts predates the bot recording them: "we never looked" is
+  // not "they never played", so it neither forfeits nor demotes anyone else.
+  const played = players.map((p) => !p.runCounts || allRunsUsed(scenarios, [p.runCounts], want));
+  const anyone = played.some(Boolean);
+  return new Map(
+    players.map((p, i) => [
+      p.id,
+      forfeitUnused(p.scores, anyone && !played[i] ? {} : p.runCounts, scenarios, want),
+    ]),
+  );
+}
+
+/**
  * When a live match actually ends. Three terms, and the order matters:
  *
  *  - the hard TTL, the backstop for a lobby where nobody ever finishes;

@@ -125,6 +125,12 @@ for (const stmt of [
   // goes on a clock. Null while nobody has finished, which is also every match
   // that was already live when this shipped: those keep the plain TTL.
   'alter table match add column grace_from integer',
+  // The "match on" card left in the queue channel once the call moved into its
+  // thread, so it can be taken down when the match ends.
+  'alter table match add column notice_id text',
+  // 1 = nobody can open or take a call here. Matches already running are not
+  // touched: pausing is for the queue, not for a game in progress.
+  'alter table guild_config add column queues_paused integer',
   'alter table guild_config add column format_cfg text',
   // Where the queue panels are, so the tick can keep their counts honest.
   'alter table guild_config add column panel_msgs text',
@@ -220,6 +226,9 @@ export interface Match {
   /** When the first player used every run on every scenario, opening the grace
    *  window for everyone else. Null until somebody does. */
   grace_from: number | null;
+  /** The card left where the call was, saying a match is on. Null before the
+   *  match starts, and where there is no thread to move into. */
+  notice_id: string | null;
   /** The match's private thread, holding exactly its players. Null when the
    *  bot couldn't make one - the match runs regardless. */
   thread_id: string | null;
@@ -255,6 +264,9 @@ export interface GuildConfig {
   format_cfg: string | null;
   /** JSON: the panels this server has up - see getPanels(). */
   panel_msgs: string | null;
+  /** 1 = queues are paused: no new calls, and no taking an open one. Live
+   *  matches play on. */
+  queues_paused: number | null;
   /** Where setup changes are announced. Null = don't announce. */
   announce_channel_id: string | null;
   /** Where the standing leaderboard lives, and the message it is. Null = the
@@ -470,6 +482,7 @@ export function getConfig(guildId: string): GuildConfig {
       call_ttl_min: null,
       format_cfg: null,
       panel_msgs: null,
+      queues_paused: null,
       announce_channel_id: null,
       visible_role_id: null,
       leaderboard_channel_id: null,
@@ -484,9 +497,9 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     `insert into guild_config
        (guild_id, panel_channel_id, results_channel_id, ping_role_id,
         rank_spread, split_channels, rank_mode, seed_mode, call_ttl_min,
-        split_category_id, split_results_id, format_cfg, panel_msgs, announce_channel_id,
-        visible_role_id, leaderboard_channel_id, leaderboard_msg_id)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        split_category_id, split_results_id, format_cfg, panel_msgs, queues_paused,
+        announce_channel_id, visible_role_id, leaderboard_channel_id, leaderboard_msg_id)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
@@ -500,6 +513,7 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
        split_results_id = excluded.split_results_id,
        format_cfg = excluded.format_cfg,
        panel_msgs = excluded.panel_msgs,
+       queues_paused = excluded.queues_paused,
        announce_channel_id = excluded.announce_channel_id,
        visible_role_id = excluded.visible_role_id,
        leaderboard_channel_id = excluded.leaderboard_channel_id,
@@ -518,6 +532,7 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.split_results_id,
     next.format_cfg,
     next.panel_msgs,
+    next.queues_paused,
     next.announce_channel_id,
     next.visible_role_id,
     next.leaderboard_channel_id,
@@ -566,9 +581,16 @@ export function setRanks(
   );
   tx(() => {
     db.prepare('delete from rank where guild_id = ?').run(guildId);
+    // Rewriting the rows re-issues their ids, so anything stored BY id has to
+    // be carried across with them. The role and the channels come along on the
+    // row itself; scenario.rank_ids is a reference from another table, and
+    // leaving it behind quietly empties every bracket-restricted category out
+    // of the pool - a rank edit as small as a floor would do it.
+    const remap = new Map<number, number>();
+    const reclaim = db.prepare('update scenario set rank_ids = ? where id = ?');
     for (const r of ranks) {
       const previous = before.find((b) => b.id === r.id);
-      insert.run(
+      const { lastInsertRowid } = insert.run(
         guildId,
         r.name,
         r.min_elo,
@@ -576,6 +598,17 @@ export function setRanks(
         previous?.discord_role_id ?? null,
         previous?.channels ?? null,
       );
+      if (r.id != null) remap.set(r.id, Number(lastInsertRowid));
+    }
+    for (const row of db
+      .prepare('select id, rank_ids from scenario where guild_id = ? and rank_ids is not null')
+      .all(guildId) as unknown as { id: number; rank_ids: string }[]) {
+      // A rank that was deleted drops out rather than being kept as a dangling
+      // id, and a category left with nothing goes back to being offered to all.
+      const next = (parseRankIds(row.rank_ids) ?? [])
+        .map((id) => remap.get(id))
+        .filter((id): id is number => id != null);
+      reclaim.run(next.length ? JSON.stringify(next) : null, row.id);
     }
   });
   return { ranks: getRanks(guildId), orphaned };

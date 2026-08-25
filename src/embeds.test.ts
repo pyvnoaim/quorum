@@ -74,16 +74,23 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
 // somebody losing a scenario the numbers say they won. The scoreline reads the
 // forfeited scores too: the table and the result are one sum counted twice.
 {
+  // placings come out of the same forfeited scores, so the short player is
+  // second here - a fixture that kept them first would be a card that can't
+  // happen.
   const short = [
-    { ...rows[0], run_counts: JSON.stringify({ [scenarios[0]]: 1, [scenarios[1]]: 3, [scenarios[2]]: 3 }) },
-    { ...rows[1], run_counts: JSON.stringify({ [scenarios[0]]: 3, [scenarios[1]]: 3, [scenarios[2]]: 3 }) },
+    { ...rows[0], placing: 2, run_counts: JSON.stringify({ [scenarios[0]]: 1, [scenarios[1]]: 3, [scenarios[2]]: 3 }) },
+    { ...rows[1], placing: 1, run_counts: JSON.stringify({ [scenarios[0]]: 3, [scenarios[1]]: 3, [scenarios[2]]: 3 }) },
   ] as unknown as typeof rows;
   const e = resultsEmbed(match, short, players, new Map([['a', 15], ['b', -15]]));
-  assert.equal(e.data.title, 'ness beats Jay 2–1 · 1v1', 'the forfeited round went the other way');
+  // Short on one scenario against somebody who played all three out: the whole
+  // match goes, not just that round. Otherwise writing off a scenario to spend
+  // the clock fishing the other two is a 2-1 win.
+  assert.equal(e.data.title, 'Jay beats ness 3–0 · 1v1', 'a scenario short is a match short');
   const row = e.data.description!.split('```')[1].trim().split('\n')[1];
   assert.ok(/\b0\b/.test(row) && !row.includes('5087'), 'the fished score is shown as the 0 it scored');
-  assert.ok(e.data.fields![0].value.includes('forfeited 1 scenario'), 'and the card says why');
-  assert.ok(!e.data.fields![1].value.includes('forfeited'), 'the player who played it out is clean');
+  const card = (name: string) => e.data.fields!.find((f) => f.name.includes(name))!.value;
+  assert.ok(card('ness').includes('forfeited the match'), 'and the card says why');
+  assert.ok(!card('Jay').includes('forfeited'), 'the player who played it out is clean');
 
   // The live board counts a lead exactly as the result will count it, forfeits
   // included - otherwise it tells someone they are winning a scenario they are
@@ -93,9 +100,20 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
     short,
     players,
   );
-  assert.ok(live.data.title!.includes('2–1'), `live lead tracks the result, got ${live.data.title}`);
+  assert.ok(live.data.title!.includes('3–0'), `live lead tracks the result, got ${live.data.title}`);
   const cells = live.data.description!.split('```')[1].trim().split('\n')[1];
   assert.ok(cells.includes('5087') && cells.includes('1/3'), 'but the cell still shows the real run');
+
+  // ...but only against someone who played it out. Two half-played sides are
+  // scored on what they ran: there is nobody here to have forfeited to, and
+  // wiping both would hand two people a win apiece for playing nothing.
+  const neither = [
+    { ...short[0], placing: 1 },
+    { ...rows[1], placing: 2, run_counts: JSON.stringify({ [scenarios[0]]: 3, [scenarios[1]]: 3, [scenarios[2]]: 1 }) },
+  ] as unknown as typeof rows;
+  const n = resultsEmbed(match, neither, players, new Map([['a', 15], ['b', -15]]));
+  assert.equal(n.data.title, 'ness beats Jay 2–1 · 1v1', 'per-scenario forfeits, one each');
+  assert.ok(n.data.fields!.every((f) => !f.value.includes('forfeited the match')));
 }
 
 console.log('embeds ok');

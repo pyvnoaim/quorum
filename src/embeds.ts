@@ -26,7 +26,8 @@ import {
   type Player,
 } from "./db.js";
 import {
-  forfeitUnused,
+  allRunsUsed,
+  forfeits,
   matchDeadline,
   rankFor,
   rankForRoles,
@@ -36,6 +37,14 @@ import {
 
 const BLURPLE = 0x5865f2;
 const GREEN = 0x57f287;
+
+/** Buttons in as few rows as Discord allows - five to a row, so the panel's
+ *  formats and its Notify sit side by side instead of stacking. */
+function rows(buttons: ButtonBuilder[]) {
+  return Array.from({ length: Math.ceil(buttons.length / 5) }, (_, i) =>
+    new ActionRowBuilder<ButtonBuilder>().addComponents(buttons.slice(i * 5, i * 5 + 5)),
+  );
+}
 
 /** The bar down the left of a CALL is the colour of the rank it is for -
  *  whoever opened it. A call pings the bands around it, but it belongs to one
@@ -116,6 +125,32 @@ export function staleEmbed(match: Match) {
     .setFooter(footer());
 }
 
+/** What the call becomes once it fills: a match is on, here are the players,
+ *  it ends about then. The buttons go with it - the game itself is in a private
+ *  thread, so there is nothing left in the channel to press.
+ *
+ *  It replaces the call in place rather than being a second message. The point
+ *  is that a queue channel with a game running should say so instead of going
+ *  quiet, not that it should grow a message every time one starts. Taken down
+ *  when the match ends, so what is on screen is only ever what is happening. */
+export function runningEmbed(match: Match, players: Map<string, Player>) {
+  const names = [...players.values()].map((p) => p.kovaaks_username);
+  const deadline = Math.floor(
+    matchDeadline(match.started_at ?? Date.now(), match.grace_from, getFormat(match.guild_id)) /
+      1000,
+  );
+  return new EmbedBuilder()
+    .setTitle(`${match.format} in play`)
+    .setColor(matchColor(match))
+    .setDescription(
+      // "up to", not "at": the card is written once and the grace window can
+      // pull the real deadline in later. An outer bound stays true either way.
+      `**${names.join("** vs **")}**\n\nPlaying in their own thread` +
+        `${match.started_at ? ` · up to <t:${deadline}:R>` : ""}. The result posts itself.`,
+    )
+    .setFooter(footer());
+}
+
 /** The open call: "someone is looking for a 1v1". Fills up, then starts itself. */
 export function openEmbed(
   match: Match,
@@ -176,6 +211,9 @@ export function panelMessage(
   // This channel's numbers, not the server's: a panel in #novice saying what
   // #elite has been up to is a number nobody in front of it can act on.
   const stats = guildId ? guildStats(guildId, channelId) : null;
+  // Paused: the panel has to say so where the button is, not only refuse the
+  // press. A greyed button with no reason next to it reads as a broken bot.
+  const paused = !!(guildId && getConfig(guildId).queues_paused);
   // An empty ladder is worth saying out loud - "0 played" reads as broken,
   // where "be the first" reads as an invitation.
   const pulse = !stats
@@ -189,9 +227,13 @@ export function panelMessage(
     embeds: [
       new EmbedBuilder()
         .setTitle(formats.length === 1 ? `Quorum · ${formats[0]}` : "Quorum")
-        .setColor(BLURPLE)
+        .setColor(paused ? GREY : BLURPLE)
         .setDescription(
-          `Press ${buttons}. Your call goes up here, and the first person to take it plays you.\n\n` +
+          (paused
+            ? "**Queues are paused.** Staff have closed them for now - nothing new can be " +
+              "opened or taken until they are back on. Matches already running play out.\n\n"
+            : "") +
+            `Press ${buttons}. Your call goes up here, and the first person to take it plays you.\n\n` +
             `You get a private thread to yourselves. Ban and pick **${rounds} scenarios** in it, ` +
             `**${runs} runs each**.\n\n` +
             `Scores are read straight off KovaaK's. Nothing to submit, nothing to screenshot, ` +
@@ -200,29 +242,26 @@ export function panelMessage(
         )
         .setFooter(footer()),
     ],
-    components: [
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        formats.map((f) =>
-          new ButtonBuilder()
-            .setCustomId(`pug:open:${f}`)
-            .setLabel(f)
-            .setStyle(ButtonStyle.Primary),
-        ),
+    components: rows([
+      ...formats.map((f) =>
+        new ButtonBuilder()
+          .setCustomId(`pug:open:${f}`)
+          .setLabel(f)
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(paused),
       ),
       // Only where there is a role to opt into. Self-serve, because the
       // alternative is a second bot for role buttons or an admin handing out a
       // notification role one person at a time.
       ...(guildId && getConfig(guildId).ping_role_id
         ? [
-            new ActionRowBuilder<ButtonBuilder>().addComponents(
-              new ButtonBuilder()
-                .setCustomId("pug:notify")
-                .setLabel("Notify me")
-                .setStyle(ButtonStyle.Secondary),
-            ),
+            new ButtonBuilder()
+              .setCustomId("pug:notify")
+              .setLabel("Notify me")
+              .setStyle(ButtonStyle.Secondary),
           ]
         : []),
-    ],
+    ]),
   };
 }
 
@@ -355,17 +394,21 @@ export function liveEmbed(
   // somebody is still short on is a scenario they are currently losing, and the
   // board has to say that while there is still time to fix it. The cell keeps
   // showing what they actually ran, next to the count that explains the star.
+  const forfeited = forfeits(
+    rows.map((r) => ({
+      id: r.discord_id,
+      scores: scores.get(r.discord_id)!,
+      runCounts: r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null,
+    })),
+    scenarios,
+    runs,
+  );
   const ahead = scenarioWinners(
     rows.map((r) => ({
       id: r.discord_id,
       elo: 0,
       team: r.team,
-      scores: forfeitUnused(
-        scores.get(r.discord_id)!,
-        r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null,
-        scenarios,
-        runs,
-      ),
+      scores: forfeited.get(r.discord_id)!,
     })),
     scenarios,
   );
@@ -400,7 +443,9 @@ export function liveEmbed(
     .setColor(BLURPLE)
     .setDescription(
       `**${runs} run${runs === 1 ? "" : "s"} per scenario**, best of them counts - a later one ` +
-        `does not, and a scenario you stop short on scores **0**. Play them in any order; scores ` +
+        `does not, and a scenario you stop short on scores **0**. Play all ${scenarios.length} ` +
+        `out: against somebody who did, a short scenario forfeits the **whole match**, not just ` +
+        `that round. Play them in any order; scores ` +
         `update on their own.\n\nThe result posts itself once everyone has run all ` +
         `${scenarios.length}, or <t:${deadline}:R> either way - and that clock ` +
         `${match.grace_from ? "is running: somebody has finished" : "closes in once the first of you finishes"}. ` +
@@ -528,16 +573,19 @@ export function resultsEmbed(
   const want = getFormat(match.guild_id).runs;
   const used = (r: MatchPlayer) =>
     r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null;
-  const scores = new Map(
-    rows.map((r) => [
-      r.discord_id,
-      forfeitUnused(
-        JSON.parse(r.scores) as Record<string, number | null>,
-        used(r),
-        scenarios,
-        want,
-      ),
-    ]),
+  // Who played the format out, in row order - the same test forfeits() applies.
+  const playedOut = rows.map((r) => {
+    const c = used(r);
+    return !c || allRunsUsed(scenarios, [c], want);
+  });
+  const scores = forfeits(
+    rows.map((r) => ({
+      id: r.discord_id,
+      scores: JSON.parse(r.scores) as Record<string, number | null>,
+      runCounts: used(r),
+    })),
+    scenarios,
+    want,
   );
   const bests = new Map(
     rows.map((r) => [
@@ -618,15 +666,19 @@ export function resultsEmbed(
     const short = counts
       ? scenarios.filter((s) => (counts[s] ?? 0) > 0 && (counts[s] ?? 0) < want)
       : [];
+    // ...and why a whole row of them is a whole row. See forfeits().
+    const gaveUp = playedOut.some(Boolean) && !playedOut[rows.indexOf(r)];
     return {
       name: `${r.placing == null ? "·" : (medal[r.placing - 1] ?? `#${r.placing}`)} ${p.kovaaks_username}`,
       value:
         `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ""} ` +
         `${r.placing == null ? "· _no scores, not rated_" : `(${delta >= 0 ? "+" : ""}${delta})`}` +
         (pbs ? `\n_${pbs} personal best${pbs === 1 ? "" : "s"}_` : "") +
-        (short.length
-          ? `\n_forfeited ${short.length} scenario${short.length === 1 ? "" : "s"} - runs left unused_`
-          : ""),
+        (gaveUp
+          ? `\n_forfeited the match - did not play all ${scenarios.length} out_`
+          : short.length
+            ? `\n_forfeited ${short.length} scenario${short.length === 1 ? "" : "s"} - runs left unused_`
+            : ""),
       inline: true,
     };
   });
@@ -649,7 +701,9 @@ export function resultsEmbed(
     rolled.length ? `**Rolled** ${rolled.join(", ")}` : "",
   ]
     .filter(Boolean)
-    .join(" · ");
+    // A line each: the ban list wraps to three lines on its own, and "Rolled"
+    // hanging off the end of it read as one more banned scenario.
+    .join("\n");
 
   return new EmbedBuilder()
     .setTitle(title)
