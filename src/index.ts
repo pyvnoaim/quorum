@@ -1214,6 +1214,21 @@ async function onNotify(i: import('discord.js').ButtonInteraction) {
     });
     return;
   }
+  // This button hands a role to anyone who can see the panel, so it must only
+  // ever hand out a role that carries nothing. A ping role pointed - by
+  // mistake or otherwise - at one with permissions would make every member of
+  // the server a moderator by pressing a button.
+  const it = member.guild.roles.cache.get(role);
+  if (!it || it.permissions.bitfield !== 0n || it.managed) {
+    await i.reply({
+      content: !it
+        ? 'That notification role no longer exists - staff will need to pick another.'
+        : 'That role carries permissions, so Quorum will not hand it out. ' +
+          'A notification role should be able to do nothing but get pinged.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
   const had = member.roles.cache.has(role);
   const done = await (had ? member.roles.remove(role) : member.roles.add(role)).then(
     () => true,
@@ -1284,7 +1299,11 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   // pinging the bracket as well would be the thing they opted out of. It still
   // only reaches the right people - the call is posted in a bracket's channel,
   // and Discord does not notify anyone about a channel they cannot see.
-  const optIn = getConfig(i.guildId).ping_role_id;
+  // Gone from Discord is not "ping nobody": a deleted role would leave a raw
+  // <@&id> at the top of every call and reach no one, so the brackets take it
+  // back until staff pick another.
+  const set = getConfig(i.guildId).ping_role_id;
+  const optIn = set && i.guild?.roles.cache.has(set) ? set : null;
   const mentions = optIn
     ? [optIn]
     : [

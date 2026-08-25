@@ -4,8 +4,14 @@ import {
   ButtonStyle,
   EmbedBuilder,
   type Guild,
-} from 'discord.js';
-import { FORMATS, PANEL_FORMATS, ROUNDS, RUNS_PER_SCENARIO, type Format } from './config.js';
+} from "discord.js";
+import {
+  FORMATS,
+  PANEL_FORMATS,
+  ROUNDS,
+  RUNS_PER_SCENARIO,
+  type Format,
+} from "./config.js";
 import {
   getConfig,
   getFormat,
@@ -18,8 +24,8 @@ import {
   type Match,
   type MatchPlayer,
   type Player,
-} from './db.js';
-import { rankFor, rankForRoles, rankName, scenarioWinners } from './rating.js';
+} from "./db.js";
+import { rankFor, rankForRoles, rankName, scenarioWinners } from "./rating.js";
 
 const BLURPLE = 0x5865f2;
 const GREEN = 0x57f287;
@@ -47,7 +53,7 @@ function matchColor(match: Match) {
 /** Every embed ends the same way, and says nothing else down there. Anything a
  *  player has to ACT on belongs in the body at full size - the footer is 12px
  *  grey, which is where a rule goes to be missed. */
-const footer = () => ({ text: 'powered by kova' });
+const footer = () => ({ text: "powered by kova" });
 const GREY = 0x99aab5;
 
 /** The pick phase: one scenario at a time, each out of its own category's
@@ -60,29 +66,33 @@ export function pickEmbed(
     picked: string[];
     cats: string[];
     pool: string[];
-    action: 'ban' | 'pick';
+    action: "ban" | "pick";
     turn: number;
     bansLeft: number;
   },
 ) {
   const { rounds, pickTtlS } = getFormat(match.guild_id);
-  const side = rows.filter((r) => r.team === phase.turn).map((r) => `<@${r.discord_id}>`);
+  const side = rows
+    .filter((r) => r.team === phase.turn)
+    .map((r) => `<@${r.discord_id}>`);
   const slot = phase.picked.length + 1;
-  const locked = phase.picked.map((s, n) => `**${n + 1}.** \`${s}\``).join('\n');
+  const locked = phase.picked
+    .map((s, n) => `**${n + 1}.** \`${s}\``)
+    .join("\n");
 
   return new EmbedBuilder()
     .setTitle(`${match.format} · scenario ${slot} of ${rounds}`)
     .setColor(BLURPLE)
     .setDescription(
-      (locked ? `${locked}\n\n` : '') +
-        `${side.join(' and ')} ${phase.action === 'ban' ? 'bans one' : 'picks one'} ` +
-        `from **${phase.cats[phase.picked.length] ?? 'the pool'}**` +
-        (phase.action === 'ban'
-          ? `. ${phase.bansLeft} ban${phase.bansLeft === 1 ? '' : 's'} before the pick.`
-          : ' to play.') +
+      (locked ? `${locked}\n\n` : "") +
+        `${side.join(" and ")} ${phase.action === "ban" ? "bans one" : "picks one"} ` +
+        `from **${phase.cats[phase.picked.length] ?? "the pool"}**` +
+        (phase.action === "ban"
+          ? `. ${phase.bansLeft} ban${phase.bansLeft === 1 ? "" : "s"} before the pick.`
+          : " to play.") +
         `\n\nScenario ${rounds} is a random roll - nobody picks it. ` +
         `Nobody acts within **${pickTtlS}s** and the bot ${phase.action}s at random.\n\n` +
-        phase.pool.map((s) => `\`${s}\``).join('\n'),
+        phase.pool.map((s) => `\`${s}\``).join("\n"),
     )
     .setFooter(footer());
 }
@@ -93,12 +103,18 @@ export function staleEmbed(match: Match) {
   return new EmbedBuilder()
     .setTitle(`${match.format} · dropped`)
     .setColor(GREY)
-    .setDescription('This match was mid-pick when the bot was updated. Open a new call.')
+    .setDescription(
+      "This match was mid-pick when the bot was updated. Open a new call.",
+    )
     .setFooter(footer());
 }
 
 /** The open call: "someone is looking for a 1v1". Fills up, then starts itself. */
-export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
+export function openEmbed(
+  match: Match,
+  rows: MatchPlayer[],
+  players: Map<string, Player>,
+) {
   const { max } = FORMATS[match.format as Format];
 
   return new EmbedBuilder()
@@ -112,9 +128,9 @@ export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string
           .map((r) => {
             const p = players.get(r.discord_id)!;
             const band = rankLabel(match.guild_id, r.discord_id, p.elo);
-            return `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ''}`;
+            return `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ""}`;
           })
-          .join('\n'),
+          .join("\n"),
     )
     .setFooter(footer());
 }
@@ -127,9 +143,11 @@ export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string
  *  change with a name on it is one people can ask about. */
 export function changeEmbed(lines: string[], byId: string) {
   return new EmbedBuilder()
-    .setTitle('Setup changed')
+    .setTitle("Setup changed")
     .setColor(BLURPLE)
-    .setDescription(`${lines.map((l) => `· ${l}`).join('\n')}\n\nChanged by <@${byId}>.`)
+    .setDescription(
+      `${lines.map((l) => `· ${l}`).join("\n")}\n\nChanged by <@${byId}>.`,
+    )
     .setFooter(footer());
 }
 
@@ -147,23 +165,23 @@ export function panelMessage(
   const { rounds, runs } = guildId
     ? getFormat(guildId)
     : { rounds: ROUNDS, runs: RUNS_PER_SCENARIO };
-  const buttons = formats.map((f) => `**${f}**`).join(' or ');
+  const buttons = formats.map((f) => `**${f}**`).join(" or ");
   // This channel's numbers, not the server's: a panel in #novice saying what
   // #elite has been up to is a number nobody in front of it can act on.
   const stats = guildId ? guildStats(guildId, channelId) : null;
   // An empty ladder is worth saying out loud - "0 played" reads as broken,
   // where "be the first" reads as an invitation.
   const pulse = !stats
-    ? ''
+    ? ""
     : stats.played === 0
-      ? '\n\nNobody has played here yet. Be the first.'
+      ? "\n\nNobody has played here yet. Be the first."
       : `\n\n**${stats.week}** played this week · **${stats.running}** ` +
-        `${stats.running === 1 ? 'match' : 'matches'} up right now`;
+        `${stats.running === 1 ? "match" : "matches"} up right now`;
 
   return {
     embeds: [
       new EmbedBuilder()
-        .setTitle(formats.length === 1 ? `Quorum · ${formats[0]}` : 'Quorum')
+        .setTitle(formats.length === 1 ? `Quorum · ${formats[0]}` : "Quorum")
         .setColor(BLURPLE)
         .setDescription(
           `Press ${buttons}. Your call goes up here, and the first person to take it plays you.\n\n` +
@@ -178,7 +196,10 @@ export function panelMessage(
     components: [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         formats.map((f) =>
-          new ButtonBuilder().setCustomId(`pug:open:${f}`).setLabel(f).setStyle(ButtonStyle.Primary),
+          new ButtonBuilder()
+            .setCustomId(`pug:open:${f}`)
+            .setLabel(f)
+            .setStyle(ButtonStyle.Primary),
         ),
       ),
       // Only where there is a role to opt into. Self-serve, because the
@@ -188,8 +209,8 @@ export function panelMessage(
         ? [
             new ActionRowBuilder<ButtonBuilder>().addComponents(
               new ButtonBuilder()
-                .setCustomId('pug:notify')
-                .setLabel('Notify me')
+                .setCustomId("pug:notify")
+                .setLabel("Notify me")
                 .setStyle(ButtonStyle.Secondary),
             ),
           ]
@@ -209,11 +230,18 @@ export function panelMessage(
  *  Pass the guild only where every row can be resolved the same way. The
  *  leaderboard deliberately does not: half a board labelled and half not reads
  *  as a bug. */
-export function rankLabel(guildId: string, discordId: string, elo: number, guild?: Guild | null) {
+export function rankLabel(
+  guildId: string,
+  discordId: string,
+  elo: number,
+  guild?: Guild | null,
+) {
   const ranks = getRanks(guildId);
-  if (getRankMode(guildId) !== 'manual') return rankName(ranks, elo);
+  if (getRankMode(guildId) !== "manual") return rankName(ranks, elo);
   const held = guild?.members.cache.get(discordId)?.roles.cache;
-  return held ? (rankForRoles(ranks, held.map((r) => r.id) as string[])?.name ?? '') : '';
+  return held
+    ? (rankForRoles(ranks, held.map((r) => r.id) as string[])?.name ?? "")
+    : "";
 }
 
 /** Discord's "Unknown Message" (10008) - the one refusal that means a message
@@ -224,7 +252,9 @@ export function rankLabel(guildId: string, discordId: string, elo: number, guild
  *  limit or a blip taken for a deletion leaves two boards in the channel with
  *  only one of them ever updated again. */
 export const messageGone = (err: unknown) =>
-  typeof err === 'object' && err !== null && (err as { code?: number }).code === 10008;
+  typeof err === "object" &&
+  err !== null &&
+  (err as { code?: number }).code === 10008;
 
 /** Ten to a page: a phone shows about that many lines of a Discord embed before
  *  it starts scrolling, and a leaderboard you have to scroll is one nobody
@@ -247,22 +277,24 @@ export function leaderboardMessage(guildId: string, page = 0) {
 
   const line = (p: Player, n: number) => {
     const games = p.wins + p.losses;
-    const rate = games ? ` (${Math.round((p.wins / games) * 100)}%)` : '';
+    const rate = games ? ` (${Math.round((p.wins / games) * 100)}%)` : "";
     // The top three are the only rows worth a marker - a medal beside eleventh
     // place is decoration, and it pushes the name out of line with the rest.
-    const place = ['🥇', '🥈', '🥉'][n] ?? `**${n + 1}.**`;
+    const place = ["🥇", "🥈", "🥉"][n] ?? `**${n + 1}.**`;
     const band = rankLabel(guildId, p.discord_id, p.elo);
-    return `${place} <@${p.discord_id}> - **${p.elo}**${band ? ` ${band}` : ''} · ` +
-      `${p.wins}W ${p.losses}L${rate}`;
+    return (
+      `${place} <@${p.discord_id}> - **${p.elo}**${band ? ` ${band}` : ""} · ` +
+      `${p.wins}W ${p.losses}L${rate}`
+    );
   };
 
   const embed = new EmbedBuilder()
-    .setTitle('Ladder')
+    .setTitle("Ladder")
     .setColor(BLURPLE)
     .setDescription(
       rows.length
-        ? rows.map((p, n) => line(p, at * LADDER_PAGE + n)).join('\n')
-        : '_no games played yet_',
+        ? rows.map((p, n) => line(p, at * LADDER_PAGE + n)).join("\n")
+        : "_no games played yet_",
     )
     .setFooter({
       text: total
@@ -278,12 +310,12 @@ export function leaderboardMessage(guildId: string, page = 0) {
           new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
               .setCustomId(`pug:lb:${at - 1}`)
-              .setLabel('Back')
+              .setLabel("Back")
               .setStyle(ButtonStyle.Secondary)
               .setDisabled(at === 0),
             new ButtonBuilder()
               .setCustomId(`pug:lb:${at + 1}`)
-              .setLabel('Next')
+              .setLabel("Next")
               .setStyle(ButtonStyle.Secondary)
               .setDisabled(at >= pages - 1),
           ),
@@ -293,25 +325,39 @@ export function leaderboardMessage(guildId: string, page = 0) {
   return { embeds: [embed], components };
 }
 
-export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
+export function liveEmbed(
+  match: Match,
+  rows: MatchPlayer[],
+  players: Map<string, Player>,
+) {
   const scenarios: string[] = JSON.parse(match.scenarios);
   const teams = [...new Set(rows.map((r) => r.team))];
   const scores = new Map(
-    rows.map((r) => [r.discord_id, JSON.parse(r.scores) as Record<string, number | null>]),
+    rows.map((r) => [
+      r.discord_id,
+      JSON.parse(r.scores) as Record<string, number | null>,
+    ]),
   );
   // Who is ahead on each scenario RIGHT NOW, counted exactly as the result will
   // count it. A lead that changes when the match ends would be a different
   // scoreboard, not a live one.
   const ahead = scenarioWinners(
-    rows.map((r) => ({ id: r.discord_id, elo: 0, team: r.team, scores: scores.get(r.discord_id)! })),
+    rows.map((r) => ({
+      id: r.discord_id,
+      elo: 0,
+      team: r.team,
+      scores: scores.get(r.discord_id)!,
+    })),
     scenarios,
   );
-  const tally = new Map(teams.map((t) => [t, ahead.filter((w) => w === t).length]));
+  const tally = new Map(
+    teams.map((t) => [t, ahead.filter((w) => w === t).length]),
+  );
   const side = (team: number) =>
     rows
       .filter((r) => r.team === team)
-      .map((r) => players.get(r.discord_id)?.kovaaks_username ?? 'someone')
-      .join(' & ');
+      .map((r) => players.get(r.discord_id)?.kovaaks_username ?? "someone")
+      .join(" & ");
 
   // Discord renders this relative and per-viewer, so nobody has to work out
   // what time zone the deadline was written in.
@@ -324,7 +370,7 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
   const [a, b] = teams;
   const lead =
     teams.length !== 2 || !ahead.some(Boolean)
-      ? 'ongoing'
+      ? "ongoing"
       : tally.get(a) === tally.get(b)
         ? `level ${tally.get(a)}–${tally.get(b)}`
         : tally.get(a)! > tally.get(b)!
@@ -335,28 +381,39 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
     .setTitle(`${match.format} · ${lead}`)
     .setColor(BLURPLE)
     .setDescription(
-      `**${runs} run${runs === 1 ? '' : 's'} per scenario**, best of them counts - one more does ` +
+      `**${runs} run${runs === 1 ? "" : "s"} per scenario**, best of them counts - one more does ` +
         `not, so there is nothing to gain by grinding. Play them in any order; scores update on ` +
         `their own.\n\nThe result posts itself once everyone has run all ${scenarios.length}, ` +
         `or <t:${deadline}:R> either way. **Done** ends it early for both of you.` +
-        '\n```\n' +
+        "\n```\n" +
         scoreTable(
           scenarios,
-          rows.map((r) => ({
-            head: players.get(r.discord_id)?.kovaaks_username ?? '?',
-            cell: (s: string) => {
-              const score = scores.get(r.discord_id)![s];
-              const used = (JSON.parse(r.run_counts ?? '{}') as Record<string, number>)[s] ?? 0;
-              // The run count only shows while it is still short - a scenario
-              // they have finished with is just a score, and what is left to
-              // play is what the reader is looking for.
-              const shown = score?.toFixed(0) ?? '–';
-              const star = score != null && ahead[scenarios.indexOf(s)] === r.team ? '*' : '';
-              return used > 0 && used < runs ? `${shown}${star} ${used}/${runs}` : shown + star;
-            },
-          })),
+          rows.map((r) => {
+            const used = JSON.parse(r.run_counts ?? "{}") as Record<
+              string,
+              number
+            >;
+            return {
+              head: players.get(r.discord_id)?.kovaaks_username ?? "?",
+              cell: (s: string) => {
+                const score = scores.get(r.discord_id)![s];
+                const runsOn = used[s] ?? 0;
+                // The run count only shows while it is still short - a scenario
+                // they have finished with is just a score, and what is left to
+                // play is what the reader is looking for.
+                const shown = score?.toFixed(0) ?? "–";
+                const star =
+                  score != null && ahead[scenarios.indexOf(s)] === r.team
+                    ? "*"
+                    : "";
+                return runsOn > 0 && runsOn < runs
+                  ? `${shown}${star} ${runsOn}/${runs}`
+                  : shown + star;
+              },
+            };
+          }),
         ) +
-        '\n```',
+        "\n```",
     );
 
   // The scores moved into the board above, so a side is down to the one thing
@@ -364,10 +421,12 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
   for (const team of teams) {
     const members = rows.filter((r) => r.team === team);
     embed.addFields({
-      name: teams.length > 1 && members.length > 1 ? `Team ${team + 1}` : '​',
+      name: teams.length > 1 && members.length > 1 ? `Team ${team + 1}` : "​",
       value: members
-        .map((r) => `${r.done ? '✅ done' : '· still playing'} <@${r.discord_id}>`)
-        .join('\n'),
+        .map(
+          (r) => `${r.done ? "✅ done" : "· still playing"} <@${r.discord_id}>`,
+        )
+        .join("\n"),
       inline: true,
     });
   }
@@ -381,7 +440,7 @@ export function noContestEmbed(match: Match, rows: MatchPlayer[]) {
     .setTitle(`${match.format} · no result`)
     .setColor(GREY)
     .setDescription(
-      `${rows.map((r) => `<@${r.discord_id}>`).join(' and ')} - nobody ran a scenario, ` +
+      `${rows.map((r) => `<@${r.discord_id}>`).join(" and ")} - nobody ran a scenario, ` +
         "so nothing was rated. No Elo moved and the match is not on anyone's record.",
     )
     .setFooter(footer());
@@ -390,26 +449,46 @@ export function noContestEmbed(match: Match, rows: MatchPlayer[]) {
 /** Fits a name into a fixed column, so a long scenario cannot shove a whole
  *  table sideways on a phone. Cut names keep a marker, or a truncation reads as
  *  the scenario's actual name. */
-const fit = (text: string, width: number) =>
-  (text.length > width ? text.slice(0, width - 1) + '…' : text).padEnd(width);
+const fit = (text: string, width: number) => {
+  // by character, not by code unit: slicing a KovaaK's name with an emoji in it
+  // halfway through a surrogate pair prints a broken glyph.
+  const glyphs = [...text];
+  return (
+    glyphs.length > width ? glyphs.slice(0, width - 1).join("") + "…" : text
+  ).padEnd(width);
+};
 
 /** The scoreboard both the live card and the result share: one row per
  *  scenario, one column per player, everything aligned so a number can be read
  *  against the scenario it was set on. A phone shows about 40 characters of a
  *  code block before it scrolls, which is what the widths are cut to. */
-function scoreTable(scenarios: string[], cols: { head: string; cell: (s: string) => string }[]) {
+function scoreTable(
+  scenarios: string[],
+  cols: { head: string; cell: (s: string) => string }[],
+) {
   const widths = cols.map((c) =>
-    Math.max(6, c.head.slice(0, 8).length, ...scenarios.map((s) => c.cell(s).length)),
+    Math.max(
+      6,
+      c.head.slice(0, 8).length,
+      ...scenarios.map((s) => c.cell(s).length),
+    ),
   );
-  const row = (name: string, cell: (c: (typeof cols)[number], n: number) => string) =>
+  const row = (
+    name: string,
+    cell: (c: (typeof cols)[number], n: number) => string,
+  ) =>
     // 19 and a space, not 20: a name that fills its column whole would
     // otherwise run straight into the first score.
-    (fit(name, 19) + ' ' + cols.map((c, n) => cell(c, n).padEnd(widths[n])).join(' ')).trimEnd();
+    (
+      fit(name, 19) +
+      " " +
+      cols.map((c, n) => cell(c, n).padEnd(widths[n])).join(" ")
+    ).trimEnd();
 
   return [
-    row('SCENARIO', (c, n) => fit(c.head.toUpperCase(), widths[n])),
+    row("SCENARIO", (c, n) => fit(c.head.toUpperCase(), widths[n])),
     ...scenarios.map((s) => row(s, (c) => c.cell(s))),
-  ].join('\n');
+  ].join("\n");
 }
 
 export function resultsEmbed(
@@ -419,29 +498,44 @@ export function resultsEmbed(
   deltas: Map<string, number>,
 ) {
   const scenarios: string[] = JSON.parse(match.scenarios);
-  const ordered = [...rows].sort((a, b) => (a.placing ?? 99) - (b.placing ?? 99));
-  const medal = ['🥇', '🥈', '🥉'];
+  const ordered = [...rows].sort(
+    (a, b) => (a.placing ?? 99) - (b.placing ?? 99),
+  );
+  const medal = ["🥇", "🥈", "🥉"];
   const scores = new Map(
-    rows.map((r) => [r.discord_id, JSON.parse(r.scores) as Record<string, number | null>]),
+    rows.map((r) => [
+      r.discord_id,
+      JSON.parse(r.scores) as Record<string, number | null>,
+    ]),
   );
   const bests = new Map(
-    rows.map((r) => [r.discord_id, JSON.parse(r.pb ?? '{}') as Record<string, number | null>]),
+    rows.map((r) => [
+      r.discord_id,
+      JSON.parse(r.pb ?? "{}") as Record<string, number | null>,
+    ]),
   );
 
   // Who took each scenario, so the card can say 2-1. Same team totals the
   // placings were worked out from - the scoreline and the medals cannot
   // disagree, because they are the same sum counted twice.
   const won = scenarioWinners(
-    rows.map((r) => ({ id: r.discord_id, elo: 0, team: r.team, scores: scores.get(r.discord_id)! })),
+    rows.map((r) => ({
+      id: r.discord_id,
+      elo: 0,
+      team: r.team,
+      scores: scores.get(r.discord_id)!,
+    })),
     scenarios,
   );
   const teams = [...new Set(ordered.map((r) => r.team))];
-  const tally = new Map(teams.map((t) => [t, won.filter((w) => w === t).length]));
+  const tally = new Map(
+    teams.map((t) => [t, won.filter((w) => w === t).length]),
+  );
   const named = (team: number) =>
     ordered
       .filter((r) => r.team === team)
       .map((r) => players.get(r.discord_id)!.kovaaks_username)
-      .join(' & ');
+      .join(" & ");
 
   // "ness beats Jay 3-1" - the one thing the card never said. Two sides only:
   // past that a scoreline needs a table of its own, and the fields below are
@@ -462,9 +556,12 @@ export function resultsEmbed(
   // them in full.
   const cell = (r: MatchPlayer, scenario: string) => {
     const score = scores.get(r.discord_id)![scenario];
-    if (score == null) return '–';
+    if (score == null) return "–";
     // The star is the scenario's winner, which is what the scoreline counts.
-    return score.toFixed(0) + (won[scenarios.indexOf(scenario)] === r.team ? '*' : '');
+    return (
+      score.toFixed(0) +
+      (won[scenarios.indexOf(scenario)] === r.team ? "*" : "")
+    );
   };
   const table = scoreTable(
     scenarios,
@@ -484,11 +581,11 @@ export function resultsEmbed(
       return now != null && prior != null && now - prior >= 1;
     }).length;
     return {
-      name: `${r.placing == null ? '·' : (medal[r.placing - 1] ?? `#${r.placing}`)} ${p.kovaaks_username}`,
+      name: `${r.placing == null ? "·" : (medal[r.placing - 1] ?? `#${r.placing}`)} ${p.kovaaks_username}`,
       value:
-        `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ''} ` +
-        `${r.placing == null ? '· _no scores, not rated_' : `(${delta >= 0 ? '+' : ''}${delta})`}` +
-        (pbs ? `\n_${pbs} personal best${pbs === 1 ? '' : 's'}_` : ''),
+        `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ""} ` +
+        `${r.placing == null ? "· _no scores, not rated_" : `(${delta >= 0 ? "+" : ""}${delta})`}` +
+        (pbs ? `\n_${pbs} personal best${pbs === 1 ? "" : "s"}_` : ""),
       inline: true,
     };
   });
@@ -500,21 +597,23 @@ export function resultsEmbed(
   // were chosen the same way.
   const offered: string[] = match.ban_pool ? JSON.parse(match.ban_pool) : [];
   const banned = [...new Set(offered.filter((s) => !scenarios.includes(s)))];
-  const rolled = offered.length ? scenarios.filter((s) => !offered.includes(s)) : [];
+  const rolled = offered.length
+    ? scenarios.filter((s) => !offered.includes(s))
+    : [];
   const shown = banned.slice(0, 6);
   const draft = [
     banned.length
-      ? `**Banned** ${shown.join(', ')}${banned.length > shown.length ? ` +${banned.length - shown.length} more` : ''}`
-      : '',
-    rolled.length ? `**Rolled** ${rolled.join(', ')}` : '',
+      ? `**Banned** ${shown.join(", ")}${banned.length > shown.length ? ` +${banned.length - shown.length} more` : ""}`
+      : "",
+    rolled.length ? `**Rolled** ${rolled.join(", ")}` : "",
   ]
     .filter(Boolean)
-    .join(' · ');
+    .join(" · ");
 
   return new EmbedBuilder()
     .setTitle(title)
     .setColor(GREEN)
-    .setDescription('```\n' + table + '\n```' + (draft ? `\n${draft}` : ''))
+    .setDescription("```\n" + table + "\n```" + (draft ? `\n${draft}` : ""))
     .addFields(fields)
     .setFooter(footer());
 }
@@ -525,6 +624,6 @@ export const rematchRow = (match: Match) =>
   new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(`pug:rematch:${match.id}`)
-      .setLabel('Rematch')
+      .setLabel("Rematch")
       .setStyle(ButtonStyle.Secondary),
   );

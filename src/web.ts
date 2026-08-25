@@ -820,9 +820,14 @@ export function startWeb(client: Client, hooks: Hooks) {
         // the bot happened to see them again. Fetch the ones missing; the
         // fetch caches, so this is once per player per boot and nothing at all
         // on the loads after it.
+        // ponytail: 60 at a time. A server with hundreds of players would
+        // otherwise open hundreds of requests at once on the first load after a
+        // restart and sit behind its own rate limit; what this misses is
+        // filled in by the next load, and by then the rest are cached.
         await Promise.all(
           players
             .filter((p) => !client.users.cache.has(p.discord_id))
+            .slice(0, 60)
             .map((p) => client.users.fetch(p.discord_id).catch(() => null)),
         );
         // With staff-owned brackets the ROLE is the bracket, so the list has to
@@ -835,6 +840,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           await Promise.all(
             players
               .filter((p) => !guild.members.cache.has(p.discord_id))
+              .slice(0, 60)
               .map((p) => guild.members.fetch(p.discord_id).catch(() => null)),
           );
         }
@@ -1241,7 +1247,7 @@ export function startWeb(client: Client, hooks: Hooks) {
             // names somebody else's rank would file a scenario under a bracket
             // this ladder cannot reach, and nothing would ever draw it.
             const rank_ids = Array.isArray(r.rank_ids)
-              ? r.rank_ids.filter((id: unknown) => rankIds.has(id as number))
+              ? [...new Set(r.rank_ids.filter((id: unknown) => rankIds.has(id as number)))]
               : null;
             return {
               category,
