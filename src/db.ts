@@ -1029,12 +1029,15 @@ export function headToHead(a: string, b: string, guildId: string) {
   return { wins: row?.wins ?? 0, losses: row?.losses ?? 0 };
 }
 
-/** Their last few finished games. A no-show is left out on purpose: it has no
- *  placing, because nothing was scored. */
+/** Their last few finished games, and who was on the other side of each. A
+ *  no-show is left out on purpose: it has no placing, because nothing was
+ *  scored - and so is a team-mate, who says nothing about how the game went.
+ *
+ *  Two queries whatever the limit, the same shape matchHistory uses. */
 export function recentMatches(discordId: string, guildId: string, limit = 5) {
-  return db
+  const rows = db
     .prepare(
-      `select m.id, m.format, m.ended_at, p.placing, p.elo_before, p.elo_after
+      `select m.id, m.format, m.ended_at, p.placing, p.team, p.elo_before, p.elo_after
        from match_player p join match m on m.id = p.match_id
        where p.discord_id = ? and m.guild_id = ? and p.placing is not null
        order by m.ended_at desc limit ?`,
@@ -1044,9 +1047,37 @@ export function recentMatches(discordId: string, guildId: string, limit = 5) {
     format: string;
     ended_at: number | null;
     placing: number;
+    team: number;
     elo_before: number | null;
     elo_after: number | null;
   }[];
+  if (!rows.length) return rows.map((r) => ({ ...r, opponents: [] as Opponent[] }));
+
+  const holes = rows.map(() => '?').join(',');
+  const others = db
+    .prepare(
+      `select mp.match_id, mp.discord_id, mp.team, pl.kovaaks_username
+       from match_player mp join player pl on pl.discord_id = mp.discord_id
+       where mp.match_id in (${holes}) and mp.discord_id <> ?`,
+    )
+    .all(...rows.map((r) => r.id), discordId) as unknown as {
+    match_id: number;
+    discord_id: string;
+    team: number;
+    kovaaks_username: string;
+  }[];
+
+  return rows.map((r) => ({
+    ...r,
+    opponents: others
+      .filter((o) => o.match_id === r.id && o.team !== r.team)
+      .map((o) => ({ id: o.discord_id, name: o.kovaaks_username })),
+  }));
+}
+
+export interface Opponent {
+  id: string;
+  name: string;
 }
 
 /** Rounds won and lost per main category, over every rated match they finished.

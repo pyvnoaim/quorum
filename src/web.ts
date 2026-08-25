@@ -898,8 +898,10 @@ export function startWeb(client: Client, hooks: Hooks) {
         });
         res.end(
           profilePage({
+            guildId,
             guildName: guild.name,
             discordId,
+            url: `${BASE_URL}/p/${guildId}/${discordId}`,
             name: player.kovaaks_username,
             avatar: client.users.cache.get(discordId)?.avatar ?? null,
             elo: player.elo,
@@ -919,6 +921,7 @@ export function startWeb(client: Client, hooks: Hooks) {
               // a curve that dives to 0 for it would be a lie about a season.
               elo: m.elo_after ?? player.elo,
               at: m.ended_at,
+              against: m.opponents,
             })),
           }),
         );

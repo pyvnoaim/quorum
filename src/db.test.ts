@@ -299,6 +299,11 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   seed(104, 4000, null, null);
   // a third player h1 never met
   db.prepare("insert into match_player (match_id, discord_id, team, placing) values (101,'h3',1,2)").run();
+  // ...and one on h1's own side, who is not an opponent whatever the result
+  db.prepare("insert into match_player (match_id, discord_id, team, placing) values (102,'h4',0,1)").run();
+  for (const [id, name] of [['h1', 'One'], ['h2', 'Two'], ['h3', 'Three'], ['h4', 'Four']]) {
+    ensurePlayer(id, name);
+  }
 
   assert.deepEqual(headToHead('h1', 'h2', 'gh'), { wins: 2, losses: 1 });
   assert.deepEqual(headToHead('h2', 'h1', 'gh'), { wins: 1, losses: 2 }, 'and the other way round');
@@ -308,6 +313,17 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   const form = recentMatches('h1', 'gh');
   assert.deepEqual(form.map((m) => m.id), [103, 102, 101], 'newest first, no-contest left out');
   assert.equal(form[0].elo_after! - form[0].elo_before!, -16);
+  // Who was on the other side, and only them: a team-mate is not an opponent.
+  assert.deepEqual(
+    form.find((m) => m.id === 101)!.opponents.map((o) => o.name).sort(),
+    ['Three', 'Two'],
+    'everyone on the other side',
+  );
+  assert.deepEqual(
+    form.find((m) => m.id === 102)!.opponents.map((o) => o.name),
+    ['Two'],
+    'and nobody on their own',
+  );
 }
 
 // Rounds by category: won where their side took the scenario, and filed under

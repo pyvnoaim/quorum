@@ -2335,6 +2335,7 @@ boot();
 
 /** One player's page, for anyone with the link. */
 export interface Profile {
+  guildId: string;
   guildName: string;
   discordId: string;
   name: string;
@@ -2348,7 +2349,18 @@ export interface Profile {
   seededFrom: string | null;
   cats: { main: string; won: number; lost: number }[];
   /** Oldest first - the curve reads left to right. */
-  history: { format: string; won: boolean; delta: number; elo: number; at: number | null }[];
+  history: {
+    format: string;
+    won: boolean;
+    delta: number;
+    elo: number;
+    at: number | null;
+    /** Everyone who was on the other side, linked to their own page. */
+    against: { id: string; name: string }[];
+  }[];
+  /** This page's own address. Everything on the page can be relative; a link
+   *  preview cannot - Discord will not follow a relative og:url. */
+  url: string;
 }
 
 const esc = (s: string) =>
@@ -2389,6 +2401,15 @@ export function profilePage(p: Profile): string {
     ? `https://cdn.discordapp.com/avatars/${p.discordId}/${p.avatar}.png?size=80`
     : `https://cdn.discordapp.com/embed/avatars/${(BigInt(p.discordId) >> 22n) % 6n}.png`;
   const recent = [...p.history].reverse().slice(0, 10);
+  // What the card in Discord says. The page gets pasted into chat far more than
+  // it gets opened from a browser bar, so this line is most of what people
+  // actually read: rating and bracket up top, the record and the categories
+  // under it.
+  const headline = `${p.elo}${p.rank ? ` · ${p.rank.name}` : ''}`;
+  const summary =
+    `${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ''}` +
+    (games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ' · no games yet') +
+    (p.cats.length ? `\n${p.cats.map((c) => `${c.main} ${c.won}–${c.lost}`).join(' · ')}` : '');
 
   return /* html */ `<!doctype html>
 <html lang="en">
@@ -2396,6 +2417,17 @@ export function profilePage(p: Profile): string {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${esc(p.name)} · Quorum</title>
+<meta name="description" content="${esc(headline)} - ${esc(summary.replace(/\n/g, ' - '))}" />
+<meta property="og:type" content="profile" />
+<meta property="og:site_name" content="Quorum · ${esc(p.guildName)}" />
+<meta property="og:title" content="${esc(p.name)} · ${esc(headline)}" />
+<meta property="og:description" content="${esc(summary)}" />
+<meta property="og:image" content="${avatar.replace('size=80', 'size=160')}" />
+<meta property="og:url" content="${esc(p.url)}" />
+<!-- Discord reads og: for the card and this for the small square avatar beside
+     it; without it the image above is blown up the width of the embed. -->
+<meta name="twitter:card" content="summary" />
+${p.rank ? `<meta name="theme-color" content="${esc(p.rank.color)}" />` : ''}
 <link rel="icon" href="data:image/svg+xml,${encodeURIComponent(FAVICON)}" />
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2435,7 +2467,15 @@ export function profilePage(p: Profile): string {
     padding: 7px 0; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
   .game .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--bad); flex: none; }
   .game.win .dot { background: var(--fg); }
+  /* The one thing on the row that can be any length, so it is the one thing
+     that gives - the date and the delta down the right stay in their column. */
+  .game .vs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .game .vs a { color: var(--fg); text-decoration: none; }
+  .game .vs a:hover { text-decoration: underline; }
+  .game time { margin-left: auto; padding-left: 12px; white-space: nowrap; }
   .game .d { margin-left: auto; color: var(--fg); }
+  /* ...but only one of them can push, or a row with a date gets two gaps. */
+  .game time ~ .d { margin-left: 12px; }
   .game .d.down { color: var(--bad); }
   .empty { color: var(--muted); font-size: 13px; }
   footer { margin-top: 44px; color: var(--muted); font-size: 12px; }
@@ -2485,6 +2525,16 @@ export function profilePage(p: Profile): string {
           .map(
             (m) => `<div class="game${m.won ? ' win' : ''}"><span class="dot"></span>
       <span>${esc(m.format)}</span>
+      ${
+        m.against.length
+          ? `<span class="vs">vs ${m.against
+              .map(
+                (o) =>
+                  `<a href="/p/${esc(p.guildId)}/${esc(o.id)}">${esc(o.name)}</a>`,
+              )
+              .join(' &amp; ')}</span>`
+          : ''
+      }
       ${m.at ? `<time datetime="${new Date(m.at).toISOString()}"></time>` : ''}
       <span class="d${m.delta < 0 ? ' down' : ''}">${m.delta >= 0 ? '+' : ''}${m.delta}</span></div>`,
           )

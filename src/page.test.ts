@@ -10,8 +10,10 @@ const { PAGE, profilePage } = await import('./page.js');
 // The profile page is built per request rather than baked into a constant, so
 // the same check has to see one actually rendered.
 const profile = profilePage({
+  guildId: '111',
   guildName: 'Server & "co"',
   discordId: '109871768372789248',
+  url: 'https://quorum.example.com/p/111/109871768372789248',
   name: '<script>',
   avatar: null,
   elo: 1180,
@@ -22,18 +24,26 @@ const profile = profilePage({
   seededFrom: 'flat',
   cats: [{ main: 'Clicking', won: 5, lost: 3 }],
   history: [
-    { format: '1v1', won: true, delta: 12, elo: 1168, at: 1700000000000 },
-    { format: '1v1', won: false, delta: -9, elo: 1180, at: null },
+    { format: '1v1', won: true, delta: 12, elo: 1168, at: 1700000000000, against: [{ id: '222', name: 'ness & co' }] },
+    // a match whose other side has since been deleted still draws a row
+    { format: '1v1', won: false, delta: -9, elo: 1180, at: null, against: [] },
   ],
 });
 assert.ok(!profile.includes('<script>&'), 'a name is escaped, not run');
 assert.ok(profile.includes('&lt;script&gt;'));
 assert.ok(profile.includes('Server &amp; &quot;co&quot;'));
+assert.ok(profile.includes('href="/p/111/222"'), 'the opponent links to their own page');
+assert.ok(profile.includes('ness &amp; co'), 'and their name is escaped too');
+// The card in Discord is most of what people see of this page.
+assert.ok(profile.includes('property="og:title" content="&lt;script&gt; · 1180 · Platinum"'));
+assert.ok(profile.includes('property="og:url" content="https://quorum.example.com/p/111/109871768372789248"'));
 // An empty record still renders: the page is public, and a link that 500s is
 // worse than a page saying nothing has been played.
 profilePage({
+  guildId: '1',
   guildName: 'g',
   discordId: '1',
+  url: 'http://localhost:3000/p/1/1',
   name: 'nobody',
   avatar: null,
   elo: 1050,
