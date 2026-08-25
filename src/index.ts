@@ -41,6 +41,7 @@ import {
   poolFor,
   rankChannels,
   getScenarios,
+  categoryRecord,
   headToHead,
   matchPlayers,
   recentMatches,
@@ -65,7 +66,7 @@ import {
   resultsEmbed,
   staleEmbed,
 } from './embeds.js';
-import { startWeb } from './web.js';
+import { startWeb, profileUrl } from './web.js';
 import { kovaaksAccountForDiscordId, scoreInWindow, voltaicS5 } from './kovaaks.js';
 import {
   advancePick,
@@ -1096,8 +1097,12 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
     // Draws are games played, so they belong in the total the rate is over.
     const games = p.wins + p.losses + p.draws;
     const band = rankLabel(i.guildId!, target.id, p.elo, i.guild);
+    // The title carries the link to their page - a card with a url on it is
+    // one press, and the alternative is a naked link under the embed.
+    const url = profileUrl(i.guildId!, target.id);
     const embed = new EmbedBuilder()
       .setTitle(p.kovaaks_username)
+      .setURL(url)
       .setColor(0x5865f2)
       .setDescription(
         // One player, so the bracket can come off their role where Quorum has
@@ -1105,6 +1110,17 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
         // inconsistent with.
         `**${p.elo}**${band ? ` ${band}` : ''}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ''}${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
       );
+
+    // What to grind, which is the one thing a rating cannot say. Rounds rather
+    // than matches, so a category you carry a lost match on still counts for
+    // you - see categoryRecord().
+    const cats = categoryRecord(target.id, i.guildId!);
+    if (cats.length) {
+      embed.addFields({
+        name: 'Rounds',
+        value: cats.map((c) => `${c.main} **${c.won}**–${c.lost}`).join(' · '),
+      });
+    }
 
     const recent = recentMatches(target.id, i.guildId!);
     if (recent.length) {

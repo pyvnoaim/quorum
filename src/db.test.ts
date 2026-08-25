@@ -18,6 +18,7 @@ const {
   getFormat,
   getRankSpread,
   guildStats,
+  categoryRecord,
   headToHead,
   ladderSize,
   leaderboard,
@@ -307,6 +308,58 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   const form = recentMatches('h1', 'gh');
   assert.deepEqual(form.map((m) => m.id), [103, 102, 101], 'newest first, no-contest left out');
   assert.equal(form[0].elo_after! - form[0].elo_before!, -16);
+}
+
+// Rounds by category: won where their side took the scenario, and filed under
+// the main the pool says it belongs to.
+{
+  const C = 'gc';
+  setScenarios(C, [
+    { category: 'Static', name: 'Click1', main: 'Clicking', rank_ids: null },
+    { category: 'Tracking', name: 'Track1', main: 'Tracking', rank_ids: null },
+    { category: 'Switching', name: 'Sw1', main: 'Switching', rank_ids: null },
+    { category: 'Clicking', name: 'Gone', main: 'Clicking', rank_ids: null },
+  ]);
+  const runs = getFormat(C).runs;
+  const played = (score: number) => JSON.stringify({ Click1: score, Track1: score, Sw1: score });
+  const counts = JSON.stringify({ Click1: runs, Track1: runs, Sw1: runs });
+  const seed = (id: number, ranked: number, a: string, b: string) => {
+    db.prepare(
+      `insert into match (id, guild_id, channel_id, host_id, format, status, ended_at, scenarios, ranked)
+       values (?,'gc','c','c1','1v1','done',?,'["Click1","Track1","Sw1"]',?)`,
+    ).run(id, id, ranked);
+    db.prepare(
+      'insert into match_player (match_id, discord_id, team, placing, scores, run_counts) values (?,?,?,?,?,?)',
+    ).run(id, 'c1', 0, 1, a, counts);
+    db.prepare(
+      'insert into match_player (match_id, discord_id, team, placing, scores, run_counts) values (?,?,?,?,?,?)',
+    ).run(id, 'c2', 1, 2, b, counts);
+  };
+  // c1 takes every round of the first, c2 takes every round of the second, and
+  // the third is a dead level draw - nobody's round.
+  seed(400, 1, played(100), played(50));
+  seed(401, 1, played(50), played(100));
+  seed(402, 1, played(70), played(70));
+  // ...and an unranked game moves nothing here either, the same as the W/L it
+  // never wrote.
+  seed(403, 0, played(100), played(10));
+
+  assert.deepEqual(categoryRecord('c1', C), [
+    { main: 'Clicking', won: 1, lost: 1 },
+    { main: 'Tracking', won: 1, lost: 1 },
+    { main: 'Switching', won: 1, lost: 1 },
+  ]);
+  assert.deepEqual(categoryRecord('c2', C), [
+    { main: 'Clicking', won: 1, lost: 1 },
+    { main: 'Tracking', won: 1, lost: 1 },
+    { main: 'Switching', won: 1, lost: 1 },
+  ], 'and the other side reads the mirror of it');
+  assert.deepEqual(categoryRecord('c1', 'elsewhere'), [], 'scoped to a server');
+
+  // A scenario dropped from the pool has no main left to file under, so its
+  // rounds are left out rather than guessed at.
+  setScenarios(C, [{ category: 'Static', name: 'Click1', main: 'Clicking', rank_ids: null }]);
+  assert.deepEqual(categoryRecord('c1', C), [{ main: 'Clicking', won: 1, lost: 1 }]);
 }
 
 // Deleting a match hands back exactly what it paid out - rating and record

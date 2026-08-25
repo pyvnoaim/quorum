@@ -242,6 +242,10 @@ export const PAGE = /* html */ `<!doctype html>
   .field:has(+ .bar) { margin-bottom: 0; }
   label { display: block; font-size: 13px; margin-bottom: 6px; }
   label .hint { color: var(--muted); }
+  /* The name in the players pane is the way to their page - underlined on
+     hover only, or every row reads as a wall of links. */
+  .pname { color: inherit; text-decoration: none; }
+  .pname:hover { text-decoration: underline; }
   input[type=text], input[type=number] {
     width: 100%; background: var(--panel); color: var(--fg); border: 1px solid var(--line);
     border-radius: 6px; padding: 9px 11px; font: inherit; font-size: 14px; appearance: none;
@@ -2115,7 +2119,8 @@ async function renderGuild(guild) {
       <tr>
         <td style="width:1px"><img class="pfp" src="\${avatarUrl({ id: p.discord_id, avatar: p.avatar })}" alt="" /></td>
         <td style="width:100%">
-          \${h(p.kovaaks_username)}
+          <a class="pname" href="/p/\${h(guild.id)}/\${h(p.discord_id)}" target="_blank" rel="noopener"
+             title="Their page - open to anyone with the link">\${h(p.kovaaks_username)}</a>
           <span class="hint">\${p.wins}W \${p.losses}L\${p.draws ? ' ' + p.draws + 'D' : ''}</span>
         </td>
         <td style="white-space:nowrap">\${voltaicChip(p.voltaic)}</td>
@@ -2327,3 +2332,174 @@ boot();
 </script>
 </body>
 </html>`;
+
+/** One player's page, for anyone with the link. */
+export interface Profile {
+  guildName: string;
+  discordId: string;
+  name: string;
+  /** Discord's avatar hash, or null for whoever the gateway hasn't cached. */
+  avatar: string | null;
+  elo: number;
+  rank: { name: string; color: string } | null;
+  wins: number;
+  losses: number;
+  draws: number;
+  seededFrom: string | null;
+  cats: { main: string; won: number; lost: number }[];
+  /** Oldest first - the curve reads left to right. */
+  history: { format: string; won: boolean; delta: number; elo: number; at: number | null }[];
+}
+
+const esc = (s: string) =>
+  s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+
+/** The rating curve. Stretched to the box with preserveAspectRatio and kept at
+ *  one pixel by non-scaling-stroke, which is the whole reason this needs no
+ *  measuring and no chart library. */
+function spark(values: number[]) {
+  if (values.length < 2) return '';
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  // A rating that never moved is a line down the MIDDLE. Dividing by a zero
+  // span would pin it to the floor of the box, which reads as a collapse.
+  const at = (n: number) => (hi === lo ? 0.5 : (n - lo) / (hi - lo));
+  const pts = values
+    .map((n, i) => `${(i / (values.length - 1)) * 100},${28 - at(n) * 26}`)
+    .join(' ');
+  return (
+    '<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">' +
+    `<polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.5" ` +
+    'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>'
+  );
+}
+
+/**
+ * A player's record as a page anyone can open - no sign-in, because the point
+ * of it is being pasted somewhere. It carries what the results channel already
+ * says out loud: rating, record, rounds by category, last games. Nothing that
+ * is only on the dashboard, and nothing Discord doesn't already show.
+ *
+ * ponytail: server-rendered in one string. The dashboard is an app and needs to
+ * be; this is a page that never changes while you look at it.
+ */
+export function profilePage(p: Profile): string {
+  const games = p.wins + p.losses + p.draws;
+  const avatar = p.avatar
+    ? `https://cdn.discordapp.com/avatars/${p.discordId}/${p.avatar}.png?size=80`
+    : `https://cdn.discordapp.com/embed/avatars/${(BigInt(p.discordId) >> 22n) % 6n}.png`;
+  const recent = [...p.history].reverse().slice(0, 10);
+
+  return /* html */ `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${esc(p.name)} · Quorum</title>
+<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(FAVICON)}" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0a0a0a; --fg: #ededed; --muted: #8a8a8a; --line: #262626; --panel: #111;
+    --bad: #f0666b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #fafafa; --fg: #111; --muted: #6b6b6b; --line: #e2e2e2; --panel: #fff; --bad: #c0392b; }
+  }
+  body {
+    background: var(--bg); color: var(--fg); font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased; display: flex; justify-content: center;
+  }
+  main { width: 100%; max-width: 560px; padding: 64px 24px; }
+  header { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 600;
+    letter-spacing: -0.025em; margin-bottom: 40px; }
+  header .mark { width: 17px; height: 17px; }
+  header span { color: var(--muted); font-weight: 400; }
+  .who { display: flex; align-items: center; gap: 14px; }
+  .who img { width: 52px; height: 52px; border-radius: 999px; }
+  .elo { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1;
+    display: flex; align-items: baseline; gap: 9px; }
+  .rank { font-size: 12px; font-weight: 500; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid currentColor; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
+  .spark { width: 100%; height: 64px; margin: 28px 0 4px; color: var(--muted); display: block; }
+  h2 { font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .06em; margin: 36px 0 12px; }
+  .cat { display: grid; grid-template-columns: 90px 1fr 52px; align-items: center; gap: 12px;
+    font-size: 13px; padding: 6px 0; }
+  .cat .bar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .cat .bar i { display: block; height: 100%; background: var(--fg); }
+  .cat .n { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .cat .n b { color: var(--fg); font-weight: 500; }
+  .game { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted);
+    padding: 7px 0; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  .game .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--bad); flex: none; }
+  .game.win .dot { background: var(--fg); }
+  .game .d { margin-left: auto; color: var(--fg); }
+  .game .d.down { color: var(--bad); }
+  .empty { color: var(--muted); font-size: 13px; }
+  footer { margin-top: 44px; color: var(--muted); font-size: 12px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <svg class="mark" viewBox="0 0 128 128" fill="currentColor" aria-hidden="true">${MARK}</svg>
+    Quorum <span>· ${esc(p.guildName)}</span>
+  </header>
+
+  <div class="who">
+    <img src="${avatar}" alt="" />
+    <div>
+      <div class="elo">${p.elo}${
+        p.rank
+          ? `<span class="rank" style="color:${esc(p.rank.color)}">${esc(p.rank.name)}</span>`
+          : ''
+      }</div>
+      <div class="sub">${esc(p.name)} · ${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ''}${
+        games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ` · seeded ${esc(p.seededFrom ?? 'flat')}`
+      }</div>
+    </div>
+  </div>
+
+  ${spark(p.history.map((h) => h.elo))}
+
+  <h2>Rounds by category</h2>
+  ${
+    p.cats.length
+      ? p.cats
+          .map(
+            (c) => `<div class="cat"><span>${esc(c.main)}</span>
+      <span class="bar"><i style="width:${Math.round((c.won / (c.won + c.lost)) * 100)}%"></i></span>
+      <span class="n"><b>${c.won}</b>–${c.lost}</span></div>`,
+          )
+          .join('\n  ')
+      : '<p class="empty">Nothing played yet.</p>'
+  }
+
+  <h2>${recent.length ? `Last ${recent.length} ${recent.length === 1 ? 'game' : 'games'}` : 'Games'}</h2>
+  ${
+    recent.length
+      ? recent
+          .map(
+            (m) => `<div class="game${m.won ? ' win' : ''}"><span class="dot"></span>
+      <span>${esc(m.format)}</span>
+      ${m.at ? `<time datetime="${new Date(m.at).toISOString()}"></time>` : ''}
+      <span class="d${m.delta < 0 ? ' down' : ''}">${m.delta >= 0 ? '+' : ''}${m.delta}</span></div>`,
+          )
+          .join('\n  ')
+      : '<p class="empty">No games in this server yet.</p>'
+  }
+
+  <footer>Scores read off KovaaK's. <a href="/">Quorum</a></footer>
+</main>
+<script>
+  // Rendered on the server, so the only thing left is whose clock it is.
+  for (const t of document.querySelectorAll('time')) {
+    t.textContent = new Date(t.dateTime).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  }
+</script>
+</body>
+</html>`;
+}

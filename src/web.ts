@@ -31,6 +31,8 @@ import {
   rankChannels,
   getScenarios,
   getRankMode,
+  categoryRecord,
+  recentMatches,
   guildStats,
   leaderboard,
   listOpenMatches,
@@ -56,10 +58,10 @@ import {
   type Rank,
   type RankChannels,
 } from './db.js';
-import { changeEmbed, leaderboardMessage, messageGone, panelMessage } from './embeds.js';
+import { changeEmbed, leaderboardMessage, messageGone, panelMessage, rankLabel } from './embeds.js';
 import { bandsInReach, forfeits, rankForRoles, scenarioWinners } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
-import { PAGE } from './page.js';
+import { PAGE, profilePage } from './page.js';
 
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID ?? '';
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET ?? '';
@@ -843,6 +845,12 @@ interface Hooks {
   refreshPanels: () => Promise<void>;
 }
 
+/** Where a player's page lives, or null where there is no dashboard running to
+ *  serve it - startWeb() gives up on the same two variables, and a link to a
+ *  port nothing is listening on is worse than no link. */
+export const profileUrl = (guildId: string, discordId: string) =>
+  CLIENT_ID && CLIENT_SECRET ? `${BASE_URL}/p/${guildId}/${discordId}` : null;
+
 export function startWeb(client: Client, hooks: Hooks) {
   if (!CLIENT_ID || !CLIENT_SECRET) {
     console.log('web: DISCORD_CLIENT_ID/SECRET unset, dashboard disabled');
@@ -865,6 +873,55 @@ export function startWeb(client: Client, hooks: Hooks) {
           'cache-control': 'no-store',
         });
         res.end(PAGE);
+        return;
+      }
+
+      // A player's page, and the one thing here that is not behind a sign-in:
+      // it exists to be pasted somewhere, and a link that asks whoever opens it
+      // for Manage Server is not a link. It says what the results channel and
+      // the leaderboard message already say out loud.
+      const who = /^\/p\/(\d{1,32})\/(\d{1,32})$/.exec(path);
+      if (who && req.method === 'GET') {
+        const [, guildId, discordId] = who;
+        const guild = guildAllowed(guildId) ? client.guilds.cache.get(guildId) : undefined;
+        const player = getPlayer(discordId);
+        if (!guild || !player) {
+          res.writeHead(404, { 'content-type': 'text/plain' }).end('no such player');
+          return;
+        }
+        // Enough to draw a curve with; the list under it takes the last ten.
+        const history = recentMatches(discordId, guildId, 30).reverse();
+        const band = rankLabel(guildId, discordId, player.elo, guild);
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+        });
+        res.end(
+          profilePage({
+            guildName: guild.name,
+            discordId,
+            name: player.kovaaks_username,
+            avatar: client.users.cache.get(discordId)?.avatar ?? null,
+            elo: player.elo,
+            rank: band
+              ? { name: band, color: getRanks(guildId).find((r) => r.name === band)?.color ?? '#8a8a8a' }
+              : null,
+            wins: player.wins,
+            losses: player.losses,
+            draws: player.draws,
+            seededFrom: player.seeded_from,
+            cats: categoryRecord(discordId, guildId),
+            history: history.map((m) => ({
+              format: m.format,
+              won: m.placing === 1,
+              delta: (m.elo_after ?? 0) - (m.elo_before ?? 0),
+              // elo_before on a row from before the columns existed is null, and
+              // a curve that dives to 0 for it would be a lie about a season.
+              elo: m.elo_after ?? player.elo,
+              at: m.ended_at,
+            })),
+          }),
+        );
         return;
       }
 

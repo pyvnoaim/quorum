@@ -6,6 +6,7 @@ import {
   DEFAULT_RANKS,
   BASE_ELO,
   GRACE_MS,
+  MAIN_CATEGORIES,
   MATCH_TTL_MS,
   MIN_MATCH_MS,
   PICK_POOL,
@@ -15,6 +16,9 @@ import {
   type Format,
   type SeedMode,
 } from './config.js';
+// rating.ts reads nothing but config, so scoring can be reused down here
+// without the two files ever pointing at each other.
+import { forfeits, scenarioWinners } from './rating.js';
 
 // ponytail: node:sqlite is in the stdlib (needs --experimental-sqlite on node 22),
 // so there's no db dependency and no migration tool. Swap for Postgres if this
@@ -1043,6 +1047,65 @@ export function recentMatches(discordId: string, guildId: string, limit = 5) {
     elo_before: number | null;
     elo_after: number | null;
   }[];
+}
+
+/** Rounds won and lost per main category, over every rated match they finished.
+ *
+ *  ROUNDS, not matches: taking Tracking in a match you lost still says you can
+ *  track, and "what should I be grinding" is a per-category question. Read off
+ *  the same forfeited scores and the same scenarioWinners() the result card
+ *  prints, so the breakdown and the scoreline can never disagree.
+ *
+ *  Unranked games are left out, the same as the W/L they never wrote. A
+ *  scenario since dropped from the pool has no main left to file under and is
+ *  skipped rather than guessed at, and so is a round nobody took. */
+export function categoryRecord(discordId: string, guildId: string) {
+  const rows = db
+    .prepare(
+      `select m.id, m.scenarios, p.discord_id, p.team, p.scores, p.run_counts
+       from match m join match_player p on p.match_id = m.id
+       where m.guild_id = ? and m.status = 'done' and m.ranked <> 0
+         and m.id in (select match_id from match_player
+                      where discord_id = ? and placing is not null)`,
+    )
+    .all(guildId, discordId) as unknown as (Pick<Match, 'id' | 'scenarios'> &
+    Pick<MatchPlayer, 'discord_id' | 'team' | 'scores' | 'run_counts'>)[];
+
+  const byMatch = new Map<number, typeof rows>();
+  for (const r of rows) byMatch.set(r.id, [...(byMatch.get(r.id) ?? []), r]);
+
+  const mainOf = new Map(getScenarios(guildId).map((s) => [s.name, s.main]));
+  const want = getFormat(guildId).runs;
+  const tally = new Map(MAIN_CATEGORIES.map((m) => [m as string, { won: 0, lost: 0 }]));
+
+  for (const group of byMatch.values()) {
+    const me = group.find((r) => r.discord_id === discordId);
+    if (!me) continue;
+    const scenarios = JSON.parse(group[0].scenarios) as string[];
+    const scores = forfeits(
+      group.map((r) => ({
+        id: r.discord_id,
+        scores: JSON.parse(r.scores) as Record<string, number | null>,
+        runCounts: r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null,
+      })),
+      scenarios,
+      want,
+    );
+    const won = scenarioWinners(
+      group.map((r) => ({ id: r.discord_id, elo: 0, team: r.team, scores: scores.get(r.discord_id)! })),
+      scenarios,
+    );
+    scenarios.forEach((name, at) => {
+      const row = tally.get(mainOf.get(name) ?? '');
+      if (!row || won[at] === null) return;
+      if (won[at] === me.team) row.won++;
+      else row.lost++;
+    });
+  }
+
+  return [...tally]
+    .map(([main, r]) => ({ main, ...r }))
+    .filter((r) => r.won + r.lost > 0);
 }
 
 /** The overview page's numbers. Two counts here; everything else it shows the
