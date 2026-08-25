@@ -376,13 +376,13 @@ export const PAGE = /* html */ `<!doctype html>
   }
   .opt-hit { display: flex; align-items: center; gap: 9px; margin: 0; cursor: pointer; font-size: 14px; }
   .opt input[type=number] { width: 62px; margin: 0 9px; padding: 4px 8px; text-align: center; }
-  /* The rating, and the pencil that corrects it. The button only appears under
-     the cursor or on focus - a row of nine pencils over the standings reads as
-     a form to fill in, when editing one is meant to be a rare thing. */
+  /* The rating, and the pencil that corrects it. Visible always and muted, the
+     same as the delete on a History row and for the same reason: a control that
+     only appears under the cursor is a control a touch screen never has, and
+     one nobody finds on any screen. */
   .rate-cell { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
-  .rate-go { color: var(--muted); opacity: 0; transition: opacity .12s, color .12s; }
-  tr:hover .rate-go, .rate-go:focus-visible { opacity: 1; }
-  .rate-go:hover { color: var(--fg); }
+  .rate-go { color: var(--muted); transition: color .12s; }
+  .rate-go:hover, .rate-go:focus-visible { color: var(--fg); outline: none; }
   .rate-edit { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
   .rate-in { width: 84px; padding: 5px 8px; font-size: 13px; text-align: right; }
   .rate-ok { color: var(--fg); }
