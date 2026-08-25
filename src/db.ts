@@ -5,7 +5,9 @@ import {
   DEFAULT_RANK_SPREAD,
   DEFAULT_RANKS,
   BASE_ELO,
+  GRACE_MS,
   MATCH_TTL_MS,
+  MIN_MATCH_MS,
   PICK_POOL,
   ROUNDS,
   RUNS_PER_SCENARIO,
@@ -119,6 +121,10 @@ for (const stmt of [
   'alter table match add column ban_pool text',
   'alter table match_player add column pb text',
   'alter table match_player add column run_counts text',
+  // When the first player used every run - the moment the rest of the lobby
+  // goes on a clock. Null while nobody has finished, which is also every match
+  // that was already live when this shipped: those keep the plain TTL.
+  'alter table match add column grace_from integer',
   'alter table guild_config add column format_cfg text',
   // Where the queue panels are, so the tick can keep their counts honest.
   'alter table guild_config add column panel_msgs text',
@@ -211,6 +217,9 @@ export interface Match {
   created_at: number;
   started_at: number | null;
   ended_at: number | null;
+  /** When the first player used every run on every scenario, opening the grace
+   *  window for everyone else. Null until somebody does. */
+  grace_from: number | null;
   /** The match's private thread, holding exactly its players. Null when the
    *  bot couldn't make one - the match runs regardless. */
   thread_id: string | null;
@@ -310,6 +319,12 @@ export interface FormatConfig {
   pickTtlS: number;
   /** Minutes before a live match force-finishes on whatever KovaaK's has. */
   matchTtlMin: number;
+  /** Minutes the rest of the lobby gets once the first player has used every
+   *  run. See matchDeadline(). */
+  graceMin: number;
+  /** Minutes a match always runs for, whatever the grace says. 0 turns the
+   *  floor off and lets a fast finisher end it as early as the grace allows. */
+  minMatchMin: number;
 }
 
 /** Bounds, not taste: outside these the format stops working rather than
@@ -321,6 +336,8 @@ const FORMAT_BOUNDS: Record<keyof FormatConfig, [number, number]> = {
   pickPool: [2, 5],
   pickTtlS: [15, 600],
   matchTtlMin: [5, 240],
+  graceMin: [1, 240],
+  minMatchMin: [0, 240],
 };
 
 const FORMAT_DEFAULTS: FormatConfig = {
@@ -329,6 +346,8 @@ const FORMAT_DEFAULTS: FormatConfig = {
   pickPool: PICK_POOL,
   pickTtlS: Math.round(BAN_TTL_MS / 1000),
   matchTtlMin: Math.round(MATCH_TTL_MS / 60000),
+  graceMin: Math.round(GRACE_MS / 60000),
+  minMatchMin: Math.round(MIN_MATCH_MS / 60000),
 };
 
 /** The format as this server runs it, falling back to the shipped default for

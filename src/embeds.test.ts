@@ -4,7 +4,7 @@
 process.env.DB_PATH = ':memory:';
 import assert from 'node:assert/strict';
 
-const { resultsEmbed } = await import('./embeds.js');
+const { liveEmbed, resultsEmbed } = await import('./embeds.js');
 
 const scenarios = ['domiSwitch Harder', 'Whisphere Small & Slow', 'pasu small reload'];
 const match = {
@@ -68,5 +68,34 @@ assert.equal(fields!.length, 2);
 assert.ok(fields![0].value.includes('(+15)'));
 assert.ok(fields![0].value.includes('1 personal best'), 'and only the ones actually beaten');
 assert.ok(fields![1].value.includes('(-15)'));
+assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts forfeits nothing');
+
+// Runs left unused score 0, and the card has to say so - otherwise it shows
+// somebody losing a scenario the numbers say they won. The scoreline reads the
+// forfeited scores too: the table and the result are one sum counted twice.
+{
+  const short = [
+    { ...rows[0], run_counts: JSON.stringify({ [scenarios[0]]: 1, [scenarios[1]]: 3, [scenarios[2]]: 3 }) },
+    { ...rows[1], run_counts: JSON.stringify({ [scenarios[0]]: 3, [scenarios[1]]: 3, [scenarios[2]]: 3 }) },
+  ] as unknown as typeof rows;
+  const e = resultsEmbed(match, short, players, new Map([['a', 15], ['b', -15]]));
+  assert.equal(e.data.title, 'ness beats Jay 2–1 · 1v1', 'the forfeited round went the other way');
+  const row = e.data.description!.split('```')[1].trim().split('\n')[1];
+  assert.ok(/\b0\b/.test(row) && !row.includes('5087'), 'the fished score is shown as the 0 it scored');
+  assert.ok(e.data.fields![0].value.includes('forfeited 1 scenario'), 'and the card says why');
+  assert.ok(!e.data.fields![1].value.includes('forfeited'), 'the player who played it out is clean');
+
+  // The live board counts a lead exactly as the result will count it, forfeits
+  // included - otherwise it tells someone they are winning a scenario they are
+  // about to score 0 on, which is the one moment they could still fix it.
+  const live = liveEmbed(
+    { ...match, started_at: 0, grace_from: null } as unknown as typeof match,
+    short,
+    players,
+  );
+  assert.ok(live.data.title!.includes('2–1'), `live lead tracks the result, got ${live.data.title}`);
+  const cells = live.data.description!.split('```')[1].trim().split('\n')[1];
+  assert.ok(cells.includes('5087') && cells.includes('1/3'), 'but the cell still shows the real run');
+}
 
 console.log('embeds ok');

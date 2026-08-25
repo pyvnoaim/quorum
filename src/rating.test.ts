@@ -5,6 +5,8 @@ import {
   advancePick,
   allRunsUsed,
   bandsInReach,
+  forfeitUnused,
+  matchDeadline,
   scenarioWinners,
   rankForRoles,
   pickTurn,
@@ -136,6 +138,70 @@ const p = (id: string, elo: number, team: number, s: (number | null)[]): Entrant
   assert.ok(allRunsUsed(scenarios, [{ a: 1, b: 1, c: 1 }, { a: 1, b: 2, c: 1 }], 1));
   assert.ok(!allRunsUsed(scenarios, [], 3), 'a match with nobody in it is not finished');
   assert.ok(!allRunsUsed([], [full], 3), 'nor one with nothing to play');
+  // One player's counts on their own - what opens the grace window.
+  assert.ok(allRunsUsed(scenarios, [full], 3), 'this one has finished');
+  assert.ok(!allRunsUsed(scenarios, [{ a: 3, b: 1, c: 3 }], 3), 'this one has not');
+}
+
+// Runs left unused score 0. This is the whole answer to stalling: a fished
+// single run only stands if the rest of the runs got played.
+{
+  const raw = { a: 412, b: 380, c: null };
+  assert.deepEqual(
+    forfeitUnused(raw, { a: 3, b: 3, c: 3 }, scenarios, 3),
+    raw,
+    'a full card is left exactly alone',
+  );
+  assert.deepEqual(
+    forfeitUnused(raw, { a: 1, b: 1 }, scenarios, 3),
+    { a: 0, b: 0, c: null },
+    'one run each is forfeited - and c, never launched, stays null',
+  );
+  assert.deepEqual(
+    forfeitUnused(raw, { a: 3, b: 2, c: 0 }, scenarios, 3),
+    { a: 412, b: 0, c: null },
+    'per scenario, not all or nothing',
+  );
+  assert.deepEqual(
+    forfeitUnused(raw, { a: 1, b: 1 }, scenarios, 1),
+    raw,
+    'a server at one run per scenario has nothing to forfeit',
+  );
+  assert.deepEqual(
+    forfeitUnused(raw, {}, scenarios, 1),
+    { a: 0, b: 0, c: null },
+    'no counts at all is no runs at all',
+  );
+  // The exploit end to end: two fished runs and a scenario never opened, versus
+  // an opponent who played it out. The staller must not come away 2-1 up.
+  const staller = p('stall', 1000, 0, [500, 500, null]);
+  const honest = p('honest', 1000, 1, [400, 400, 400]);
+  assert.equal(placings([staller, honest], scenarios).get(0), 1, 'unfixed, stalling wins');
+  staller.scores = forfeitUnused(staller.scores, { a: 1, b: 1 }, scenarios, 3);
+  assert.deepEqual(scenarioWinners([staller, honest], scenarios), [1, 1, 1], 'now it loses 0-3');
+  assert.equal(placings([staller, honest], scenarios).get(1), 1, 'the honest player takes it');
+  // Still rated, not voided: they turned up and quit, which is a loss, not a
+  // game nobody played.
+  assert.equal(scorable([staller, honest]).length, 2, 'zeroes are not nulls');
+}
+
+// When a live match ends: the TTL, the grace once somebody finishes, the floor
+// under both. Minutes in, epoch ms out.
+{
+  const cfg = { matchTtlMin: 45, graceMin: 15, minMatchMin: 20 };
+  const start = 1_000_000;
+  const min = (n: number) => start + n * 60_000;
+  assert.equal(matchDeadline(start, null, cfg), min(45), 'nobody finished: the plain TTL');
+  assert.equal(matchDeadline(start, min(25), cfg), min(40), 'finished at 25, so 15 more');
+  assert.equal(matchDeadline(start, min(40), cfg), min(45), 'the grace never outlives the TTL');
+  // The griefing case: nine awful runs inside four minutes must not put an
+  // opponent who is still loading in on a four-minute clock.
+  assert.equal(matchDeadline(start, min(4), cfg), min(20), 'the floor holds it open');
+  assert.equal(
+    matchDeadline(start, min(4), { ...cfg, minMatchMin: 0 }),
+    min(19),
+    'a server that turns the floor off gets the bare grace',
+  );
 }
 
 assert.equal(rankName(DEFAULT_RANKS, 1400), 'Champion');

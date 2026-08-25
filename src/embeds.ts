@@ -25,7 +25,14 @@ import {
   type MatchPlayer,
   type Player,
 } from "./db.js";
-import { rankFor, rankForRoles, rankName, scenarioWinners } from "./rating.js";
+import {
+  forfeitUnused,
+  matchDeadline,
+  rankFor,
+  rankForRoles,
+  rankName,
+  scenarioWinners,
+} from "./rating.js";
 
 const BLURPLE = 0x5865f2;
 const GREEN = 0x57f287;
@@ -332,6 +339,10 @@ export function liveEmbed(
 ) {
   const scenarios: string[] = JSON.parse(match.scenarios);
   const teams = [...new Set(rows.map((r) => r.team))];
+  // Read once: this is a config row off disk, and the board renders it per
+  // player, per scenario, every tick.
+  const fmt = getFormat(match.guild_id);
+  const runs = fmt.runs;
   const scores = new Map(
     rows.map((r) => [
       r.discord_id,
@@ -340,13 +351,21 @@ export function liveEmbed(
   );
   // Who is ahead on each scenario RIGHT NOW, counted exactly as the result will
   // count it. A lead that changes when the match ends would be a different
-  // scoreboard, not a live one.
+  // scoreboard, not a live one - so the forfeit counts here too: a scenario
+  // somebody is still short on is a scenario they are currently losing, and the
+  // board has to say that while there is still time to fix it. The cell keeps
+  // showing what they actually ran, next to the count that explains the star.
   const ahead = scenarioWinners(
     rows.map((r) => ({
       id: r.discord_id,
       elo: 0,
       team: r.team,
-      scores: scores.get(r.discord_id)!,
+      scores: forfeitUnused(
+        scores.get(r.discord_id)!,
+        r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null,
+        scenarios,
+        runs,
+      ),
     })),
     scenarios,
   );
@@ -361,9 +380,8 @@ export function liveEmbed(
 
   // Discord renders this relative and per-viewer, so nobody has to work out
   // what time zone the deadline was written in.
-  const { runs, matchTtlMin } = getFormat(match.guild_id);
   const deadline = Math.floor(
-    ((match.started_at ?? Date.now()) + matchTtlMin * 60_000) / 1000,
+    matchDeadline(match.started_at ?? Date.now(), match.grace_from, fmt) / 1000,
   );
   // The running score in the title, so the state of the game is the first thing
   // read rather than something worked out from six numbers.
@@ -381,10 +399,12 @@ export function liveEmbed(
     .setTitle(`${match.format} · ${lead}`)
     .setColor(BLURPLE)
     .setDescription(
-      `**${runs} run${runs === 1 ? "" : "s"} per scenario**, best of them counts - one more does ` +
-        `not, so there is nothing to gain by grinding. Play them in any order; scores update on ` +
-        `their own.\n\nThe result posts itself once everyone has run all ${scenarios.length}, ` +
-        `or <t:${deadline}:R> either way. **Done** ends it early for both of you.` +
+      `**${runs} run${runs === 1 ? "" : "s"} per scenario**, best of them counts - a later one ` +
+        `does not, and a scenario you stop short on scores **0**. Play them in any order; scores ` +
+        `update on their own.\n\nThe result posts itself once everyone has run all ` +
+        `${scenarios.length}, or <t:${deadline}:R> either way - and that clock ` +
+        `${match.grace_from ? "is running: somebody has finished" : "closes in once the first of you finishes"}. ` +
+        `**Done** gives up the runs you have left.` +
         "\n```\n" +
         scoreTable(
           scenarios,
@@ -398,17 +418,16 @@ export function liveEmbed(
               cell: (s: string) => {
                 const score = scores.get(r.discord_id)![s];
                 const runsOn = used[s] ?? 0;
-                // The run count only shows while it is still short - a scenario
-                // they have finished with is just a score, and what is left to
-                // play is what the reader is looking for.
+                // The run count shows while it is still short - a scenario they
+                // have finished with is just a score, and what is left to play
+                // is what the reader is looking for. Zero shows too, now that
+                // stopping short scores 0: "0/3" is the warning.
                 const shown = score?.toFixed(0) ?? "–";
                 const star =
                   score != null && ahead[scenarios.indexOf(s)] === r.team
                     ? "*"
                     : "";
-                return runsOn > 0 && runsOn < runs
-                  ? `${shown}${star} ${runsOn}/${runs}`
-                  : shown + star;
+                return runsOn < runs ? `${shown}${star} ${runsOn}/${runs}` : shown + star;
               },
             };
           }),
@@ -502,10 +521,22 @@ export function resultsEmbed(
     (a, b) => (a.placing ?? 99) - (b.placing ?? 99),
   );
   const medal = ["🥇", "🥈", "🥉"];
+  // The forfeited view, not the raw one: a scenario somebody stopped short on
+  // scored 0 in the maths, so the scoreline, the stars and the personal-best
+  // count all have to read it as 0 too. The card and the result are the same
+  // sum counted twice, and they must never disagree.
+  const want = getFormat(match.guild_id).runs;
+  const used = (r: MatchPlayer) =>
+    r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null;
   const scores = new Map(
     rows.map((r) => [
       r.discord_id,
-      JSON.parse(r.scores) as Record<string, number | null>,
+      forfeitUnused(
+        JSON.parse(r.scores) as Record<string, number | null>,
+        used(r),
+        scenarios,
+        want,
+      ),
     ]),
   );
   const bests = new Map(
@@ -580,12 +611,22 @@ export function resultsEmbed(
       const prior = bests.get(r.discord_id)![s];
       return now != null && prior != null && now - prior >= 1;
     }).length;
+    // Why a 0 is a 0. Without this the card shows someone losing a scenario
+    // they were winning, and the only explanation is in the rules text of a
+    // message that has already been deleted with the thread.
+    const counts = used(r);
+    const short = counts
+      ? scenarios.filter((s) => (counts[s] ?? 0) > 0 && (counts[s] ?? 0) < want)
+      : [];
     return {
       name: `${r.placing == null ? "·" : (medal[r.placing - 1] ?? `#${r.placing}`)} ${p.kovaaks_username}`,
       value:
         `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ""} ` +
         `${r.placing == null ? "· _no scores, not rated_" : `(${delta >= 0 ? "+" : ""}${delta})`}` +
-        (pbs ? `\n_${pbs} personal best${pbs === 1 ? "" : "s"}_` : ""),
+        (pbs ? `\n_${pbs} personal best${pbs === 1 ? "" : "s"}_` : "") +
+        (short.length
+          ? `\n_forfeited ${short.length} scenario${short.length === 1 ? "" : "s"} - runs left unused_`
+          : ""),
       inline: true,
     };
   });

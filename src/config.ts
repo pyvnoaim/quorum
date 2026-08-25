@@ -153,5 +153,15 @@ export const CALL_TTL_MS = 60 * 60 * 1000;
 /** A live match force-finishes here, so one player refusing to hit Done can't
  *  hold the result open forever. */
 export const MATCH_TTL_MS = 45 * 60 * 1000;
+/** How long everyone else gets once the FIRST player has used every run. The
+ *  match clock is the resource being fought over - whoever plays promptly used
+ *  to hand their opponent the rest of the TTL to keep fishing - so finishing
+ *  starts a clock on the room instead of a wait for the person who finished.
+ *  Long enough to play the whole format from a standing start. */
+export const GRACE_MS = 15 * 60 * 1000;
+/** ...but never end a match before this. The grace has a griefing edge without
+ *  it: nine deliberately awful runs inside four minutes would start a countdown
+ *  on an opponent who is still loading in. */
+export const MIN_MATCH_MS = 20 * 60 * 1000;
 /** How often a live match re-reads scores off KovaaK's on its own. */
 export const TICK_MS = 60 * 1000;

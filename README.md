@@ -259,7 +259,7 @@ rank channel forever. Then:
    this - there are no two sides to alternate between.
 5. That same message becomes the live scoreboard, re-reading KovaaK's every
    minute on its own. **Refresh scores** forces it early.
-6. Everyone hits **Done**. Once they all have - or 45 minutes in, whichever
+6. Everyone hits **Done**. Once they all have - or the clock runs out, whichever
    comes first - placings and Elo changes go to the results channel and the
    thread is deleted. The result embed is the record; an archived thread per
    match is a channel nobody can find anything in.
@@ -267,6 +267,23 @@ rank channel forever. Then:
 **Done is per player, deliberately.** If whoever's ahead could end the match on
 their own, they'd end it while their opponent still had runs left. The clock is
 the other half: one player wandering off can't hold a result open forever.
+
+**Use your runs.** A scenario you stop short on scores **0**, however good the
+run you stopped on was. That is not a penalty for quitting - it is the only half
+of "three runs each" the bot can actually enforce. KovaaK's never reports a run
+you reset, so a player could otherwise fish one enormous run out of unlimited
+attempts, sit on it, and take the match. Stopping short also used to be what
+kept the lobby open, because nothing ends a match while somebody still has runs
+left; now it just loses you the scenario. **Done** gives up the runs you have
+left, so it asks first if you have any.
+
+**Finishing starts a clock.** Once the first player has used every run, everyone
+else gets fifteen minutes and then the match scores itself. Without it, playing
+promptly was punished: you sat there while whoever was stalling kept fishing,
+right up to the time limit. A match still always runs at least twenty minutes,
+so nine deliberately terrible runs in four minutes can't cut short somebody
+whose game is still loading. Both windows, and the limit itself, are in the
+dashboard's format pane.
 
 A call nobody takes is cancelled and its message deleted, so a rank channel
 only ever shows calls that are actually live. An hour out of the box; the setup
@@ -277,9 +294,10 @@ Other commands: `/scrim score`, `/scrim stats`, `/scrim leaderboard`, and
 `/scrim seed @player <rank>` for staff. Everything else is a button.
 
 **When a match goes wrong**, the dashboard lists everything open or running:
-*force finish* scores it from whatever KovaaK's has, *cancel* bins it with no
-rating change. Without that, a broken match just sits until the 45-minute clock
-catches it.
+*force finish* scores it by the normal rules on whatever KovaaK's has -
+unfinished scenarios included, so it is not the merciful option - and *cancel*
+bins it with no rating change. Reach for cancel when somebody's game died.
+Without either, a broken match just sits until the match clock catches it.
 
 **Why a thread and not a voice channel.** A bot can only move someone who is
 already sitting in voice, so half a lobby would be left staring at a link. A

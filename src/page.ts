@@ -1459,6 +1459,8 @@ async function renderGuild(guild) {
     ['pickPool', 'Candidates per pick', 2, 5, 'both sides ban one out of these, then the picker takes one'],
     ['pickTtlS', 'Ban or pick timer', 15, 600, 'seconds before the bot acts for a side that walked away'],
     ['matchTtlMin', 'Match time limit', 5, 240, 'minutes before a live match scores on whatever KovaaK has'],
+    ['graceMin', 'Grace after the first finisher', 1, 240, 'minutes the rest get once one player has used every run - long enough to play the format out'],
+    ['minMatchMin', 'Minimum match length', 0, 240, 'minutes a match always runs for, so a fast finisher cannot cut short someone still loading in'],
   ];
   const drawFormat = () => {
     const bans = Math.max(0, Math.min(2, fmt.pickPool - 1));

@@ -70,6 +70,8 @@ import {
   bandsInReach,
   canPlay,
   eloDeltas,
+  forfeitUnused,
+  matchDeadline,
   pickTurn,
   placings,
   rankFor,
@@ -507,12 +509,36 @@ function nothingLeftToPlay(match: Match) {
   );
 }
 
+/** When this match ends, grace and floor included - see matchDeadline().
+ *  A live row with no start time is broken; 0 dates it to the epoch so the
+ *  sweep reaps it rather than leaving it live forever. */
+function deadlineFor(match: Match) {
+  return matchDeadline(match.started_at ?? 0, match.grace_from, getFormat(match.guild_id));
+}
+
+/** Opens the grace window the first time any one player has used every run.
+ *  Stamped once and never moved: a second player finishing must not restart
+ *  somebody else's clock. */
+function openGrace(match: Match) {
+  if (match.grace_from) return;
+  const scenarios: string[] = JSON.parse(match.scenarios);
+  const want = getFormat(match.guild_id).runs;
+  const finished = matchPlayers(match.id).some((r) =>
+    allRunsUsed(scenarios, [JSON.parse(r.run_counts ?? '{}') as Record<string, number>], want),
+  );
+  if (finished) db.prepare('update match set grace_from = ? where id = ?').run(Date.now(), match.id);
+}
+
 /** Reads the scores, then ends the match if nobody has a run left. Every path
  *  that refreshes goes through here, so a match can't sit finished-but-open
  *  waiting for the next tick. */
 async function refreshMatch(match: Match) {
   await refreshScores(match);
-  const fresh = getMatch(match.id)!;
+  let fresh = getMatch(match.id)!;
+  if (fresh.status === 'live') {
+    openGrace(fresh);
+    fresh = getMatch(match.id)!;
+  }
   if (fresh.status === 'live' && nothingLeftToPlay(fresh)) {
     await concludeMatch(fresh);
     return getMatch(match.id)!;
@@ -534,11 +560,21 @@ async function finishMatch(match: Match) {
 
   const rows = matchPlayers(done.id);
   const scenarios: string[] = JSON.parse(done.scenarios);
+  const want = getFormat(done.guild_id).runs;
+  // Runs left unused score nothing - see forfeitUnused(). This is what stops a
+  // player fishing one run out of unlimited resets and sitting on it: the score
+  // only stands if they played the format out. A scenario never launched stays
+  // null, so scorable() can still tell a no-show from a game somebody lost.
   const entrants = rows.map((r) => ({
     id: r.discord_id,
     elo: getPlayer(r.discord_id)!.elo,
     team: r.team,
-    scores: JSON.parse(r.scores) as Record<string, number | null>,
+    scores: forfeitUnused(
+      JSON.parse(r.scores) as Record<string, number | null>,
+      r.run_counts ? (JSON.parse(r.run_counts) as Record<string, number>) : null,
+      scenarios,
+      want,
+    ),
   }));
 
   // Only whoever actually ran something is scored - see scorable(). Not-played
@@ -830,7 +866,7 @@ async function tick() {
     .prepare("select * from match where status = 'live'")
     .all() as unknown as Match[];
   for (const match of live) {
-    if (Date.now() - (match.started_at ?? 0) >= getFormat(match.guild_id).matchTtlMin * 60_000) {
+    if (Date.now() >= deadlineFor(match)) {
       await concludeMatch(match);
       continue;
     }
@@ -1179,7 +1215,8 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
   }
 
   if (action === 'done') {
-    if (!rows.some((r) => r.discord_id === i.user.id)) {
+    const mine = rows.find((r) => r.discord_id === i.user.id);
+    if (!mine) {
       await i.reply({ content: 'Players only.', flags: MessageFlags.Ephemeral });
       return;
     }
@@ -1187,14 +1224,49 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       await i.reply({ content: 'Already finished.', flags: MessageFlags.Ephemeral });
       return;
     }
+    // Done gives up whatever runs are left, and unused runs score 0. Somebody
+    // reading the button as "I have stopped playing" would zero two scenarios
+    // with one press, so it asks first - once, and only when there is something
+    // to lose. Someone who played the format out sees no prompt at all.
+    const want = getFormat(match.guild_id).runs;
+    const used = JSON.parse(mine.run_counts ?? '{}') as Record<string, number>;
+    const short = (JSON.parse(match.scenarios) as string[]).filter(
+      (s) => (used[s] ?? 0) < want,
+    );
+    const confirmed = extra === 'yes';
+    if (short.length && !confirmed) {
+      await i.reply({
+        content:
+          'Done gives up the runs you have left, and a scenario you did not finish scores **0**. ' +
+          `You are short on ${short.map((s) => `**${s}** (${used[s] ?? 0}/${want})`).join(', ')}.`,
+        components: [
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`pug:done:${match.id}:yes`)
+              .setLabel('Done anyway')
+              .setStyle(ButtonStyle.Danger),
+          ),
+        ],
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     db.prepare('update match_player set done = 1 where match_id = ? and discord_id = ?').run(
       match.id,
       i.user.id,
     );
-    await i.deferUpdate();
+    // Acknowledge whichever message the press came from. The confirm button
+    // sits on an ephemeral prompt, so deferUpdate there would leave editReply
+    // rewriting the prompt rather than the board in the thread.
+    if (confirmed) {
+      await i.update({ content: 'Done - the runs you had left score 0.', components: [] });
+    } else {
+      await i.deferUpdate();
+    }
     // Everyone has to call it, so whoever is ahead can't end the match while
     // their opponent still has runs left. The clock covers the other way out.
     if (matchPlayers(match.id).every((r) => r.done)) await concludeMatch(getMatch(match.id)!);
+    else if (confirmed) await editMatchMessage(getMatch(match.id)!);
     else await i.editReply(render(getMatch(match.id)!));
   }
 }

@@ -129,10 +129,12 @@ export function advancePick(
  * Nothing left to play: every player has put in their full count of runs on
  * every scenario.
  *
- * This is the ONLY thing that ends a match on its own. A score arriving is not
- * enough - a second and third run can still beat it, and someone who stopped at
- * two has not played the format. Anyone short keeps the match open until the
- * clock runs out, which is what the no-show guard covers on the other side.
+ * A score arriving is not enough - a second and third run can still beat it,
+ * and someone who stopped at two has not played the format.
+ *
+ * Called with one player's counts it answers the same question for them alone,
+ * which is what opens the grace window in matchDeadline(). Anyone still short
+ * when that runs out forfeits what they didn't play - see forfeitUnused().
  */
 export function allRunsUsed(
   scenarios: string[],
@@ -141,6 +143,67 @@ export function allRunsUsed(
 ) {
   if (!players.length || !scenarios.length) return false;
   return players.every((runs) => scenarios.every((s) => (runs[s] ?? 0) >= want));
+}
+
+/**
+ * Runs you didn't use score nothing.
+ *
+ * The cap only ever bound the top - best of the FIRST `want`, so a fourth run
+ * gains nothing. It never bound the bottom, and that was the hole: stopping at
+ * one run left that run standing as your score AND kept allRunsUsed() from
+ * ending the match, so a player could hold the lobby open to the clock while
+ * fishing that single run out of unlimited resets. KovaaK's never reports a
+ * reset - a run you abort is a run that never happened - so "use your runs" is
+ * the only half of the rule the bot can actually enforce.
+ *
+ * A scenario never launched stays null rather than becoming 0. That is "no runs
+ * at all", which scorable() still has to be able to tell apart from a game that
+ * was played: a crash before the first shot is not a game somebody lost.
+ */
+export function forfeitUnused(
+  scores: Record<string, number | null>,
+  runCounts: Record<string, number> | null,
+  scenarios: string[],
+  want: number,
+): Record<string, number | null> {
+  // No counts at all is a row from before the bot recorded them. "We never
+  // looked" is not "they never played", and reading it as the latter would
+  // forfeit a whole match that was played out properly.
+  if (!runCounts) return { ...scores };
+  const out = { ...scores };
+  for (const scenario of scenarios) {
+    if (out[scenario] != null && (runCounts[scenario] ?? 0) < want) out[scenario] = 0;
+  }
+  return out;
+}
+
+/**
+ * When a live match actually ends. Three terms, and the order matters:
+ *
+ *  - the hard TTL, the backstop for a lobby where nobody ever finishes;
+ *  - a grace window opening the moment the FIRST player has used every run, so
+ *    finishing puts your opponent on a clock instead of putting you on a wait.
+ *    Without it, playing the format promptly is punished: you sit there while
+ *    whoever is stalling keeps fishing;
+ *  - a floor under the whole match, because the grace has a griefing edge -
+ *    nine deliberately terrible runs in four minutes would otherwise start a
+ *    countdown on somebody whose game is still loading.
+ *
+ * `graceFrom` is null until somebody finishes; after that the match ends at
+ * whichever of the grace and the floor falls LATER, bounded by the TTL either
+ * way.
+ */
+export function matchDeadline(
+  startedAt: number,
+  graceFrom: number | null,
+  cfg: { matchTtlMin: number; graceMin: number; minMatchMin: number },
+) {
+  const hard = startedAt + cfg.matchTtlMin * 60_000;
+  if (!graceFrom) return hard;
+  return Math.min(
+    hard,
+    Math.max(graceFrom + cfg.graceMin * 60_000, startedAt + cfg.minMatchMin * 60_000),
+  );
 }
 
 export interface Entrant {

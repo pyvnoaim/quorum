@@ -1190,6 +1190,8 @@ export function startWeb(client: Client, hooks: Hooks) {
           pickPool: 'Candidates per pick',
           pickTtlS: 'Ban or pick timer (seconds)',
           matchTtlMin: 'Match time limit (minutes)',
+          graceMin: 'Grace after the first finisher (minutes)',
+          minMatchMin: 'Minimum match length (minutes)',
         };
         await announce(
           guild,
