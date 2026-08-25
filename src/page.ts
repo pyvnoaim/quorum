@@ -1006,6 +1006,19 @@ const whoBar = () => \`
     <a class="btn" href="/logout">Sign out</a>
   </div>\`;
 
+// Sessions live in memory, so every deploy signs everyone out - and a tab left
+// open from before it then answers "Save failed" to everything, which reads as
+// a broken dashboard rather than as a sign-in. One place, because otherwise
+// every button needs the same check: a 401 means the session went, so show the
+// login screen. Not /api/me itself - that is what the login screen asks, and
+// reloading on its 401 would be a loop.
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const res = await nativeFetch(...args);
+  if (res.status === 401 && !String(args[0]).includes('/api/me')) location.reload();
+  return res;
+};
+
 async function boot() {
   const res = await fetch('/api/me');
   me = res.ok ? await res.json() : null;
