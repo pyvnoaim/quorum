@@ -1476,6 +1476,7 @@ async function renderGuild(guild) {
     <section id="players">
     <h2>Players</h2>
     <p class="muted">Where a rating starts, set in Ranks. Only until someone has played. Who plays whom is set in Queues.</p>
+    <input type="text" id="playerq" placeholder="Search players" spellcheck="false" style="margin-bottom:12px" />
     <table class="ladder"><tbody id="playerlist"></tbody></table>
     <div class="bar">
       <button class="btn solid" id="savetiers">Save starting ranks</button>
@@ -2032,8 +2033,18 @@ async function renderGuild(guild) {
 
   const seeds = {};
   const drawPlayers = () => {
-  document.getElementById('playerlist').innerHTML = data.players.length
-    ? data.players.map((p) => {
+  // The whole list is already here, so the search is a filter over it rather
+  // than a round trip. Name or Discord id, because half of finding someone in
+  // a server this size is knowing which "ness" they are.
+  const q = (document.getElementById('playerq')?.value ?? '').trim().toLowerCase();
+  const shown = q
+    ? data.players.filter(
+        (p) =>
+          (p.kovaaks_username ?? '').toLowerCase().includes(q) || p.discord_id.includes(q),
+      )
+    : data.players;
+  document.getElementById('playerlist').innerHTML = shown.length
+    ? shown.map((p) => {
         const rank = rankOf(p.elo);
         return \`
       <tr>
@@ -2056,7 +2067,7 @@ async function renderGuild(guild) {
                 \`data-id="\${h(p.discord_id)}"\`)}</td>
       </tr>\`;
       }).join('')
-    : '<tr><td class="hint">Nobody has played yet.</td></tr>';
+    : \`<tr><td class="hint">\${q ? 'Nobody by that name.' : 'Nobody has played yet.'}</td></tr>\`;
   // Only offered to players with no games: seedPlayer refuses to move anyone
   // else, so a control there would be a lie.
   const scope = document.getElementById('playerlist');
@@ -2066,6 +2077,9 @@ async function renderGuild(guild) {
   }));
   };
   drawPlayers();
+  // The box lives outside the tbody the redraw replaces, so it keeps its focus
+  // and its caret while you type.
+  document.getElementById('playerq').oninput = drawPlayers;
 
   document.getElementById('savetiers').onclick = async () => {
     const el = document.getElementById('tierstatus');
