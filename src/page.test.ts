@@ -36,10 +36,13 @@ assert.ok(ladder.includes('id="find"'), 'and there is a way to search for a name
 assert.ok(ladder.includes('href="/p/111/222"'), 'every row is a way into that player');
 // Every row carries the name the search filters on, lowercased and escaped.
 assert.ok(ladder.includes('data-name="&lt;b&gt;top&lt;/b&gt;"'), 'the search key is escaped too');
-// An empty ladder still renders.
-ladderPage({
+// An empty ladder still renders - and still carries the search box, which is
+// why the filter has to cope with there being no rows and no "no hits" line.
+const empty = ladderPage({
   guildId: '111', guildName: 'g', url: 'u', players: [], total: 0, matches: 0, meId: null,
 });
+assert.ok(empty.includes('id="find"'));
+assert.ok(!empty.includes('id="nohits"'));
 
 // The profile page is built per request rather than baked into a constant, so
 // the same check has to see one actually rendered.

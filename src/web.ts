@@ -906,6 +906,9 @@ export function startWeb(client: Client, hooks: Hooks) {
         // rows helps nobody - page it if a server ever gets that far.
         const rows = leaderboard(guildId, 100);
         const reader = sessionOf(req);
+        // Read once for the whole table. Inside the map this was a query per
+        // row, on a page anyone can load a hundred rows of.
+        const colorOf = new Map(getRanks(guildId).map((r) => [r.name, r.color]));
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
           'cache-control': 'private, max-age=30',
@@ -922,9 +925,7 @@ export function startWeb(client: Client, hooks: Hooks) {
                 name: p.kovaaks_username,
                 avatar: client.users.cache.get(p.discord_id)?.avatar ?? null,
                 elo: p.elo,
-                rank: band
-                  ? { name: band, color: getRanks(guildId).find((r) => r.name === band)?.color ?? '#8a8a8a' }
-                  : null,
+                rank: band ? { name: band, color: colorOf.get(band) ?? '#8a8a8a' } : null,
                 wins: p.wins,
                 losses: p.losses,
                 draws: p.draws,
@@ -938,15 +939,21 @@ export function startWeb(client: Client, hooks: Hooks) {
         return;
       }
 
-      // "Which of these is me." Signing in is the only way a page can answer
-      // that, and it is the only thing sign-in is for out here - everything a
-      // player can see, anyone with the link can see.
+      // "Take me to my own page", for a link that cannot know a Discord id -
+      // the ladder answers the same question with its search box, so nothing on
+      // a page points here; a message can.
       const mine = /^\/p\/(\d{1,32})\/me$/.exec(path);
       if (mine && req.method === 'GET') {
         const [, guildId] = mine;
         const reader = sessionOf(req);
+        // Signed in but never played here: the standings, not the 404 their own
+        // page would give them.
+        const home =
+          reader && playedIn(reader.user.id, guildId)
+            ? `/p/${guildId}/${reader.user.id}`
+            : `/p/${guildId}`;
         res.writeHead(302, {
-          location: reader ? `/p/${guildId}/${reader.user.id}` : `/login?to=${encodeURIComponent(path)}`,
+          location: reader ? home : `/login?to=${encodeURIComponent(path)}`,
         });
         res.end();
         return;

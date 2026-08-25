@@ -2752,7 +2752,11 @@ ${o.body}
       row.hidden = !hit;
       if (hit) hits++;
     }
-    document.getElementById('nohits').hidden = hits > 0;
+    // A ladder nobody has played on has the search box but no table under it -
+    // and no line to hide either, hence the guard rather than a throw on the
+    // first keystroke.
+    const none = document.getElementById('nohits');
+    if (none) none.hidden = hits > 0;
   });
 </script>
 </body>
