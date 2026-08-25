@@ -376,6 +376,8 @@ export const PAGE = /* html */ `<!doctype html>
   }
   .opt-hit { display: flex; align-items: center; gap: 9px; margin: 0; cursor: pointer; font-size: 14px; }
   .opt input[type=number] { width: 62px; margin: 0 9px; padding: 4px 8px; text-align: center; }
+  /* sits next to the starting-rank picker, so it reads as the same control */
+  .seed-elo { width: 72px; margin-left: 8px; padding: 6px 8px; vertical-align: middle; }
   .opt .unit { color: var(--muted); font-size: 13px; }
   /* Off replaces the sentence rather than trailing it: "Bin an untaken call
      after" says nothing once there is no number to follow it. */
@@ -1989,6 +1991,8 @@ async function renderGuild(guild) {
   };
 
   const seeds = {};
+  // An exact rating per player, when the band's floor is not where they belong.
+  const seedElo = {};
   const drawPlayers = () => {
   // The whole list is already here, so the search is a filter over it rather
   // than a round trip. Name or Discord id, because half of finding someone in
@@ -2026,7 +2030,14 @@ async function renderGuild(guild) {
             : selectField('sd-' + p.discord_id,
                 [{ id: '', name: 'Not set' }].concat(data.ranks.map((r) => ({ id: r.name, name: r.name }))),
                 seeds[p.discord_id] ?? p.seeded_from ?? '',
-                \`data-id="\${h(p.discord_id)}"\`)}</td>
+                \`data-id="\${h(p.discord_id)}"\`) +
+              // The rank sets the floor; this overrides the number without
+              // moving anyone's bracket. For placing somebody who has already
+              // played elsewhere, where "bottom of Elite" is not what they are.
+              \`<input class="seed-elo" type="number" min="0" max="5000" step="1"
+                 data-id="\${h(p.discord_id)}" placeholder="floor"
+                 title="Exact rating - leave empty for the rank's floor"
+                 value="\${seedElo[p.discord_id] ?? ''}" />\`}</td>
         <td style="width:1px"><button class="icon-btn" data-reset="\${h(p.discord_id)}"
           data-name="\${h(p.kovaaks_username)}"\${canReset ? '' : ' disabled'}
           title="\${canReset ? 'Reset this rating' : 'Nothing to reset - no matches and no starting rank'}">\${icon('undo')}</button></td>
@@ -2039,6 +2050,9 @@ async function renderGuild(guild) {
   wireSelects(scope);
   scope.querySelectorAll('.sel').forEach((el) => (el.onchange = () => {
     seeds[el.dataset.id] = el.dataset.value;
+  }));
+  scope.querySelectorAll('.seed-elo').forEach((el) => (el.oninput = () => {
+    seedElo[el.dataset.id] = el.value.trim();
   }));
   // One player, same act as the whole-server reset below and the same warning:
   // their record goes, the matches stay, and it cannot be undone.
@@ -2078,7 +2092,15 @@ async function renderGuild(guild) {
     const el = document.getElementById('tierstatus');
     const body = Object.entries(seeds)
       .filter(([, rank]) => rank)
-      .map(([discord_id, rank]) => ({ discord_id, rank }));
+      .map(([discord_id, rank]) => ({
+        discord_id,
+        rank,
+        // empty means "use the rank's floor" - the server treats a missing elo
+        // and a blank one the same way
+        elo: seedElo[discord_id] === '' || seedElo[discord_id] == null
+          ? undefined
+          : Number(seedElo[discord_id]),
+      }));
     if (!body.length) { el.textContent = 'Pick a rank first'; return; }
     const res = await fetch(\`/api/guild/\${guild.id}/seeds\`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },

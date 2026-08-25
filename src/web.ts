@@ -1351,7 +1351,16 @@ export function startWeb(client: Client, hooks: Hooks) {
         for (const row of Array.isArray(body.seeds) ? body.seeds : []) {
           const id = String(row.discord_id ?? '');
           const rank = ranks.find((r) => r.name === String(row.rank ?? ''));
-          if (mine.has(id) && rank && seedPlayer(id, rank.min_elo, rank.name)) moved.push(id);
+          if (!mine.has(id) || !rank) continue;
+          // An exact rating beats the band's floor, for placing somebody whose
+          // level is known - bottom of Elite is not where a top Elite starts.
+          // Bounded and rounded here, not trusted: this comes from a browser.
+          const asked = Number(row.elo);
+          const elo =
+            Number.isFinite(asked) && asked >= 0 && asked <= 5000
+              ? Math.round(asked)
+              : rank.min_elo;
+          if (seedPlayer(id, elo, rank.name)) moved.push(id);
         }
         // Hand out the roles now rather than after their first match: a rank
         // channel is private to its role, so a seeded player who holds none
