@@ -1995,7 +1995,8 @@ async function renderGuild(guild) {
           ? \`<span class="hint">\${p.wins + p.losses ? '' : h(p.seeded_from ?? 'flat')}</span>\`
           : p.wins + p.losses
             ? \`<span class="hint" title="their record is their rating now - a starting rank only applies before the first match">seeded \${h(p.seeded_from ?? 'flat')}</span>\`
-            : selectField('sd-' + p.discord_id, data.ranks.map((r) => r.name),
+            : selectField('sd-' + p.discord_id,
+                [{ id: '', name: 'Not set' }].concat(data.ranks.map((r) => ({ id: r.name, name: r.name }))),
                 seeds[p.discord_id] ?? p.seeded_from ?? '',
                 \`data-id="\${h(p.discord_id)}"\`)}</td>
         <td style="width:1px"><button class="icon-btn" data-reset="\${h(p.discord_id)}"
@@ -2047,12 +2048,20 @@ async function renderGuild(guild) {
 
   document.getElementById('savetiers').onclick = async () => {
     const el = document.getElementById('tierstatus');
-    const body = Object.entries(seeds).map(([discord_id, rank]) => ({ discord_id, rank }));
+    const body = Object.entries(seeds)
+      .filter(([, rank]) => rank)
+      .map(([discord_id, rank]) => ({ discord_id, rank }));
+    if (!body.length) { el.textContent = 'Pick a rank first'; return; }
     const res = await fetch(\`/api/guild/\${guild.id}/seeds\`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ seeds: body }),
     });
-    el.textContent = res.ok ? 'Saved' : 'Save failed';
+    if (!res.ok) { el.textContent = 'Save failed'; return; }
+    // Redraw off what came back, so the rating column shows the new number
+    // rather than the flat one it was saved over.
+    const out = await res.json().catch(() => ({}));
+    if (out.players) { data.players = out.players; drawPlayers(); }
+    el.textContent = 'Saved';
   };
 
   // Same dialog as removing the bot: no undo, so it spells out what goes and
