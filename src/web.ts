@@ -813,6 +813,16 @@ export function startWeb(client: Client, hooks: Hooks) {
         const players = playersInGuild(guildId);
         const ranks = getRanks(guildId);
         await refreshVoltaic(players);
+        // Avatars come off discord.js's user cache, which is empty after a
+        // restart - so every player showed as the default Discord logo until
+        // the bot happened to see them again. Fetch the ones missing; the
+        // fetch caches, so this is once per player per boot and nothing at all
+        // on the loads after it.
+        await Promise.all(
+          players
+            .filter((p) => !client.users.cache.has(p.discord_id))
+            .map((p) => client.users.fetch(p.discord_id).catch(() => null)),
+        );
         json(res, 200, {
           config: getConfig(guildId),
           // What Quorum cannot do here, and the link that fixes it. Sent on
