@@ -825,6 +825,8 @@ const ICONS = {
   arrow: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  // lucide 'rotate-ccw' - putting one rating back where it started
+  undo: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
   // lucide 'list-ordered' - the format IS an order of steps
   steps: '<line x1="10" x2="21" y1="6" y2="6"/><line x1="10" x2="21" y1="12" y2="12"/><line x1="10" x2="21" y1="18" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>',
   layers: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
@@ -2065,6 +2067,10 @@ async function renderGuild(guild) {
             : selectField('sd-' + p.discord_id, data.ranks.map((r) => r.name),
                 seeds[p.discord_id] ?? p.seeded_from ?? '',
                 \`data-id="\${h(p.discord_id)}"\`)}</td>
+        <td style="width:1px">\${p.wins + p.losses
+          ? \`<button class="icon-btn" data-reset="\${h(p.discord_id)}"
+              data-name="\${h(p.kovaaks_username)}" title="Reset this rating">\${icon('undo')}</button>\`
+          : ''}</td>
       </tr>\`;
       }).join('')
     : \`<tr><td class="hint">\${q ? 'Nobody by that name.' : 'Nobody has played yet.'}</td></tr>\`;
@@ -2074,6 +2080,34 @@ async function renderGuild(guild) {
   wireSelects(scope);
   scope.querySelectorAll('.sel').forEach((el) => (el.onchange = () => {
     seeds[el.dataset.id] = el.dataset.value;
+  }));
+  // One player, same act as the whole-server reset below and the same warning:
+  // their record goes, the matches stay, and it cannot be undone.
+  scope.querySelectorAll('[data-reset]').forEach((el) => (el.onclick = async () => {
+    const ok = await confirmDanger({
+      title: \`Reset \${el.dataset.name}'s rating?\`,
+      body: 'They go back to the starting rating with no wins or losses, and can be given a starting rank again. Matches they have played stay in History.',
+      name: el.dataset.name,
+      confirm: 'Reset rating',
+    });
+    if (!ok) return;
+    const status = document.getElementById('tierstatus');
+    status.textContent = 'Resetting…';
+    const res = await fetch(\`/api/guild/\${guild.id}/reset\`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ player: el.dataset.reset }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) { status.textContent = out.error ?? 'Failed'; return; }
+    // Nothing reset and somebody skipped means that player's ladder is not only
+    // ours - worth saying, rather than looking like a button that did nothing.
+    if (!out.reset) {
+      status.textContent = out.shared
+        ? 'Left alone - they play Quorum in another server too'
+        : 'Nothing to reset';
+      return;
+    }
+    location.reload();
   }));
   };
   drawPlayers();

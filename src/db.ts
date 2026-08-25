@@ -635,12 +635,15 @@ export function listOpenMatches(guildId: string) {
  *  The matches stay. They are the record of what happened, which a new season
  *  does not undo - only the standings start over. Returns who was reset, so the
  *  caller can put their rank roles back where the new ratings say. */
-export function resetRatings(guildId: string): { reset: string[]; shared: number } {
+export function resetRatings(
+  guildId: string,
+  only?: string,
+): { reset: string[]; shared: number } {
   // A rating is GLOBAL - one row per player, whatever server they earned it in.
   // So this resets only the people who play here and nowhere else: one server's
   // new season must not wipe another server's ladder, and the admin pressing
   // this has no authority over a server they are not in.
-  const ids = (
+  const eligible = (
     db
       .prepare(
         `select p.discord_id from player p
@@ -654,6 +657,12 @@ export function resetRatings(guildId: string): { reset: string[]; shared: number
       )
       .all(guildId, guildId) as unknown as { discord_id: string }[]
   ).map((r) => r.discord_id);
+  // One player or the whole server, same rules either way - a single reset is
+  // the same act done to one row.
+  const ids = only ? eligible.filter((id) => id === only) : eligible;
+  const here = only
+    ? playersInGuild(guildId).filter((p) => p.discord_id === only)
+    : playersInGuild(guildId);
 
   const stmt = db.prepare(
     'update player set elo = ?, wins = 0, losses = 0, seeded_from = null where discord_id = ?',
@@ -661,7 +670,7 @@ export function resetRatings(guildId: string): { reset: string[]; shared: number
   tx(() => {
     for (const id of ids) stmt.run(BASE_ELO, id);
   });
-  return { reset: ids, shared: playersInGuild(guildId).length - ids.length };
+  return { reset: ids, shared: here.length - ids.length };
 }
 
 export function playersInGuild(guildId: string) {

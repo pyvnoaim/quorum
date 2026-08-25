@@ -1056,15 +1056,25 @@ export function startWeb(client: Client, hooks: Hooks) {
 
       // A season reset: the standings start over, the history does not.
       if (action === '/reset' && req.method === 'POST') {
-        const { reset, shared } = resetRatings(guildId);
+        // One player, or the whole server when the body names nobody. An id
+        // from the browser reaches nobody it should not: resetRatings only ever
+        // touches people who have played HERE, and nowhere else.
+        const named = (await readJson(req)).player;
+        const only = typeof named === 'string' ? named : undefined;
+        const { reset, shared } = resetRatings(guildId, only);
         // Auto mode: everyone is back at the starting rating, so their rank
         // roles have to follow or the ladder says one thing and Discord another.
         // In manual mode this call knows to do nothing.
         if (reset.length) await hooks.syncRankRoles(guildId, reset);
-        await announce(guild, session.user.id, [
-          `Ratings reset - ${reset.length} player${reset.length === 1 ? '' : 's'} back to the starting rating` +
-            (shared ? `, ${shared} left alone (they play in another server too)` : ''),
-        ]);
+        // A reset of one is announced by name; the whole server by the count.
+        if (reset.length) {
+          await announce(guild, session.user.id, [
+            only
+              ? `Rating reset for <@${only}>`
+              : `Ratings reset - ${reset.length} player${reset.length === 1 ? '' : 's'} back to the starting rating` +
+                (shared ? `, ${shared} left alone (they play in another server too)` : ''),
+          ]);
+        }
         json(res, 200, { reset: reset.length, shared });
         return;
       }

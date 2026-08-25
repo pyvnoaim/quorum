@@ -347,6 +347,14 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   assert.equal(back.seeded_from, null, 'so a starting rank can be set afresh');
   assert.ok(getMatch(900), 'the match itself stays - it is the record, not the rating');
   assert.deepEqual(resetRatings('gone'), { reset: [], shared: 0 }, 'a server with nobody resets nobody');
+
+  // One player at a time, under the same rules: the shared one stays put.
+  db.prepare("update player set elo = 1200, wins = 3 where discord_id = 'r1'").run();
+  assert.deepEqual(resetRatings('gr', 'r1'), { reset: ['r1'], shared: 0 }, 'just that one');
+  assert.equal(getPlayer('r1')!.elo, 1050, 'and only that one moved');
+  assert.deepEqual(resetRatings('gr', 'r2'), { reset: [], shared: 1 }, 'not one who plays elsewhere');
+  assert.equal(getPlayer('r2')!.elo, 1300, 'left exactly as it was');
+  assert.deepEqual(resetRatings('gr', 'nobody'), { reset: [], shared: 0 }, 'nor a stranger');
 }
 
 console.log('db ok');
