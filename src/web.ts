@@ -476,7 +476,7 @@ async function syncRankChannelsToDiscord(
     // a queue channel is useless without its panel, and this is the only moment
     // we know the channel is new.
     if (made.isSendable()) {
-      const posted = await made.send(panelMessage(undefined, guild.id)).catch(() => null);
+      const posted = await made.send(panelMessage(undefined, guild.id, made.id)).catch(() => null);
       // Remembered so the tick can keep its counts honest - see refreshPanels().
       if (posted) setPanel(guild.id, { channel: made.id, message: posted.id, formats: [...PANEL_FORMATS] });
     }
@@ -551,7 +551,9 @@ async function postPanel(channel: GuildBasedChannel | undefined, formats: readon
   // channel. It must not take the other twenty down with it, and it must not
   // be swallowed either - a queue channel with no panel is a dead queue, and
   // the whole reason this button exists is that nobody could tell.
-  const posted = await channel.send(panelMessage(formats, channel.guild.id)).catch(() => null);
+  const posted = await channel
+    .send(panelMessage(formats, channel.guild.id, channel.id))
+    .catch(() => null);
   if (posted) {
     setPanel(channel.guild.id, { channel: channel.id, message: posted.id, formats: [...formats] });
   }

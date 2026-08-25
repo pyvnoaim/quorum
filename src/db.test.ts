@@ -361,4 +361,22 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   assert.deepEqual(resetRatings('gr', 'nobody'), { reset: [], shared: 0 }, 'nor a stranger');
 }
 
+// A panel counts the channel it sits in, not the whole server - the same
+// number under every bracket's panel was the bug.
+{
+  for (const [id, chan, ended] of [
+    [910, 'novice', 8000],
+    [911, 'novice', 9000],
+    [912, 'elite', 9000],
+  ] as [number, string, number][]) {
+    db.prepare(
+      "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at) values (?,'gs',?,'p1','1v1','done',?)",
+    ).run(id, chan, Date.now() - ended);
+  }
+  assert.equal(guildStats('gs').played, 3, 'the server has played three');
+  assert.equal(guildStats('gs', 'novice').played, 2, 'novice two of them');
+  assert.equal(guildStats('gs', 'elite').played, 1, 'and elite the other');
+  assert.equal(guildStats('gs', 'nowhere').week, 0, 'a channel with none says none');
+}
+
 console.log('db ok');

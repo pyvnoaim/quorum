@@ -139,18 +139,24 @@ export function changeEmbed(lines: string[], byId: string) {
  *  The numbers all come from the server itself, so the panel can neither
  *  promise a match it doesn't run nor claim a queue nobody is in. The last line
  *  is the one that moves; the tick edits this message when it changes. */
-export function panelMessage(formats: readonly Format[] = PANEL_FORMATS, guildId?: string) {
+export function panelMessage(
+  formats: readonly Format[] = PANEL_FORMATS,
+  guildId?: string,
+  channelId?: string,
+) {
   const { rounds, runs } = guildId
     ? getFormat(guildId)
     : { rounds: ROUNDS, runs: RUNS_PER_SCENARIO };
   const buttons = formats.map((f) => `**${f}**`).join(' or ');
-  const stats = guildId ? guildStats(guildId) : null;
+  // This channel's numbers, not the server's: a panel in #novice saying what
+  // #elite has been up to is a number nobody in front of it can act on.
+  const stats = guildId ? guildStats(guildId, channelId) : null;
   // An empty ladder is worth saying out loud - "0 played" reads as broken,
   // where "be the first" reads as an invitation.
   const pulse = !stats
     ? ''
     : stats.played === 0
-      ? '\n\nNobody has played yet. Be the first.'
+      ? '\n\nNobody has played here yet. Be the first.'
       : `\n\n**${stats.week}** played this week · **${stats.running}** ` +
         `${stats.running === 1 ? 'match' : 'matches'} up right now`;
 

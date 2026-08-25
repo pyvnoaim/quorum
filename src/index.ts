@@ -743,7 +743,7 @@ const panelText = new Map<string, string>();
 async function refreshPanels() {
   for (const [guildId] of client.guilds.cache) {
     for (const panel of getPanels(guildId)) {
-      const body = panelMessage(panel.formats, guildId);
+      const body = panelMessage(panel.formats, guildId, panel.channel);
       const next = body.embeds[0].data.description ?? '';
       if (panelText.get(panel.message) === next) continue;
 

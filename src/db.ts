@@ -902,19 +902,28 @@ export function recentMatches(discordId: string, guildId: string, limit = 5) {
 
 /** The overview page's numbers. Two counts here; everything else it shows the
  *  dashboard already has on the wire. */
-export function guildStats(guildId: string) {
+export function guildStats(guildId: string, channelId?: string) {
   const one = (sql: string, ...args: (string | number)[]) =>
     (db.prepare(sql).get(...args) as { n: number }).n;
+  // A panel sits in ONE bracket's channel and counts that bracket's matches:
+  // the same server-wide number under every panel told a Novice how busy the
+  // Elite queue was. Left off, it is the whole server, which is what the
+  // dashboard wants.
+  const here = channelId ? ' and channel_id = ?' : '';
+  const where = channelId ? [guildId, channelId] : [guildId];
   return {
-    played: one("select count(*) as n from match where guild_id = ? and status = 'done'", guildId),
+    played: one(
+      `select count(*) as n from match where guild_id = ?${here} and status = 'done'`,
+      ...where,
+    ),
     week: one(
-      "select count(*) as n from match where guild_id = ? and status = 'done' and ended_at > ?",
-      guildId,
+      `select count(*) as n from match where guild_id = ?${here} and status = 'done' and ended_at > ?`,
+      ...where,
       Date.now() - 7 * 24 * 60 * 60 * 1000,
     ),
     running: one(
-      "select count(*) as n from match where guild_id = ? and status in ('lobby','banning','live')",
-      guildId,
+      `select count(*) as n from match where guild_id = ?${here} and status in ('lobby','banning','live')`,
+      ...where,
     ),
     rated: one(
       `select count(*) as n from player p
