@@ -688,7 +688,13 @@ export function startWeb(client: Client, hooks: Hooks) {
       // Every server gets its own url. Same page either way - the client reads
       // the path and decides, so there's no routing to keep in sync.
       if ((path === '/' || /^\/g\/\d{1,32}$/.test(path)) && req.method === 'GET') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        // The page IS the app - markup, styles and script in one response, no
+        // hashed filename to bust. Cached, a deploy lands on a browser still
+        // running last week's dashboard against this week's API.
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+        });
         res.end(PAGE);
         return;
       }
