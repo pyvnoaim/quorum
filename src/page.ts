@@ -1487,10 +1487,9 @@ async function renderGuild(guild) {
 
     <div class="cat danger" style="margin-top:32px">
       <div class="cat-top"><strong>Reset ratings</strong></div>
-      <p class="muted" style="margin:0 0 12px">Every rating back to the start, and everyone unplayed again so
-      starting ranks can be handed out afresh. Matches already played stay in History - a new season does not
-      undo what happened, it starts the standings over. A rating is one number per player across every server
-      Quorum is in, so anyone who also plays it elsewhere is left alone. This cannot be undone.</p>
+      <p class="muted" style="margin:0 0 12px">Everyone back to the starting rating and unplayed again, so
+      starting ranks can be set afresh. Matches stay in History. Anyone who also plays Quorum in another server
+      is left alone.</p>
       <div class="bar">
         <span class="status" id="resetstatus"></span>
         <button class="btn bad" id="resetbtn">Reset ratings</button>
