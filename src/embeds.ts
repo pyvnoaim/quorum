@@ -19,7 +19,7 @@ import {
   type MatchPlayer,
   type Player,
 } from './db.js';
-import { rankFor, rankForRoles, rankName } from './rating.js';
+import { rankFor, rankForRoles, rankName, scenarioWinners } from './rating.js';
 
 const BLURPLE = 0x5865f2;
 const GREEN = 0x57f287;
@@ -349,6 +349,12 @@ export function noContestEmbed(match: Match, rows: MatchPlayer[]) {
     .setFooter(footer());
 }
 
+/** Fits a name into a fixed column, so a long scenario cannot shove a whole
+ *  table sideways on a phone. Cut names keep a marker, or a truncation reads as
+ *  the scenario's actual name. */
+const fit = (text: string, width: number) =>
+  (text.length > width ? text.slice(0, width - 1) + '…' : text).padEnd(width);
+
 export function resultsEmbed(
   match: Match,
   rows: MatchPlayer[],
@@ -358,43 +364,117 @@ export function resultsEmbed(
   const scenarios: string[] = JSON.parse(match.scenarios);
   const ordered = [...rows].sort((a, b) => (a.placing ?? 99) - (b.placing ?? 99));
   const medal = ['🥇', '🥈', '🥉'];
-  // Someone with no placing in a match that WAS scored never ran anything - the
-  // rest of the lobby played on without them. Said, rather than shown as a last
-  // place they didn't earn.
-  let anyPb = false;
+  const scores = new Map(
+    rows.map((r) => [r.discord_id, JSON.parse(r.scores) as Record<string, number | null>]),
+  );
+  const bests = new Map(
+    rows.map((r) => [r.discord_id, JSON.parse(r.pb ?? '{}') as Record<string, number | null>]),
+  );
+
+  // Who took each scenario, so the card can say 2-1. Same team totals the
+  // placings were worked out from - the scoreline and the medals cannot
+  // disagree, because they are the same sum counted twice.
+  const won = scenarioWinners(
+    rows.map((r) => ({ id: r.discord_id, elo: 0, team: r.team, scores: scores.get(r.discord_id)! })),
+    scenarios,
+  );
+  const teams = [...new Set(ordered.map((r) => r.team))];
+  const tally = new Map(teams.map((t) => [t, won.filter((w) => w === t).length]));
+  const named = (team: number) =>
+    ordered
+      .filter((r) => r.team === team)
+      .map((r) => players.get(r.discord_id)!.kovaaks_username)
+      .join(' & ');
+
+  // "ness beats Jay 3-1" - the one thing the card never said. Two sides only:
+  // past that a scoreline needs a table of its own, and the fields below are
+  // already that table.
+  const top = ordered.filter((r) => r.placing === 1).map((r) => r.team);
+  const win = [...new Set(top)];
+  const title =
+    teams.length === 2 && win.length === 1
+      ? `${named(win[0])} beats ${named(teams.find((t) => t !== win[0])!)} ` +
+        `${tally.get(win[0])}–${tally.get(teams.find((t) => t !== win[0])!)} · ${match.format}`
+      : teams.length === 2 && win.length === 2
+        ? `${named(teams[0])} draws ${named(teams[1])} ${tally.get(teams[0])}–${tally.get(teams[1])} · ${match.format}`
+        : `${match.format} · results`;
+
+  // One column per player, aligned, so a score can be read against the
+  // scenario it was set on rather than counted out of a row of numbers. Names
+  // are cut to keep the block inside a phone's width; the fields below carry
+  // them in full.
+  const cell = (r: MatchPlayer, scenario: string) => {
+    const score = scores.get(r.discord_id)![scenario];
+    if (score == null) return '–';
+    // The star is the scenario's winner, which is what the scoreline counts.
+    return score.toFixed(0) + (won[scenarios.indexOf(scenario)] === r.team ? '*' : '');
+  };
+  const widths = ordered.map((r) =>
+    Math.max(
+      6,
+      players.get(r.discord_id)!.kovaaks_username.slice(0, 8).length,
+      ...scenarios.map((s) => cell(r, s).length),
+    ),
+  );
+  const table = [
+    'SCENARIO'.padEnd(20) +
+      ordered
+        .map((r, n) => fit(players.get(r.discord_id)!.kovaaks_username.toUpperCase(), widths[n]))
+        .join(' ')
+        .trimEnd(),
+    ...scenarios.map(
+      (s) =>
+        // 19 and a space, not 20: a name that fills its column whole would
+        // otherwise run straight into the first score.
+        fit(s, 19) + ' ' +
+        ordered
+          .map((r, n) => cell(r, s).padEnd(widths[n]))
+          .join(' ')
+          .trimEnd(),
+    ),
+  ].join('\n');
 
   const fields = ordered.map((r) => {
     const p = players.get(r.discord_id)!;
     const band = rankLabel(match.guild_id, r.discord_id, p.elo);
     const delta = deltas.get(r.discord_id) ?? 0;
-    const scores = JSON.parse(r.scores) as Record<string, number | null>;
-    const pb = JSON.parse(r.pb ?? '{}') as Record<string, number | null>;
-    const line = scenarios
-      .map((s) => {
-        const score = scores[s];
-        if (score == null) return '–';
-        const prior = pb[s];
-        const gain = prior == null ? 0 : Math.round(score - prior);
-        if (gain < 1) return score.toFixed(0);
-        anyPb = true;
-        return `${score.toFixed(0)} (+${gain})`;
-      })
-      .join(' · ');
+    const pbs = scenarios.filter((s) => {
+      const now = scores.get(r.discord_id)![s];
+      const prior = bests.get(r.discord_id)![s];
+      return now != null && prior != null && now - prior >= 1;
+    }).length;
     return {
       name: `${r.placing == null ? '·' : (medal[r.placing - 1] ?? `#${r.placing}`)} ${p.kovaaks_username}`,
       value:
         `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ''} ` +
-        `${r.placing == null ? '· _no scores, not rated_' : `(${delta >= 0 ? '+' : ''}${delta})`}\n\`${line}\``,
+        `${r.placing == null ? '· _no scores, not rated_' : `(${delta >= 0 ? '+' : ''}${delta})`}` +
+        (pbs ? `\n_${pbs} personal best${pbs === 1 ? '' : 's'}_` : ''),
+      inline: true,
     };
   });
 
+  // What was on the table and never played. Everything offered is in ban_pool,
+  // so what is in there and not in the match was struck out - and a scenario in
+  // the match that was never offered is the last round, which is rolled rather
+  // than picked. Worth saying: the card has always shown all three as if they
+  // were chosen the same way.
+  const offered: string[] = match.ban_pool ? JSON.parse(match.ban_pool) : [];
+  const banned = [...new Set(offered.filter((s) => !scenarios.includes(s)))];
+  const rolled = offered.length ? scenarios.filter((s) => !offered.includes(s)) : [];
+  const shown = banned.slice(0, 6);
+  const draft = [
+    banned.length
+      ? `**Banned** ${shown.join(', ')}${banned.length > shown.length ? ` +${banned.length - shown.length} more` : ''}`
+      : '',
+    rolled.length ? `**Rolled** ${rolled.join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return new EmbedBuilder()
-    .setTitle(`${match.format} · results`)
+    .setTitle(title)
     .setColor(GREEN)
-    .setDescription(
-      scenarios.join(' · ') +
-        (anyPb ? '\n_a bracket is how much they beat their best by_' : ''),
-    )
+    .setDescription('```\n' + table + '\n```' + (draft ? `\n${draft}` : ''))
     .addFields(fields)
     .setFooter(footer());
 }

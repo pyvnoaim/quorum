@@ -174,6 +174,28 @@ export function scorable(entrants: Entrant[]): Entrant[] {
  * what sidesteps score normalization entirely. A 3000-point tracking scenario
  * and a 90-point clicking one would otherwise let one round decide the match.
  */
+/** Which team took each scenario, in the order they were played, or null where
+ *  nobody did - a tie splits the round, and a scenario nobody scored on was not
+ *  won by anyone either.
+ *
+ *  Same team totals placings() adds up, kept per scenario instead of summed, so
+ *  a result can say 2-1 rather than only who came first. The two must agree:
+ *  this is the working, that is the answer. */
+export function scenarioWinners(entrants: Entrant[], scenarios: string[]): (number | null)[] {
+  const teams = [...new Set(entrants.map((e) => e.team))];
+  return scenarios.map((scenario) => {
+    const totals = teams.map((team) => ({
+      team,
+      total: entrants
+        .filter((e) => e.team === team)
+        .reduce((sum, e) => sum + (e.scores[scenario] ?? 0), 0),
+    }));
+    const best = Math.max(...totals.map((t) => t.total));
+    const top = totals.filter((t) => t.total === best);
+    return best > 0 && top.length === 1 ? top[0].team : null;
+  });
+}
+
 export function placings(entrants: Entrant[], scenarios: string[]): Map<number, number> {
   const teams = [...new Set(entrants.map((e) => e.team))];
   const points = new Map(teams.map((t) => [t, 0]));

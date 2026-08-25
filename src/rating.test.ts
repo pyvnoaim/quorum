@@ -5,6 +5,7 @@ import {
   advancePick,
   allRunsUsed,
   bandsInReach,
+  scenarioWinners,
   rankForRoles,
   pickTurn,
   canPlay,
@@ -268,3 +269,19 @@ const withRoles = [
 assert.equal(rankForRoles(withRoles, ['r-nov', 'r-champ'])!.name, 'Champion');
 assert.equal(rankForRoles(withRoles, ['r-nov'])!.name, 'Novice');
 assert.equal(rankForRoles(withRoles, ['other']), undefined, 'unplaced is not a bracket');
+
+// Who took each scenario, which is what a 2-1 on the result card counts.
+const duel = [
+  { id: 'a', elo: 1000, team: 0, scores: { s1: 100, s2: 50, s3: 10 } },
+  { id: 'b', elo: 1000, team: 1, scores: { s1: 90, s2: 50, s3: null } },
+];
+assert.deepEqual(
+  scenarioWinners(duel, ['s1', 's2', 's3']),
+  [0, null, 0],
+  'a tie is nobody, and an unplayed scenario still goes to whoever scored',
+);
+assert.deepEqual(
+  scenarioWinners(duel, ['never played']),
+  [null],
+  'a scenario nobody scored on was won by nobody',
+);
