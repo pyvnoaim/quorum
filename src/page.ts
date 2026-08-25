@@ -2073,15 +2073,31 @@ async function renderGuild(guild) {
         // then it would undo nothing.
         const canReset = p.wins + p.losses + p.draws || p.seeded_from;
         const open = editing === p.discord_id;
-        /* Where their ROLE puts them against where their RATING does. With
-           staff-owned brackets those are two separate answers and only staff
-           can reconcile them - so a promotion that leaves somebody bottom of
-           the board says so on the row, instead of waiting to be noticed. The
-           hint is the control: it opens the editor already filled with the
-           floor of the bracket they were actually put in. */
+        /* Where their ROLE puts them against where their RATING does, and only
+           when the two are a real distance apart.
+
+           Any gap at all was far too eager: seeding lands on a band's floor, so
+           the very first loss put somebody a dozen points under it and lit this
+           up on every row that had played a game. Half a band either way is
+           where the number starts saying something a placement should answer
+           for - below it they may be overplaced, above it they may be due a
+           promotion.
+
+           Nothing acts on it either way. The role IS the rank here: Quorum
+           never moves one in either direction, so this is a note for staff and
+           not a demotion waiting to happen. */
         const byElo = rankOf(p.elo);
-        const adrift =
-          data.rankMode === 'manual' && rank && byElo && byElo.id !== rank.id ? byElo : null;
+        let adrift = null;
+        if (data.rankMode === 'manual' && rank && byElo && byElo.id !== rank.id) {
+          const at = data.ranks.indexOf(rank);
+          const ceil = at > 0 ? data.ranks[at - 1].min_elo : Infinity;
+          // The top band has no ceiling, so it borrows the width of the one
+          // under it rather than being impossible to flag at all.
+          const width =
+            (ceil === Infinity ? rank.min_elo - (data.ranks[at + 1]?.min_elo ?? 0) : ceil - rank.min_elo) || 400;
+          const margin = width / 2;
+          if (p.elo < rank.min_elo - margin || p.elo >= ceil + margin) adrift = byElo;
+        }
         return \`
       <tr>
         <td style="width:1px"><img class="pfp" src="\${avatarUrl({ id: p.discord_id, avatar: p.avatar })}" alt="" /></td>
@@ -2103,7 +2119,7 @@ async function renderGuild(guild) {
                title="Correct this rating - their record and their matches stay">\${icon('pencil')}</button></span>\`}</td>
         <td style="white-space:nowrap">\${adrift
           ? \`<button type="button" class="drift" data-edit="\${h(p.discord_id)}" data-to="\${rank.min_elo}"
-               title="Their role says \${h(rank.name)} but \${p.elo} sits in \${h(adrift.name)}. Click to put them at the bottom of \${h(rank.name)}, or move the role instead.">rating in \${h(adrift.name)}</button>\`
+               title="Their role says \${h(rank.name)}, and \${p.elo} is more than half a division away from it - in \${h(adrift.name)}. Nothing has moved and nothing will: the role is the rank. Change it by hand, or click here to put their rating back at the bottom of \${h(rank.name)}.">rating in \${h(adrift.name)}</button>\`
           : p.wins + p.losses + p.draws
             ? ''
             : \`<span class="hint" title="Their first match will decide it from here">seeded \${h(p.seeded_from ?? 'flat')}</span>\`}</td>
