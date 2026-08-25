@@ -47,18 +47,16 @@ ${TOKENS}
     display: flex; flex-direction: column; align-items: center; justify-content: safe center;
   }
   main { width: 100%; max-width: 720px; padding: 64px 24px; position: relative; }
-  /* The signed-in page is a framed slab on the page background. Not on the
-     sign-in page - there the card is the content and a full-height slab behind
-     it has nothing to hold. */
+  /* No frame around the app: the border made a card of a whole page, and a card
+     with nothing beside it is a border for its own sake. The measurements stay
+     - even top and bottom, because 24px more under the last row than over the
+     header reads as the content having slipped upwards. */
   main:not(:has(.login)) {
-    margin: 26px 0; border: 1px solid var(--line); border-radius: 18px;
-    background: var(--bg);
-    /* even top and bottom: the slab is a card, and 24px more under the last row
-       than over the header reads as the content having slipped upwards. */
+    margin: 26px 0;
     padding: 40px 32px;
   }
   @media (max-width: 760px) {
-    main:not(:has(.login)) { margin: 0; border: 0; border-radius: 0; padding: 32px 20px; }
+    main:not(:has(.login)) { margin: 0; padding: 32px 20px; }
   }
   #bg { position: fixed; inset: 0; width: 100%; height: 100%; display: none; }
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 48px; }
@@ -2375,22 +2373,25 @@ export interface Profile {
 const esc = (s: string) =>
   s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
-/** The rating curve. Stretched to the box with preserveAspectRatio and kept at
- *  one pixel by non-scaling-stroke, which is the whole reason this needs no
- *  measuring and no chart library. */
+/** The rating curve: a filled area under a line. Stretched to the box with
+ *  preserveAspectRatio and kept at one pixel by non-scaling-stroke, which is
+ *  the whole reason this needs no measuring and no chart library. */
 function spark(values: number[]) {
   if (values.length < 2) return '';
   const lo = Math.min(...values);
   const hi = Math.max(...values);
   // A rating that never moved is a line down the MIDDLE. Dividing by a zero
   // span would pin it to the floor of the box, which reads as a collapse.
+  // The 4/26 inset keeps the highest and lowest points off the edges, where a
+  // 1.5px stroke would be half clipped.
   const at = (n: number) => (hi === lo ? 0.5 : (n - lo) / (hi - lo));
-  const pts = values
-    .map((n, i) => `${(i / (values.length - 1)) * 100},${28 - at(n) * 26}`)
-    .join(' ');
+  const pts = values.map((n, i) => `${(i / (values.length - 1)) * 100},${28 - at(n) * 24}`);
   return (
-    '<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">' +
-    `<polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.5" ` +
+    '<svg class="spark" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">' +
+    // The fill is the same shape closed along the floor. Drawn first, so the
+    // line sits on top of its own shading rather than under it.
+    `<polygon points="0,32 ${pts.join(' ')} 100,32" fill="currentColor" opacity="0.09" />` +
+    `<polyline points="${pts.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.5" ` +
     'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>'
   );
 }
@@ -2454,10 +2455,12 @@ export function profilePage(p: Profile): string {
 
   ${
     p.history.length > 1
-      ? `<section class="curve">
-    <div class="k">Rating, last ${p.history.length} games</div>
+      ? `<div class="curve">
     ${spark(p.history.map((h) => h.elo))}
-  </section>`
+    <div class="k">Rating over the last ${p.history.length} games · ${
+      p.history[0].elo
+    } → ${p.history.at(-1)!.elo}</div>
+  </div>`
       : ''
   }
 
@@ -2552,22 +2555,23 @@ ${TOKENS}
     -webkit-font-smoothing: antialiased; min-height: 100vh;
     display: flex; flex-direction: column; align-items: center; justify-content: safe center;
   }
-  main {
-    width: 100%; max-width: 720px; margin: 26px 0; padding: 40px 32px;
-    border: 1px solid var(--line); border-radius: 18px; background: var(--bg);
-  }
+  main { width: 100%; max-width: 720px; margin: 26px 0; padding: 40px 32px; }
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 48px; }
   h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.025em; }
   h1 a { display: flex; align-items: center; gap: 9px; text-decoration: none; color: inherit; }
   .mark { width: 17px; height: 17px; }
   .server { font-size: 13px; color: var(--muted); }
   h2 { font-size: 14px; font-weight: 600; color: var(--fg); margin-bottom: 12px; letter-spacing: -0.01em; }
-  section { margin-top: 36px; }
-  .who { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  section { margin-top: 30px; }
   .pfp { width: 30px; height: 30px; border-radius: 999px; display: block; }
-  .who .name { display: grid; line-height: 1.35; }
-  .who .name strong { color: var(--fg); font-weight: 500; font-size: 13px; }
-  .who .name span { font-size: 12px; color: var(--muted); }
+  /* The page is ABOUT this person, so they lead it: the name is the biggest
+     thing on it and the numbers answer to it, rather than three cards with a
+     30px avatar apologising above them. */
+  .who { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
+  .who .pfp { width: 54px; height: 54px; }
+  .who .name { display: grid; gap: 3px; line-height: 1.25; }
+  .who .name strong { color: var(--fg); font-weight: 600; font-size: 22px; letter-spacing: -0.02em; }
+  .who .name span { font-size: 13px; color: var(--muted); }
   .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
   .stat {
     border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
@@ -2589,9 +2593,12 @@ ${TOKENS}
     vertical-align: middle; color: color-mix(in srgb, var(--c) 78%, var(--fg));
   }
   .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--c); flex: none; }
-  .curve { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px 15px 10px; }
-  .curve .k { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .spark { width: 100%; height: 54px; color: var(--muted); display: block; }
+  /* No box round the curve: a nearly-flat line in a bordered panel is mostly
+     empty panel. It sits on the page with its caption under it, the way a
+     figure does. */
+  .curve { margin-top: 22px; }
+  .curve .k { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .spark { width: 100%; height: 84px; color: var(--fg); display: block; }
   .progress { display: block; height: 3px; border-radius: 999px; background: var(--line); }
   .progress i { display: block; height: 100%; border-radius: 999px; background: var(--fg); }
   table { width: 100%; border-collapse: collapse; }
