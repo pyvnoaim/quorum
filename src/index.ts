@@ -1589,15 +1589,16 @@ async function onOpen(
   // back until staff pick another.
   const set = getConfig(i.guildId).ping_role_id;
   const optIn = set && i.guild?.roles.cache.has(set) ? set : null;
-  const mentions = optIn
-    ? [optIn]
-    : !ranked
-      ? // An unranked call belongs to no bracket, so there is no bracket to
-        // summon. Falling through to the reach below would have pinged the
-        // bands around the OPENER's rating - dragging the ladder into the one
-        // queue that is deliberately outside it, and pinging roles for a game
-        // that half the people holding them cannot be beaten by anyway.
-        []
+  // An unranked call pings NO role, and this is checked before the opt-in one
+  // rather than after it. It belongs to no bracket, so there is no bracket to
+  // summon - and the notify role is not a substitute for one either: somebody
+  // asked to hear about games, not to be pulled out of whatever they are doing
+  // for one that counts for nothing. It sits in a channel the whole server can
+  // already see, which is the announcement.
+  const mentions = !ranked
+    ? []
+    : optIn
+      ? [optIn]
       : [
           ...new Set(
             bandsInReach(ranks, owner?.min_elo ?? opener.elo, getRankSpread(i.guildId)[format])
