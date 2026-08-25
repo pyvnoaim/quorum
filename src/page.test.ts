@@ -5,7 +5,43 @@
 process.env.DB_PATH = ':memory:';
 import assert from 'node:assert/strict';
 
-const { PAGE, profilePage } = await import('./page.js');
+const { PAGE, profilePage, ladderPage } = await import('./page.js');
+
+// The ladder: same shell, and the row that is you is marked as such - that is
+// the whole of what signing in buys out here.
+const ladder = ladderPage({
+  guildId: '111',
+  guildName: 'Server & "co"',
+  url: 'https://quorum.example.com/p/111',
+  players: [
+    {
+      discordId: '222',
+      name: '<b>top</b>',
+      avatar: null,
+      elo: 1312,
+      rank: { name: 'Diamond', color: '#67e8f9' },
+      wins: 5,
+      losses: 2,
+      draws: 0,
+    },
+    { discordId: '333', name: 'me', avatar: null, elo: 900, rank: null, wins: 0, losses: 1, draws: 0 },
+  ],
+  total: 2,
+  matches: 7,
+  meId: '333',
+  signedIn: true,
+});
+assert.ok(ladder.includes('&lt;b&gt;top&lt;/b&gt;'), 'a name is escaped, not rendered');
+assert.ok(ladder.includes('<tr class="me">'), 'the reader\'s own row is marked');
+assert.ok(ladder.includes('>My page</a>'), 'and signed in, the button offers it');
+assert.ok(ladder.includes('href="/p/111/222"'), 'every row is a way into that player');
+// Signed out, the same button is the way in.
+assert.ok(
+  ladderPage({
+    guildId: '111', guildName: 'g', url: 'u', players: [], total: 0, matches: 0,
+    meId: null, signedIn: false,
+  }).includes('>Sign in</a>'),
+);
 
 // The profile page is built per request rather than baked into a constant, so
 // the same check has to see one actually rendered.

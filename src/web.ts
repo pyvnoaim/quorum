@@ -35,6 +35,7 @@ import {
   playedIn,
   recentMatches,
   guildStats,
+  ladderSize,
   leaderboard,
   listOpenMatches,
   matchHistory,
@@ -62,7 +63,7 @@ import {
 import { changeEmbed, leaderboardMessage, messageGone, panelMessage, rankLabel } from './embeds.js';
 import { bandsInReach, forfeits, rankForRoles, scenarioWinners } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
-import { PAGE, profilePage } from './page.js';
+import { PAGE, ladderPage, profilePage } from './page.js';
 
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID ?? '';
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET ?? '';
@@ -146,7 +147,10 @@ interface Session {
 // ponytail: sessions in a Map, not a table - a restart signing admins out of a
 // settings page is not worth a session store. Same for the oauth state set.
 const sessions = new Map<string, Session>();
-const states = new Set<string>();
+/** state -> where to land afterwards. A player signing in from the ladder wants
+ *  their own page back, not the admin dashboard, and the state is the only
+ *  thing that survives the trip to Discord and home again. */
+const states = new Map<string, string>();
 
 function sessionOf(req: IncomingMessage) {
   const sid = /(?:^|;\s*)sid=([^;]+)/.exec(req.headers.cookie ?? '')?.[1];
@@ -887,6 +891,68 @@ export function startWeb(client: Client, hooks: Hooks) {
         return;
       }
 
+      // The server's ladder, the page the player pages hang off. Same rules as
+      // one player's page: a server that hid its category is not published here
+      // either. Everyone on it has played, so playedIn() is met by definition.
+      const ladder = /^\/p\/(\d{1,32})$/.exec(path);
+      if (ladder && req.method === 'GET') {
+        const [, guildId] = ladder;
+        const guild = guildAllowed(guildId) ? client.guilds.cache.get(guildId) : undefined;
+        if (!guild || getConfig(guildId).visible_role_id) {
+          res.writeHead(404, { 'content-type': 'text/plain' }).end('no such ladder');
+          return;
+        }
+        // ponytail: the top hundred, not the lot. A page listing four thousand
+        // rows helps nobody - page it if a server ever gets that far.
+        const rows = leaderboard(guildId, 100);
+        const reader = sessionOf(req);
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'private, max-age=30',
+        });
+        res.end(
+          ladderPage({
+            guildId,
+            guildName: guild.name,
+            url: `${BASE_URL}/p/${guildId}`,
+            players: rows.map((p) => {
+              const band = rankLabel(guildId, p.discord_id, p.elo, guild);
+              return {
+                discordId: p.discord_id,
+                name: p.kovaaks_username,
+                avatar: client.users.cache.get(p.discord_id)?.avatar ?? null,
+                elo: p.elo,
+                rank: band
+                  ? { name: band, color: getRanks(guildId).find((r) => r.name === band)?.color ?? '#8a8a8a' }
+                  : null,
+                wins: p.wins,
+                losses: p.losses,
+                draws: p.draws,
+              };
+            }),
+            total: ladderSize(guildId),
+            matches: guildStats(guildId).played,
+            meId: reader?.user.id ?? null,
+            signedIn: !!reader,
+          }),
+        );
+        return;
+      }
+
+      // "Which of these is me." Signing in is the only way a page can answer
+      // that, and it is the only thing sign-in is for out here - everything a
+      // player can see, anyone with the link can see.
+      const mine = /^\/p\/(\d{1,32})\/me$/.exec(path);
+      if (mine && req.method === 'GET') {
+        const [, guildId] = mine;
+        const reader = sessionOf(req);
+        res.writeHead(302, {
+          location: reader ? `/p/${guildId}/${reader.user.id}` : `/login?to=${encodeURIComponent(path)}`,
+        });
+        res.end();
+        return;
+      }
+
       // A player's page, and the one thing here that is not behind a sign-in:
       // it exists to be pasted somewhere, and a link that asks whoever opens it
       // for Manage Server is not a link. It says what the results channel and
@@ -958,7 +1024,11 @@ export function startWeb(client: Client, hooks: Hooks) {
         // signing in - drop the lot rather than carry it.
         if (states.size >= 10_000) states.clear();
         const state = randomUUID();
-        states.add(state);
+        // Only ever a path on this site, and only the pages a player would be
+        // signing in for. Taken as given it would be an open redirect: anyone
+        // could hand out a Quorum login link that lands on their own site.
+        const to = url.searchParams.get('to') ?? '';
+        states.set(state, /^\/p\/\d{1,32}(\/(\d{1,32}|me))?$/.test(to) ? to : '/');
         setTimeout(() => states.delete(state), 10 * 60 * 1000).unref();
         const params = new URLSearchParams({
           client_id: CLIENT_ID,
@@ -975,8 +1045,9 @@ export function startWeb(client: Client, hooks: Hooks) {
       if (path === '/callback') {
         const code = url.searchParams.get('code');
         const state = url.searchParams.get('state');
-        // state is single-use: without deleting it here a leaked callback url
-        // could be replayed.
+        // state is single-use: without dropping it here a leaked callback url
+        // could be replayed. It also carries where this sign-in was headed.
+        const landing = state ? states.get(state) : undefined;
         if (!code || !state || !states.delete(state)) {
           res.writeHead(400).end('bad oauth state');
           return;
@@ -1035,7 +1106,10 @@ export function startWeb(client: Client, hooks: Hooks) {
           expires: Date.now() + SESSION_MS,
         });
         res.writeHead(302, {
-          location: '/',
+          // Back where the sign-in started: the dashboard for an admin who came
+          // in at the front door, their own page for a player who came off the
+          // ladder. Validated when it was parked, never taken from the URL here.
+          location: landing ?? '/',
           'set-cookie': `sid=${sid}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_MS / 1000}${BASE_URL.startsWith('https') ? '; Secure' : ''}`,
         });
         res.end();

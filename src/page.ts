@@ -14,6 +14,20 @@ const FAVICON =
   `<g fill="#ededed" transform="translate(23 23) scale(0.911) translate(-12 -12)">${MARK}</g>` +
   '</svg>';
 
+/** The palette, and the reset under it. Both pages here start with this exact
+ *  block, so it is one string rather than two that drift - a profile in one
+ *  grey and a dashboard in another is the kind of thing nobody spots and
+ *  everybody feels. */
+const TOKENS = /* css */ `
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0a0a0a; --fg: #ededed; --muted: #8a8a8a; --line: #262626; --panel: #111;
+    --bad: #f0666b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #fafafa; --fg: #111; --muted: #6b6b6b; --line: #e2e2e2; --panel: #fff; --bad: #c0392b; }
+  }`;
+
 export const PAGE = /* html */ `<!doctype html>
 <html lang="en">
 <head>
@@ -22,14 +36,7 @@ export const PAGE = /* html */ `<!doctype html>
 <title>Quorum</title>
 <link rel="icon" href="data:image/svg+xml,${encodeURIComponent(FAVICON)}" />
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  :root {
-    --bg: #0a0a0a; --fg: #ededed; --muted: #8a8a8a; --line: #262626; --panel: #111;
-    --bad: #f0666b;
-  }
-  @media (prefers-color-scheme: light) {
-    :root { --bg: #fafafa; --fg: #111; --muted: #6b6b6b; --line: #e2e2e2; --panel: #fff; --bad: #c0392b; }
-  }
+${TOKENS}
   body {
     background: var(--bg); color: var(--fg); font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased; min-height: 100vh;
@@ -2399,12 +2406,7 @@ function spark(values: number[]) {
  */
 export function profilePage(p: Profile): string {
   const games = p.wins + p.losses + p.draws;
-  // The hash comes off Discord rather than out of the database, so it is
-  // escaped like anything else that arrived from somewhere else - a quote in it
-  // would otherwise be a quote out of the attribute.
-  const avatar = p.avatar
-    ? esc(`https://cdn.discordapp.com/avatars/${p.discordId}/${p.avatar}.png?size=80`)
-    : `https://cdn.discordapp.com/embed/avatars/${(BigInt(p.discordId) >> 22n) % 6n}.png`;
+  const avatar = avatarUrl(p.discordId, p.avatar, 80);
   const recent = [...p.history].reverse().slice(0, 10);
   // What the card in Discord says. The page gets pasted into chat far more than
   // it gets opened from a browser bar, so this line is most of what people
@@ -2416,150 +2418,257 @@ export function profilePage(p: Profile): string {
     (games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ' · no games yet') +
     (p.cats.length ? `\n${p.cats.map((c) => `${c.main} ${c.won}–${c.lost}`).join(' · ')}` : '');
 
+  const body = /* html */ `
+  <div class="who">
+    <img class="pfp" src="${avatar}" alt="" />
+    <div class="name">
+      <strong>${esc(p.name)}</strong>
+      <span>${
+        p.rank
+          ? `<span class="rank" style="--c:${esc(p.rank.color)}"><span class="dot"></span>${esc(p.rank.name)}</span>`
+          : games
+            ? 'Unplaced'
+            : `Seeded ${esc(p.seededFrom ?? 'flat')}`
+      }</span>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="n">${p.elo}</div>
+      <div class="k">Rating</div>
+    </div>
+    <div class="stat">
+      <div class="n">${p.wins}<span class="sub">W</span> ${p.losses}<span class="sub">L</span>${
+        p.draws ? ` ${p.draws}<span class="sub">D</span>` : ''
+      }</div>
+      <div class="k">Record</div>
+    </div>
+    <div class="stat">
+      <div class="n">${games ? Math.round((p.wins / games) * 100) : '–'}${
+        games ? '<span class="sub">%</span>' : ''
+      }</div>
+      <div class="k">${games ? `Won, over ${games} game${games === 1 ? '' : 's'}` : 'No games yet'}</div>
+    </div>
+  </div>
+
+  ${
+    p.history.length > 1
+      ? `<section class="curve">
+    <div class="k">Rating, last ${p.history.length} games</div>
+    ${spark(p.history.map((h) => h.elo))}
+  </section>`
+      : ''
+  }
+
+  <section>
+    <h2>Rounds by category</h2>
+    ${
+      p.cats.length
+        ? `<table>
+      ${p.cats
+        .map(
+          (c) => `<tr>
+        <td>${esc(c.main)}</td>
+        <td style="width:100%"><span class="progress"><i style="width:${Math.round(
+          (c.won / (c.won + c.lost)) * 100,
+        )}%"></i></span></td>
+        <td class="num"><b>${c.won}</b>–${c.lost}</td>
+      </tr>`,
+        )
+        .join('\n      ')}
+    </table>`
+        : `<p class="empty">${
+            // Played, but nothing that files anywhere: every scenario they ran
+            // has since left the pool, so there is no main to count it under.
+            games ? 'Nothing under the current pool.' : 'Nothing played yet.'
+          }</p>`
+    }
+  </section>
+
+  <section>
+    <h2>${recent.length ? `Last ${recent.length} ${recent.length === 1 ? 'game' : 'games'}` : 'Games'}</h2>
+    ${
+      recent.length
+        ? `<table>
+      ${recent
+        .map(
+          (m) => `<tr>
+        <td><span class="res"><span class="dot" style="--c:${
+          m.won ? 'var(--fg)' : 'var(--bad)'
+        }"></span>${esc(m.format)}</span></td>
+        <td class="vs" style="width:100%">${
+          m.against.length
+            ? `vs ${m.against
+                .map((o) => `<a href="/p/${esc(p.guildId)}/${esc(o.id)}">${esc(o.name)}</a>`)
+                .join(' &amp; ')}`
+            : ''
+        }</td>
+        <td class="when">${
+          // The date is rendered here and only re-stated in the viewer's own
+          // locale below, so a page with no JavaScript still has one.
+          m.at
+            ? `<time datetime="${new Date(m.at).toISOString()}">${new Date(m.at)
+                .toISOString()
+                .slice(0, 10)}</time>`
+            : ''
+        }</td>
+        <td class="d${m.delta < 0 ? ' down' : ''}">${m.delta >= 0 ? '+' : ''}${m.delta}</td>
+      </tr>`,
+        )
+        .join('\n      ')}
+    </table>`
+        : '<p class="empty">No games in this server yet.</p>'
+    }
+  </section>`;
+
+  return shell({
+    title: `${esc(p.name)} · Quorum`,
+    guildId: p.guildId,
+    guildName: p.guildName,
+    head: /* html */ `<meta name="description" content="${esc(headline)} - ${esc(summary.replace(/\n/g, ' - '))}" />
+<meta property="og:type" content="profile" />
+<meta property="og:site_name" content="Quorum · ${esc(p.guildName)}" />
+<meta property="og:title" content="${esc(p.name)} · ${esc(headline)}" />
+<meta property="og:description" content="${esc(summary)}" />
+<meta property="og:image" content="${avatarUrl(p.discordId, p.avatar, 160)}" />
+<meta property="og:url" content="${esc(p.url)}" />
+<!-- Discord reads og: for the card and this for the small square avatar beside
+     it; without it the image above is blown up the width of the embed. -->
+<meta name="twitter:card" content="summary" />
+${p.rank ? `<meta name="theme-color" content="${esc(p.rank.color)}" />` : ''}`,
+    footer: `Scores read off KovaaK's. <a href="/p/${esc(p.guildId)}">The ladder</a>`,
+    body,
+  });
+}
+
+const PUBLIC_CSS = /* css */ `
+${TOKENS}
+  /* Everything below is the dashboard's own vocabulary at the dashboard's own
+     numbers - the slab, the stat card, the rank dot, the ladder row. This page
+     is one of its panes with the sidebar taken off, and it should read as one. */
+  body {
+    background: var(--bg); color: var(--fg); font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: safe center;
+  }
+  main {
+    width: 100%; max-width: 720px; margin: 26px 0; padding: 40px 32px;
+    border: 1px solid var(--line); border-radius: 18px; background: var(--bg);
+  }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 48px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.025em; }
+  h1 a { display: flex; align-items: center; gap: 9px; text-decoration: none; color: inherit; }
+  .mark { width: 17px; height: 17px; }
+  .server { font-size: 13px; color: var(--muted); }
+  h2 { font-size: 14px; font-weight: 600; color: var(--fg); margin-bottom: 12px; letter-spacing: -0.01em; }
+  section { margin-top: 36px; }
+  .who { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .pfp { width: 30px; height: 30px; border-radius: 999px; display: block; }
+  .who .name { display: grid; line-height: 1.35; }
+  .who .name strong { color: var(--fg); font-weight: 500; font-size: 13px; }
+  .who .name span { font-size: 12px; color: var(--muted); }
+  .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .stat {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    padding: 14px 15px; text-align: left;
+  }
+  .stat .n {
+    font-size: 25px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15;
+    display: flex; align-items: baseline; gap: 6px; white-space: nowrap;
+  }
+  .stat .n .sub { font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--muted); }
+  .stat .k {
+    display: flex; align-items: center; gap: 7px; font-size: 12px;
+    color: var(--muted); margin-top: 5px; white-space: nowrap;
+  }
+  /* A rank reads as its colour first: the dot carries it and the label borrows
+     it at low weight. Same component as the ladder and the players pane. */
+  .rank {
+    display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+    vertical-align: middle; color: color-mix(in srgb, var(--c) 78%, var(--fg));
+  }
+  .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--c); flex: none; }
+  .curve { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px 15px 10px; }
+  .curve .k { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .spark { width: 100%; height: 54px; color: var(--muted); display: block; }
+  .progress { display: block; height: 3px; border-radius: 999px; background: var(--line); }
+  .progress i { display: block; height: 100%; border-radius: 999px; background: var(--fg); }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 8px 10px 8px 0; vertical-align: middle; font-size: 13px; }
+  td:last-child { padding-right: 0; text-align: right; }
+  tr + tr { border-top: 1px solid var(--line); }
+  .res { display: inline-flex; align-items: center; gap: 9px; white-space: nowrap; }
+  /* The one cell that can be any length, so it is the one that gives - the
+     date and the delta keep their columns. */
+  .vs { color: var(--muted); }
+  .vs a { color: var(--fg); text-decoration: none; }
+  .vs a:hover { text-decoration: underline; }
+  .when, .num { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .num b { color: var(--fg); font-weight: 500; }
+  .d { font-variant-numeric: tabular-nums; }
+  .d.down { color: var(--bad); }
+  .empty { color: var(--muted); font-size: 14px; padding: 32px 0; }
+  footer { margin-top: 44px; font-size: 13px; color: var(--muted); }
+  footer a {
+    color: inherit; text-decoration: underline;
+    text-decoration-color: var(--line); text-underline-offset: 3px;
+  }
+  footer a:hover { color: var(--fg); text-decoration-color: currentColor; }
+  /* The ladder's own rows: a position, who, their bracket, the numbers. */
+  .pos { color: var(--muted); font-variant-numeric: tabular-nums; width: 1px; padding-right: 14px; }
+  .who-row { display: inline-flex; align-items: center; gap: 9px; text-decoration: none; color: inherit; }
+  .who-row .pfp { width: 22px; height: 22px; }
+  .who-row:hover span { text-decoration: underline; }
+  /* Your own row, when you are signed in - the reason to sign in at all. */
+  tr.me td { background: var(--panel); }
+  tr.me td:first-child { border-radius: 6px 0 0 6px; }
+  tr.me td:last-child { border-radius: 0 6px 6px 0; }
+  .btn {
+    border: 1px solid var(--line); background: transparent; color: var(--fg);
+    padding: 7px 14px; border-radius: 6px; font-size: 13px; text-decoration: none;
+    display: inline-block; transition: border-color .15s;
+  }
+  .btn:hover { border-color: var(--fg); }
+  @media (max-width: 760px) {
+    main { margin: 0; border: 0; border-radius: 0; padding: 32px 20px; }
+    .stats { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
+  }`;
+
+/** The frame every public page sits in: the dashboard's slab, its header, its
+ *  footer, and the one line of script that puts a date in the reader's own
+ *  locale. Two pages share it, so neither can drift from the other. */
+function shell(o: {
+  title: string;
+  guildId: string;
+  guildName: string;
+  /** Extra <head> tags - the link-preview block, mostly. */
+  head?: string;
+  /** Sits at the top right, opposite the mark. */
+  nav?: string;
+  body: string;
+  footer: string;
+}) {
   return /* html */ `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${esc(p.name)} · Quorum</title>
-<meta name="description" content="${esc(headline)} - ${esc(summary.replace(/\n/g, ' - '))}" />
-<meta property="og:type" content="profile" />
-<meta property="og:site_name" content="Quorum · ${esc(p.guildName)}" />
-<meta property="og:title" content="${esc(p.name)} · ${esc(headline)}" />
-<meta property="og:description" content="${esc(summary)}" />
-<meta property="og:image" content="${avatar.replace('size=80', 'size=160')}" />
-<meta property="og:url" content="${esc(p.url)}" />
-<!-- Discord reads og: for the card and this for the small square avatar beside
-     it; without it the image above is blown up the width of the embed. -->
-<meta name="twitter:card" content="summary" />
-${p.rank ? `<meta name="theme-color" content="${esc(p.rank.color)}" />` : ''}
+<title>${o.title}</title>
+${o.head ?? ''}
 <link rel="icon" href="data:image/svg+xml,${encodeURIComponent(FAVICON)}" />
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  :root {
-    --bg: #0a0a0a; --fg: #ededed; --muted: #8a8a8a; --line: #262626; --panel: #111;
-    --bad: #f0666b;
-  }
-  @media (prefers-color-scheme: light) {
-    :root { --bg: #fafafa; --fg: #111; --muted: #6b6b6b; --line: #e2e2e2; --panel: #fff; --bad: #c0392b; }
-  }
-  body {
-    background: var(--bg); color: var(--fg); font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
-    -webkit-font-smoothing: antialiased; display: flex; justify-content: center;
-  }
-  main { width: 100%; max-width: 560px; padding: 64px 24px; }
-  header { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 600;
-    letter-spacing: -0.025em; margin-bottom: 40px; }
-  header .mark { width: 17px; height: 17px; }
-  header span { color: var(--muted); font-weight: 400; }
-  .who { display: flex; align-items: center; gap: 14px; }
-  .who img { width: 52px; height: 52px; border-radius: 999px; }
-  .elo { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1;
-    display: flex; align-items: baseline; gap: 9px; }
-  .rank { font-size: 12px; font-weight: 500; padding: 3px 9px; border-radius: 999px;
-    border: 1px solid currentColor; }
-  .sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
-  .spark { width: 100%; height: 64px; margin: 28px 0 4px; color: var(--muted); display: block; }
-  h2 { font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase;
-    letter-spacing: .06em; margin: 36px 0 12px; }
-  .cat { display: grid; grid-template-columns: 90px 1fr 52px; align-items: center; gap: 12px;
-    font-size: 13px; padding: 6px 0; }
-  .cat .bar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
-  .cat .bar i { display: block; height: 100%; background: var(--fg); }
-  .cat .n { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .cat .n b { color: var(--fg); font-weight: 500; }
-  .game { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted);
-    padding: 7px 0; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
-  .game .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--bad); flex: none; }
-  .game.win .dot { background: var(--fg); }
-  /* The one thing on the row that can be any length, so it is the one thing
-     that gives - the date and the delta down the right stay in their column. */
-  .game .vs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .game .vs a { color: var(--fg); text-decoration: none; }
-  .game .vs a:hover { text-decoration: underline; }
-  .game time { margin-left: auto; padding-left: 12px; white-space: nowrap; }
-  .game .d { margin-left: auto; color: var(--fg); }
-  /* ...but only one of them can push, or a row with a date gets two gaps. */
-  .game time ~ .d { margin-left: 12px; }
-  .game .d.down { color: var(--bad); }
-  .empty { color: var(--muted); font-size: 13px; }
-  footer { margin-top: 44px; color: var(--muted); font-size: 12px; }
-  footer a { color: inherit; }
-</style>
+<style>${PUBLIC_CSS}</style>
 </head>
 <body>
 <main>
   <header>
-    <svg class="mark" viewBox="0 0 128 128" fill="currentColor" aria-hidden="true">${MARK}</svg>
-    Quorum <span>· ${esc(p.guildName)}</span>
+    <h1><a href="/p/${esc(o.guildId)}"><svg class="mark" viewBox="0 0 128 128" fill="currentColor"
+      aria-hidden="true">${MARK}</svg>Quorum</a></h1>
+    ${o.nav ?? `<span class="server">${esc(o.guildName)}</span>`}
   </header>
+${o.body}
 
-  <div class="who">
-    <img src="${avatar}" alt="" />
-    <div>
-      <div class="elo">${p.elo}${
-        p.rank
-          ? `<span class="rank" style="color:${esc(p.rank.color)}">${esc(p.rank.name)}</span>`
-          : ''
-      }</div>
-      <div class="sub">${esc(p.name)} · ${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ''}${
-        games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ` · seeded ${esc(p.seededFrom ?? 'flat')}`
-      }</div>
-    </div>
-  </div>
-
-  ${spark(p.history.map((h) => h.elo))}
-
-  <h2>Rounds by category</h2>
-  ${
-    p.cats.length
-      ? p.cats
-          .map(
-            (c) => `<div class="cat"><span>${esc(c.main)}</span>
-      <span class="bar"><i style="width:${Math.round((c.won / (c.won + c.lost)) * 100)}%"></i></span>
-      <span class="n"><b>${c.won}</b>–${c.lost}</span></div>`,
-          )
-          .join('\n  ')
-      : `<p class="empty">${
-          // Played, but nothing that files anywhere: every scenario they ran
-          // has since left the pool, so there is no main to count it under.
-          games ? 'Nothing under the current pool.' : 'Nothing played yet.'
-        }</p>`
-  }
-
-  <h2>${recent.length ? `Last ${recent.length} ${recent.length === 1 ? 'game' : 'games'}` : 'Games'}</h2>
-  ${
-    recent.length
-      ? recent
-          .map(
-            (m) => `<div class="game${m.won ? ' win' : ''}"><span class="dot"></span>
-      <span>${esc(m.format)}</span>
-      ${
-        m.against.length
-          ? `<span class="vs">vs ${m.against
-              .map(
-                (o) =>
-                  `<a href="/p/${esc(p.guildId)}/${esc(o.id)}">${esc(o.name)}</a>`,
-              )
-              .join(' &amp; ')}</span>`
-          : ''
-      }
-      ${
-        // The date is rendered here and only re-stated in the viewer's own
-        // locale below, so a page with no JavaScript still has one.
-        m.at
-          ? `<time datetime="${new Date(m.at).toISOString()}">${new Date(m.at)
-              .toISOString()
-              .slice(0, 10)}</time>`
-          : ''
-      }
-      <span class="d${m.delta < 0 ? ' down' : ''}">${m.delta >= 0 ? '+' : ''}${m.delta}</span></div>`,
-          )
-          .join('\n  ')
-      : '<p class="empty">No games in this server yet.</p>'
-  }
-
-  <footer>Scores read off KovaaK's. <a href="/">Quorum</a></footer>
+  <footer>${o.footer}</footer>
 </main>
 <script>
   // Rendered on the server, so the only thing left is whose clock it is.
@@ -2569,4 +2678,118 @@ ${p.rank ? `<meta name="theme-color" content="${esc(p.rank.color)}" />` : ''}
 </script>
 </body>
 </html>`;
+}
+
+/** One server's ladder, for anyone with the link. */
+export interface Ladder {
+  guildId: string;
+  guildName: string;
+  url: string;
+  /** Highest rating first - the order the page prints them in. */
+  players: {
+    discordId: string;
+    name: string;
+    avatar: string | null;
+    elo: number;
+    rank: { name: string; color: string } | null;
+    wins: number;
+    losses: number;
+    draws: number;
+  }[];
+  /** How many the ladder holds, which may be more than are listed. */
+  total: number;
+  /** Matches this server has finished - counted as matches, not as sides. */
+  matches: number;
+  /** Whoever is reading, if they signed in - their row is marked. */
+  meId: string | null;
+  /** Whether anyone is signed in, which decides what the button offers. */
+  signedIn: boolean;
+}
+
+/**
+ * The standing ladder as a web page - the same table the leaderboard message in
+ * Discord shows, with every row a way into that player's own page.
+ *
+ * Signing in is not a gate: everything here is what the results channel already
+ * says. It only answers "which of these is me", which is the one thing a link
+ * cannot know - and saves a player hunting for their own Discord id.
+ */
+export function ladderPage(l: Ladder): string {
+  const top = l.players[0];
+  const summary = `${l.total} player${l.total === 1 ? '' : 's'}${
+    top ? ` · ${top.name} leads on ${top.elo}` : ''
+  }`;
+
+  const body = /* html */ `
+  <div class="stats">
+    <div class="stat">
+      <div class="n">${l.total}</div>
+      <div class="k">On the ladder</div>
+    </div>
+    <div class="stat">
+      <div class="n">${top ? top.elo : '–'}</div>
+      <div class="k">${top ? `Top rating · ${esc(top.name)}` : 'Nobody has played yet'}</div>
+    </div>
+    <div class="stat">
+      <div class="n">${l.matches}</div>
+      <div class="k">Matches played</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Standings</h2>
+    ${
+      l.players.length
+        ? `<table>
+      ${l.players
+        .map(
+          (p, at) => `<tr${p.discordId === l.meId ? ' class="me"' : ''}>
+        <td class="pos">${at + 1}</td>
+        <td style="width:100%"><a class="who-row" href="/p/${esc(l.guildId)}/${esc(p.discordId)}">
+          <img class="pfp" src="${avatarUrl(p.discordId, p.avatar)}" alt="" /><span>${esc(p.name)}</span></a></td>
+        <td>${
+          p.rank
+            ? `<span class="rank" style="--c:${esc(p.rank.color)}"><span class="dot"></span>${esc(p.rank.name)}</span>`
+            : ''
+        }</td>
+        <td class="num"><b>${p.elo}</b></td>
+        <td class="num">${p.wins}–${p.losses}${p.draws ? `–${p.draws}` : ''}</td>
+      </tr>`,
+        )
+        .join('\n      ')}
+    </table>
+    ${
+      l.total > l.players.length
+        ? `<p class="empty" style="padding:16px 0 0">Showing the top ${l.players.length} of ${l.total}.</p>`
+        : ''
+    }`
+        : '<p class="empty">Nobody has finished a match yet.</p>'
+    }
+  </section>`;
+
+  return shell({
+    title: `${esc(l.guildName)} · Quorum`,
+    guildId: l.guildId,
+    guildName: l.guildName,
+    head: /* html */ `<meta name="description" content="${esc(summary)}" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Quorum" />
+<meta property="og:title" content="${esc(l.guildName)} · the ladder" />
+<meta property="og:description" content="${esc(summary)}" />
+<meta property="og:url" content="${esc(l.url)}" />`,
+    nav: /* html */ `<a class="btn" href="/p/${esc(l.guildId)}/me">${
+      l.signedIn ? 'My page' : 'Sign in'
+    }</a>`,
+    body,
+    footer: `Scores read off KovaaK's. Ratings move only when a match ends.`,
+  });
+}
+
+/** Their avatar, or the default Discord picks from the id itself. The hash
+ *  arrives from Discord rather than the database, so it is escaped like
+ *  anything else from outside. */
+function avatarUrl(discordId: string, hash: string | null, size = 64) {
+  return hash
+    ? esc(`https://cdn.discordapp.com/avatars/${discordId}/${hash}.png?size=${size}`)
+    : `https://cdn.discordapp.com/embed/avatars/${(BigInt(discordId) >> 22n) % 6n}.png`;
 }
