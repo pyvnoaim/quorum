@@ -54,7 +54,7 @@ import {
   type RankChannels,
 } from './db.js';
 import { changeEmbed, leaderboardMessage, messageGone, panelMessage } from './embeds.js';
-import { bandsInReach, rankForRoles } from './rating.js';
+import { bandsInReach, rankForRoles, scenarioWinners } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
 import { PAGE } from './page.js';
 
@@ -918,28 +918,59 @@ export function startWeb(client: Client, hooks: Hooks) {
               })),
             };
           }),
-          matches: listOpenMatches(guildId).map((m) => ({
-            id: m.id,
-            format: m.format,
-            status: m.status,
-            started_at: m.started_at,
-            created_at: m.created_at,
+          matches: listOpenMatches(guildId).map((m) => {
             // A match still picking stores its phase here, not a list. What it
             // has settled on so far is the honest answer for the page.
-            scenarios: (() => {
-              const stored: unknown = JSON.parse(m.scenarios);
-              if (Array.isArray(stored)) return stored as string[];
-              return (stored as { picked?: string[] })?.picked ?? [];
-            })(),
-            players: matchPlayers(m.id).map((r) => ({
-              id: r.discord_id,
-              name: getPlayer(r.discord_id)?.kovaaks_username ?? r.discord_id,
-              // whatever the gateway already cached; the page falls back to
-              // Discord's default avatar rather than us fetching anyone.
-              avatar: client.users.cache.get(r.discord_id)?.avatar ?? null,
-              done: !!r.done,
-            })),
-          })),
+            const stored: unknown = JSON.parse(m.scenarios);
+            const scenarios = Array.isArray(stored)
+              ? (stored as string[])
+              : ((stored as { picked?: string[] })?.picked ?? []);
+            const rows = matchPlayers(m.id);
+            const scores = new Map(
+              rows.map((r) => [
+                r.discord_id,
+                JSON.parse(r.scores) as Record<string, number | null>,
+              ]),
+            );
+            // Who leads each scenario, counted the way the result will count it
+            // - the page and the card in Discord must not disagree about who is
+            // ahead in the same match.
+            const ahead = scenarioWinners(
+              rows.map((r) => ({
+                id: r.discord_id,
+                elo: 0,
+                team: r.team,
+                scores: scores.get(r.discord_id)!,
+              })),
+              scenarios,
+            );
+            return {
+              id: m.id,
+              format: m.format,
+              status: m.status,
+              started_at: m.started_at,
+              created_at: m.created_at,
+              scenarios,
+              // one entry per scenario: the team leading it, or null for a tie
+              // and for one nobody has run yet
+              ahead,
+              players: rows.map((r) => {
+                const used = JSON.parse(r.run_counts ?? '{}') as Record<string, number>;
+                return {
+                  id: r.discord_id,
+                  name: getPlayer(r.discord_id)?.kovaaks_username ?? r.discord_id,
+                  // whatever the gateway already cached; the page falls back to
+                  // Discord's default avatar rather than us fetching anyone.
+                  avatar: client.users.cache.get(r.discord_id)?.avatar ?? null,
+                  done: !!r.done,
+                  team: r.team,
+                  scores: scenarios.map((s) => scores.get(r.discord_id)![s] ?? null),
+                  runs: scenarios.map((s) => used[s] ?? 0),
+                  won: ahead.filter((w) => w === r.team).length,
+                };
+              }),
+            };
+          }),
         });
         return;
       }

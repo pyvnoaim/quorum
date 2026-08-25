@@ -316,6 +316,24 @@ export const PAGE = /* html */ `<!doctype html>
   .cat.danger .cat-top strong { color: var(--bad); }
   .cat.danger .bar { margin-top: 16px; flex-wrap: wrap; }
   .cat.danger .bar .opt { margin-right: auto; }
+  /* a live match's board: what has been put on each scenario, and who leads it */
+  .score {
+    font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13px;
+    color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 5px; padding: 1px 7px;
+  }
+  .sb-wrap { overflow-x: auto; }
+  .sb { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .sb th {
+    text-align: right; font-weight: 500; color: var(--muted); font-size: 11.5px;
+    letter-spacing: .06em; text-transform: uppercase; padding: 0 0 4px 12px;
+  }
+  .sb th:first-child { text-align: left; }
+  .sb td { text-align: right; padding: 3px 0 3px 12px; color: var(--muted); white-space: nowrap; }
+  /* the wrapper scrolls rather than the name truncating: a scenario nobody can
+     read the name of is worse than a board that moves sideways on a phone */
+  .sb .sb-name { text-align: left; color: var(--fg); width: 100%; padding-left: 0; }
+  .sb .sb-lead { color: var(--fg); font-weight: 600; }
   /* Something is wrong in the server rather than in the settings - a missing
      permission breaks whatever it is asked for next, so it says so above the
      fields that would otherwise fail quietly. */
@@ -1744,14 +1762,31 @@ async function renderGuild(guild) {
               : m.status === 'banning' ? 'Banning scenarios'
               : 'Waiting for a taker'}</span>
           <span class="hint">\${ago(m.started_at ?? m.created_at)}</span>
+          \${m.status === 'live' && m.players.length === 2
+            ? \`<span class="score">\${m.players.map((p) => p.won).join('–')}</span>\`
+            : ''}
         </div>
         <div class="roster">\${m.players.map((p) => \`
           <span class="pl\${p.done ? ' done' : ''}">
             <img src="\${avatarUrl(p)}" alt="" />\${h(p.name)}\${p.done ? icon('check') : ''}
           </span>\`).join('')}</div>
-        \${m.scenarios.length
-          ? \`<div class="chips">\${m.scenarios.map((s) => \`<span class="chip">\${h(s)}</span>\`).join('')}</div>\`
-          : ''}
+        \${!m.scenarios.length
+          ? ''
+          : m.status !== 'live'
+            ? \`<div class="chips">\${m.scenarios.map((s) => \`<span class="chip">\${h(s)}</span>\`).join('')}</div>\`
+            // Running: the scenarios come with what has been put on them, which
+            // is what anyone watching a live match actually wants to know.
+            : \`<div class="sb-wrap"><table class="sb">
+                <tr><th></th>\${m.players.map((p) => \`<th>\${h(p.name)}</th>\`).join('')}</tr>
+                \${m.scenarios.map((s, i) => \`<tr>
+                  <td class="sb-name">\${h(s)}</td>
+                  \${m.players.map((p) => \`<td class="\${m.ahead[i] === p.team ? 'sb-lead' : ''}">\${
+                    p.scores[i] == null ? '–' : Math.round(p.scores[i])
+                  }\${p.runs[i] > 0 && p.runs[i] < (data.format?.runs ?? 3) && p.scores[i] != null
+                      ? \` <span class="hint">\${p.runs[i]}/\${data.format?.runs ?? 3}</span>\`
+                      : ''}</td>\`).join('')}
+                </tr>\`).join('')}
+              </table></div>\`}
         <div class="match-act">
           \${m.status === 'live' ? \`<button class="btn" data-finish="\${m.id}">Force finish</button>\` : ''}
           <button class="btn" data-cancel="\${m.id}">Cancel</button>

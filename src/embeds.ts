@@ -290,6 +290,22 @@ export function leaderboardMessage(guildId: string, page = 0) {
 export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
   const scenarios: string[] = JSON.parse(match.scenarios);
   const teams = [...new Set(rows.map((r) => r.team))];
+  const scores = new Map(
+    rows.map((r) => [r.discord_id, JSON.parse(r.scores) as Record<string, number | null>]),
+  );
+  // Who is ahead on each scenario RIGHT NOW, counted exactly as the result will
+  // count it. A lead that changes when the match ends would be a different
+  // scoreboard, not a live one.
+  const ahead = scenarioWinners(
+    rows.map((r) => ({ id: r.discord_id, elo: 0, team: r.team, scores: scores.get(r.discord_id)! })),
+    scenarios,
+  );
+  const tally = new Map(teams.map((t) => [t, ahead.filter((w) => w === t).length]));
+  const side = (team: number) =>
+    rows
+      .filter((r) => r.team === team)
+      .map((r) => players.get(r.discord_id)?.kovaaks_username ?? 'someone')
+      .join(' & ');
 
   // Discord renders this relative and per-viewer, so nobody has to work out
   // what time zone the deadline was written in.
@@ -297,38 +313,54 @@ export function liveEmbed(match: Match, rows: MatchPlayer[], players: Map<string
   const deadline = Math.floor(
     ((match.started_at ?? Date.now()) + matchTtlMin * 60_000) / 1000,
   );
+  // The running score in the title, so the state of the game is the first thing
+  // read rather than something worked out from six numbers.
+  const [a, b] = teams;
+  const lead =
+    teams.length !== 2 || !ahead.some(Boolean)
+      ? 'ongoing'
+      : tally.get(a) === tally.get(b)
+        ? `level ${tally.get(a)}–${tally.get(b)}`
+        : tally.get(a)! > tally.get(b)!
+          ? `${side(a)} leads ${tally.get(a)}–${tally.get(b)}`
+          : `${side(b)} leads ${tally.get(b)}–${tally.get(a)}`;
+
   const embed = new EmbedBuilder()
-    .setTitle(`${match.format} · ongoing`)
+    .setTitle(`${match.format} · ${lead}`)
     .setColor(BLURPLE)
     .setDescription(
       `**${runs} run${runs === 1 ? '' : 's'} per scenario**, best of them counts - one more does ` +
         `not, so there is nothing to gain by grinding. Play them in any order; scores update on ` +
         `their own.\n\nThe result posts itself once everyone has run all ${scenarios.length}, ` +
-        `or <t:${deadline}:R> either way. **Done** ends it early for both of you.\n\n${scenarios
-          .map((s, i) => `**${i + 1}.** ${s}`)
-          .join('\n')}`,
+        `or <t:${deadline}:R> either way. **Done** ends it early for both of you.` +
+        '\n```\n' +
+        scoreTable(
+          scenarios,
+          rows.map((r) => ({
+            head: players.get(r.discord_id)?.kovaaks_username ?? '?',
+            cell: (s: string) => {
+              const score = scores.get(r.discord_id)![s];
+              const used = (JSON.parse(r.run_counts ?? '{}') as Record<string, number>)[s] ?? 0;
+              // The run count only shows while it is still short - a scenario
+              // they have finished with is just a score, and what is left to
+              // play is what the reader is looking for.
+              const shown = score?.toFixed(0) ?? '–';
+              const star = score != null && ahead[scenarios.indexOf(s)] === r.team ? '*' : '';
+              return used > 0 && used < runs ? `${shown}${star} ${used}/${runs}` : shown + star;
+            },
+          })),
+        ) +
+        '\n```',
     );
 
+  // The scores moved into the board above, so a side is down to the one thing
+  // the board cannot say: whether they have called it a night.
   for (const team of teams) {
     const members = rows.filter((r) => r.team === team);
     embed.addFields({
       name: teams.length > 1 && members.length > 1 ? `Team ${team + 1}` : '​',
       value: members
-        .map((r) => {
-          const scores = JSON.parse(r.scores) as Record<string, number | null>;
-          const used = JSON.parse(r.run_counts ?? '{}') as Record<string, number>;
-          // The run count only shows while it is still short - a scenario they
-          // have finished with is just a score, and what is left to play is
-          // what the reader is looking for.
-          const line = scenarios
-            .map((s) => {
-              const score = scores[s]?.toFixed(0) ?? '–';
-              const n = used[s] ?? 0;
-              return n > 0 && n < runs ? `${score} ${n}/${runs}` : score;
-            })
-            .join(' · ');
-          return `${r.done ? '✅' : '·'} <@${r.discord_id}>\n\`${line}\``;
-        })
+        .map((r) => `${r.done ? '✅ done' : '· still playing'} <@${r.discord_id}>`)
         .join('\n'),
       inline: true,
     });
@@ -354,6 +386,25 @@ export function noContestEmbed(match: Match, rows: MatchPlayer[]) {
  *  the scenario's actual name. */
 const fit = (text: string, width: number) =>
   (text.length > width ? text.slice(0, width - 1) + '…' : text).padEnd(width);
+
+/** The scoreboard both the live card and the result share: one row per
+ *  scenario, one column per player, everything aligned so a number can be read
+ *  against the scenario it was set on. A phone shows about 40 characters of a
+ *  code block before it scrolls, which is what the widths are cut to. */
+function scoreTable(scenarios: string[], cols: { head: string; cell: (s: string) => string }[]) {
+  const widths = cols.map((c) =>
+    Math.max(6, c.head.slice(0, 8).length, ...scenarios.map((s) => c.cell(s).length)),
+  );
+  const row = (name: string, cell: (c: (typeof cols)[number], n: number) => string) =>
+    // 19 and a space, not 20: a name that fills its column whole would
+    // otherwise run straight into the first score.
+    (fit(name, 19) + ' ' + cols.map((c, n) => cell(c, n).padEnd(widths[n])).join(' ')).trimEnd();
+
+  return [
+    row('SCENARIO', (c, n) => fit(c.head.toUpperCase(), widths[n])),
+    ...scenarios.map((s) => row(s, (c) => c.cell(s))),
+  ].join('\n');
+}
 
 export function resultsEmbed(
   match: Match,
@@ -409,30 +460,13 @@ export function resultsEmbed(
     // The star is the scenario's winner, which is what the scoreline counts.
     return score.toFixed(0) + (won[scenarios.indexOf(scenario)] === r.team ? '*' : '');
   };
-  const widths = ordered.map((r) =>
-    Math.max(
-      6,
-      players.get(r.discord_id)!.kovaaks_username.slice(0, 8).length,
-      ...scenarios.map((s) => cell(r, s).length),
-    ),
+  const table = scoreTable(
+    scenarios,
+    ordered.map((r) => ({
+      head: players.get(r.discord_id)!.kovaaks_username,
+      cell: (s: string) => cell(r, s),
+    })),
   );
-  const table = [
-    'SCENARIO'.padEnd(20) +
-      ordered
-        .map((r, n) => fit(players.get(r.discord_id)!.kovaaks_username.toUpperCase(), widths[n]))
-        .join(' ')
-        .trimEnd(),
-    ...scenarios.map(
-      (s) =>
-        // 19 and a space, not 20: a name that fills its column whole would
-        // otherwise run straight into the first score.
-        fit(s, 19) + ' ' +
-        ordered
-          .map((r, n) => cell(r, s).padEnd(widths[n]))
-          .join(' ')
-          .trimEnd(),
-    ),
-  ].join('\n');
 
   const fields = ordered.map((r) => {
     const p = players.get(r.discord_id)!;
