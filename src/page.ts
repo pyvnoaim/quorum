@@ -40,18 +40,12 @@ export const PAGE = /* html */ `<!doctype html>
     display: flex; flex-direction: column; align-items: center; justify-content: safe center;
   }
   main { width: 100%; max-width: 720px; padding: 64px 24px; position: relative; }
-  /* Glass over the dither: the texture stays sharp around the page and goes
-     soft under it, which is what makes text on a moving background readable
-     without covering the background up. Not on the sign-in page - there the
-     card is the content and a full-height slab behind it has nothing to hold.
-     ponytail: a backdrop blur over an animated canvas re-blurs every frame.
-     It is one fixed rect at dpr 1, so it is cheap - but it is the first thing
-     to drop if the page ever feels heavy on a weak GPU. */
+  /* The signed-in page is a framed slab on the page background. Not on the
+     sign-in page - there the card is the content and a full-height slab behind
+     it has nothing to hold. */
   main:not(:has(.login)) {
     margin: 26px 0; border: 1px solid var(--line); border-radius: 18px;
-    background: color-mix(in srgb, var(--bg) 55%, transparent);
-    backdrop-filter: blur(20px) saturate(115%);
-    -webkit-backdrop-filter: blur(20px) saturate(115%);
+    background: var(--bg);
     /* even top and bottom: the slab is a card, and 24px more under the last row
        than over the header reads as the content having slipped upwards. */
     padding: 40px 32px;
@@ -390,7 +384,10 @@ export const PAGE = /* html */ `<!doctype html>
   .opt.boxed:has(#autocancel:not(:checked)) .on-note,
   .opt.boxed:has(#autocancel:not(:checked)) .unit,
   .opt.boxed:has(#autocancel:not(:checked)) input[type=number] { display: none; }
-  .cat-top { display: flex; align-items: center; gap: 9px; font-size: 14px; margin-bottom: 11px; }
+  /* A category's title line is a sentence made of parts - it wraps between them
+     and never inside one, so "main - one round a match" stays one phrase. */
+  .cat-top { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; font-size: 14px; margin-bottom: 11px; }
+  #poolbox .cat-top > .hint { white-space: nowrap; }
   .cat-top .icon-btn { margin-left: auto; }
   /* The "rolls into" picker rides on a card's title line, so it is sized to
      that line rather than to a form field. Its list needs a width of its own -
@@ -562,6 +559,8 @@ export const PAGE = /* html */ `<!doctype html>
     font-size: 16px; line-height: 1; padding: 4px 6px;
   }
   .icon-btn:hover { color: var(--fg); }
+  .icon-btn:disabled { opacity: .35; cursor: default; }
+  .icon-btn:disabled:hover { color: var(--muted); }
   .muted { color: var(--muted); font-size: 13px; margin: -6px 0 14px; }
   .login p { color: var(--muted); margin-bottom: 24px; font-size: 14px; }
   /* Phones. Everything above this point assumes a row has somewhere to put its
@@ -714,113 +713,6 @@ void main() {
   vec3 col = mix(uHorizon, body * BRIGHTNESS, t * OPACITY);
   col += (hash21(gl_FragCoord.xy + mod(iTime, 64.0) * 11.0) - 0.5) * GRAIN;
   fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
-}
-</script>
-<script id="fs3" type="x-shader/x-fragment">
-#version 300 es
-precision highp float;
-
-// Dither (React Bits), as one pass. The original is a wave shader plus a
-// postprocessing pass that reads the wave's buffer back and pixelates it. With
-// nothing else on screen that read-back is just the wave evaluated at the
-// pixelated coordinate - so the EffectComposer, and with it three, r3f and
-// postprocessing, collapses into the two lines at the bottom of main().
-#define SPEED       0.05
-#define FREQUENCY   3.0
-#define AMPLITUDE   0.3
-#define COLOR_NUM   4.0
-#define PIXEL_SIZE  2.0
-#define OCTAVES     4
-
-uniform vec2 iResolution;
-uniform float iTime;
-uniform vec3 uHorizon;
-uniform vec3 uWave;
-out vec4 fragColor;
-
-vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
-vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
-vec2 fade(vec2 t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
-
-// Stefan Gustavson's classic Perlin noise, exactly as the component ships it.
-float cnoise(vec2 P) {
-  vec4 Pi = floor(P.xyxy) + vec4(0.0, 0.0, 1.0, 1.0);
-  vec4 Pf = fract(P.xyxy) - vec4(0.0, 0.0, 1.0, 1.0);
-  Pi = mod289(Pi);
-  vec4 ix = Pi.xzxz;
-  vec4 iy = Pi.yyww;
-  vec4 fx = Pf.xzxz;
-  vec4 fy = Pf.yyww;
-  vec4 i = permute(permute(ix) + iy);
-  vec4 gx = fract(i * (1.0 / 41.0)) * 2.0 - 1.0;
-  vec4 gy = abs(gx) - 0.5;
-  vec4 tx = floor(gx + 0.5);
-  gx = gx - tx;
-  vec2 g00 = vec2(gx.x, gy.x);
-  vec2 g10 = vec2(gx.y, gy.y);
-  vec2 g01 = vec2(gx.z, gy.z);
-  vec2 g11 = vec2(gx.w, gy.w);
-  vec4 norm = taylorInvSqrt(vec4(dot(g00, g00), dot(g01, g01), dot(g10, g10), dot(g11, g11)));
-  g00 *= norm.x; g01 *= norm.y; g10 *= norm.z; g11 *= norm.w;
-  float n00 = dot(g00, vec2(fx.x, fy.x));
-  float n10 = dot(g10, vec2(fx.y, fy.y));
-  float n01 = dot(g01, vec2(fx.z, fy.z));
-  float n11 = dot(g11, vec2(fx.w, fy.w));
-  vec2 fade_xy = fade(Pf.xy);
-  vec2 n_x = mix(vec2(n00, n01), vec2(n10, n11), fade_xy.x);
-  return 2.3 * mix(n_x.x, n_x.y, fade_xy.y);
-}
-
-float fbm(vec2 p) {
-  float value = 0.0;
-  float amp = 1.0;
-  for (int i = 0; i < OCTAVES; i++) {
-    value += amp * abs(cnoise(p));
-    p *= FREQUENCY;
-    amp *= AMPLITUDE;
-  }
-  return value;
-}
-
-float pattern(vec2 p) {
-  vec2 p2 = p - iTime * SPEED;
-  return fbm(p + fbm(p2));
-}
-
-const float bayer[64] = float[64](
-   0.0/64.0, 48.0/64.0, 12.0/64.0, 60.0/64.0,  3.0/64.0, 51.0/64.0, 15.0/64.0, 63.0/64.0,
-  32.0/64.0, 16.0/64.0, 44.0/64.0, 28.0/64.0, 35.0/64.0, 19.0/64.0, 47.0/64.0, 31.0/64.0,
-   8.0/64.0, 56.0/64.0,  4.0/64.0, 52.0/64.0, 11.0/64.0, 59.0/64.0,  7.0/64.0, 55.0/64.0,
-  40.0/64.0, 24.0/64.0, 36.0/64.0, 20.0/64.0, 43.0/64.0, 27.0/64.0, 39.0/64.0, 23.0/64.0,
-   2.0/64.0, 50.0/64.0, 14.0/64.0, 62.0/64.0,  1.0/64.0, 49.0/64.0, 13.0/64.0, 61.0/64.0,
-  34.0/64.0, 18.0/64.0, 46.0/64.0, 30.0/64.0, 33.0/64.0, 17.0/64.0, 45.0/64.0, 29.0/64.0,
-  10.0/64.0, 58.0/64.0,  6.0/64.0, 54.0/64.0,  9.0/64.0, 57.0/64.0,  5.0/64.0, 53.0/64.0,
-  42.0/64.0, 26.0/64.0, 38.0/64.0, 22.0/64.0, 41.0/64.0, 25.0/64.0, 37.0/64.0, 21.0/64.0
-);
-
-/** Ordered dither, then posterize to COLOR_NUM levels - the 8x8 crosshatch and
- *  the flat bands are the whole look. Done on the wave's scalar rather than on
- *  RGB: the component ramps a single colour, so the two are the same picture,
- *  and this one has no black floor to subtract from a light theme. */
-float banded(vec2 block, float f) {
-  int x = int(mod(block.x, 8.0));
-  int y = int(mod(block.y, 8.0));
-  float threshold = bayer[y * 8 + x] - 0.25;
-  float lvl = 1.0 / (COLOR_NUM - 1.0);
-  f = clamp(f + threshold * lvl - 0.2, 0.0, 1.0);
-  return floor(f * (COLOR_NUM - 1.0) + 0.5) * lvl;
-}
-
-void main() {
-  // one sample per PIXEL_SIZE block, which is what makes it read as pixels
-  vec2 block = floor(gl_FragCoord.xy / PIXEL_SIZE);
-  vec2 uv = (block * PIXEL_SIZE) / iResolution;
-  uv -= 0.5;
-  uv.x *= iResolution.x / iResolution.y;
-  // The page background is the floor rather than black, so one shader is
-  // texture under both themes instead of a dark slab punched into the light one.
-  fragColor = vec4(mix(uHorizon, uWave, banded(block, pattern(uv))), 1.0);
 }
 </script>
 <main id="app"><div class="empty">Loading…</div></main>
@@ -1113,18 +1005,8 @@ function renderLogin() {
 const startWaves = () =>
   startShader('fs', { uWave: [0.322, 0.153, 1], uCrest: [1, 0.624, 0.988], dpr: 1.5 });
 
-// Dither everywhere you are signed in. The wave mixes up from the page
-// background, so the one shader reads as texture in either theme - which is
-// why the colour is picked here rather than baked into the shader.
-// dpr 1 on purpose: the component's own Canvas pins it there, and pixel blocks
-// that track the device ratio stop being pixels.
-const startDither = () =>
-  startShader('fs3', {
-    uWave: matchMedia('(prefers-color-scheme: dark)').matches
-      ? [0.30, 0.30, 0.34]
-      : [0.62, 0.62, 0.66],
-    dpr: 1,
-  });
+// Signed in, the page is its background colour and nothing else - the shader
+// is the sign-in page's alone.
 /** Draws the background shader full-bleed behind the sign-in page. No WebGL2,
  *  no background - the page just stays its background colour, which is what
  *  the shader fades to anyway. Every view here is a full navigation, so this
@@ -1194,7 +1076,6 @@ function renderHome() {
   app.innerHTML = \`
     <header><h1><span>\${mark()}Quorum</span></h1>\${whoBar()}</header>
     <div id="lists"></div>\`;
-  startDither();
 
   const running = me.guilds.filter((g) => g.installed);
   const missing = me.guilds.filter((g) => !g.installed);
@@ -1280,7 +1161,6 @@ async function renderGuild(guild) {
       </aside>
       <div id="pane"><div class="empty">Loading…</div></div>
     </div>\`;
-  startDither();
 
   const box = document.getElementById('pane');
   const data = await (await fetch('/api/guild/' + guild.id)).json();
@@ -2095,6 +1975,10 @@ async function renderGuild(guild) {
   document.getElementById('playerlist').innerHTML = shown.length
     ? shown.map((p) => {
         const rank = bandOf(p);
+        // The reset is always on the row so the control is findable; dimmed
+        // when the player has neither a record nor a starting rank, because
+        // then it would undo nothing.
+        const canReset = p.wins + p.losses || p.seeded_from;
         return \`
       <tr>
         <td style="width:1px"><img class="pfp" src="\${avatarUrl({ id: p.discord_id, avatar: p.avatar })}" alt="" /></td>
@@ -2114,10 +1998,9 @@ async function renderGuild(guild) {
             : selectField('sd-' + p.discord_id, data.ranks.map((r) => r.name),
                 seeds[p.discord_id] ?? p.seeded_from ?? '',
                 \`data-id="\${h(p.discord_id)}"\`)}</td>
-        <td style="width:1px">\${p.wins + p.losses
-          ? \`<button class="icon-btn" data-reset="\${h(p.discord_id)}"
-              data-name="\${h(p.kovaaks_username)}" title="Reset this rating">\${icon('undo')}</button>\`
-          : ''}</td>
+        <td style="width:1px"><button class="icon-btn" data-reset="\${h(p.discord_id)}"
+          data-name="\${h(p.kovaaks_username)}"\${canReset ? '' : ' disabled'}
+          title="\${canReset ? 'Reset this rating' : 'Nothing to reset - no matches and no starting rank'}">\${icon('undo')}</button></td>
       </tr>\`;
       }).join('')
     : \`<tr><td class="hint">\${q ? 'Nobody by that name.' : 'Nobody has played yet.'}</td></tr>\`;
