@@ -376,10 +376,24 @@ export const PAGE = /* html */ `<!doctype html>
   }
   .opt-hit { display: flex; align-items: center; gap: 9px; margin: 0; cursor: pointer; font-size: 14px; }
   .opt input[type=number] { width: 62px; margin: 0 9px; padding: 4px 8px; text-align: center; }
-  /* sits next to the starting-rank picker, so it reads as the same control */
-  .seed-cell { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
-  .seed-cell .sel { flex: 1 1 auto; min-width: 130px; }
-  .seed-elo { flex: 0 0 74px; width: 74px; padding: 9px 10px; }
+  /* The rating, and the pencil that corrects it. The button only appears under
+     the cursor or on focus - a row of nine pencils over the standings reads as
+     a form to fill in, when editing one is meant to be a rare thing. */
+  .rate-cell { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
+  .rate-go { color: var(--muted); opacity: 0; transition: opacity .12s, color .12s; }
+  tr:hover .rate-go, .rate-go:focus-visible { opacity: 1; }
+  .rate-go:hover { color: var(--fg); }
+  .rate-edit { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
+  .rate-in { width: 84px; padding: 5px 8px; font-size: 13px; text-align: right; }
+  .rate-ok { color: var(--fg); }
+  .rate-no { color: var(--muted); }
+  /* Their role says one bracket and their rating sits in another. Muted, not
+     alarming - it is a thing to look at, not a fault. */
+  .drift {
+    background: none; border: 0; padding: 0; cursor: pointer;
+    font-size: 12px; color: var(--muted); border-bottom: 1px dashed var(--line);
+  }
+  .drift:hover, .drift:focus-visible { color: var(--fg); outline: none; }
   .opt .unit { color: var(--muted); font-size: 13px; }
   /* Off replaces the sentence rather than trailing it: "Bin an untaken call
      after" says nothing once there is no number to follow it. */
@@ -494,6 +508,10 @@ export const PAGE = /* html */ `<!doctype html>
   /* a score never wraps; a long scenario name in the header may */
   .hgrid tr:not(.th) td { white-space: nowrap; }
   .hgrid .won { color: var(--fg); font-weight: 500; }
+  /* The score that took the scenario. Heavier than the winner's NAME on purpose:
+     reading a column of a scoreboard is scanning, and the eye should land on the
+     number that won the round without having to compare two of them. */
+  .hgrid td.took { color: var(--fg); font-weight: 700; }
   .banned { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
   .chip.out { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
   .sel { position: relative; }
@@ -746,6 +764,8 @@ const ICONS = {
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   // lucide 'rotate-ccw' - putting one rating back where it started
   undo: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+  // lucide 'pencil' - correcting a rating without throwing the record away
+  pencil: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>',
   // lucide 'list-ordered' - the format IS an order of steps
   steps: '<line x1="10" x2="21" y1="6" y2="6"/><line x1="10" x2="21" y1="12" y2="12"/><line x1="10" x2="21" y1="18" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>',
   layers: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
@@ -938,26 +958,30 @@ function ask(label, value = '') {
 function confirmDanger({ title, body, name, confirm }) {
   return new Promise((resolve) => {
     const dlg = document.createElement('dialog');
+    /* Type-to-confirm only where a name is given. That ceremony belongs to the
+       things with no undo at all - every rating in the server, or the bot
+       itself - and putting it in front of smaller ones only teaches people to
+       type the name without reading what is above it. */
     dlg.innerHTML = \`<form method="dialog">
       <strong class="dlg-title">\${h(title)}</strong>
       <p class="dlg-body">\${body}</p>
-      <label>Type <b>\${h(name)}</b> to confirm</label>
-      <input type="text" name="v" autocomplete="off" spellcheck="false" />
+      \${name ? \`<label>Type <b>\${h(name)}</b> to confirm</label>
+      <input type="text" name="v" autocomplete="off" spellcheck="false" />\` : ''}
       <div class="bar">
-        <button class="btn bad solid" value="ok" disabled>\${h(confirm)}</button>
+        <button class="btn bad solid" value="ok"\${name ? ' disabled' : ''}>\${h(confirm)}</button>
         <button class="btn" value="">Cancel</button>
       </div>
     </form>\`;
     document.body.append(dlg);
     const input = dlg.querySelector('input');
     const go = dlg.querySelector('button[value="ok"]');
-    input.oninput = () => (go.disabled = input.value.trim() !== name);
+    if (input) input.oninput = () => (go.disabled = input.value.trim() !== name);
     dlg.onclose = () => {
       resolve(dlg.returnValue === 'ok');
       dlg.remove();
     };
     dlg.showModal();
-    input.focus();
+    if (input) input.focus();
   });
 }
 
@@ -1190,7 +1214,15 @@ async function renderGuild(guild) {
       ? \`<div class="ok">\${icon('check')}\${h(label)}</div>\`
       : \`<button type="button" class="todo" data-go="\${to}">\${icon('circle')}\${h(label)}
            <span class="go">Set up\${icon('arrow')}</span></button>\`;
+  /* A lobby is a call nobody has taken - one person waiting, not a match being
+     played. Counted in with the rest, the tile read "1 In play" on a server
+     where nothing was being played at all. */
   const live = data.matches.filter((m) => m.status === 'live').length;
+  const waiting = data.matches.filter((m) => m.status === 'lobby').length;
+  const inPlay = data.matches.length - waiting;
+  const playSub = [live ? live + ' running' : '', waiting ? waiting + ' waiting' : '']
+    .filter(Boolean)
+    .join(' · ');
   // ranks come back highest-first, so the first one you clear is yours.
   const rankOf = (elo) => data.ranks.find((r) => elo >= r.min_elo);
   /** What bracket to show beside somebody. With staff-owned brackets the ROLE
@@ -1242,8 +1274,8 @@ async function renderGuild(guild) {
     <h2>Overview</h2>
     <div class="stats">
       \${stat(num(guild.members) ?? '-', 'Members', 'users')}
-      \${stat(data.matches.length, 'In play', 'swords', 'matches',
-              live ? live + ' running' : '', 'open or running right now')}
+      \${stat(inPlay, 'In play', 'swords', 'matches',
+              playSub, 'being played right now - a call nobody has taken is not one')}
       \${stat(num(data.stats.played), 'Played', 'check', null, '', 'matches finished all time')}
       \${stat(num(data.stats.week), 'Last 7 days', 'gauge', null, '', 'matches finished this week')}
       \${stat(num(data.stats.rated), 'Rated', 'trophy', 'players', '', 'players with a record')}
@@ -1268,7 +1300,7 @@ async function renderGuild(guild) {
             <td style="white-space:nowrap">\${rank
               ? \`<span class="rank" style="--c:\${h(rank.color)}"><span class="dot"></span>\${h(rank.name)}</span>\`
               : ''}</td>
-            <td class="hint" style="white-space:nowrap">\${p.wins}W \${p.losses}L</td>
+            <td class="hint" style="white-space:nowrap">\${p.wins}W \${p.losses}L\${p.draws ? ' ' + p.draws + 'D' : ''}</td>
             <td><strong>\${p.elo}</strong></td>
           </tr>\`;
         }).join('') + '</tbody></table>'
@@ -1362,6 +1394,17 @@ async function renderGuild(guild) {
     <p class="muted">How far apart two ranks may be for a queue to admit them. A call pings exactly the ranks it can let in.</p>
 
     <div id="queuebox"></div>
+
+    <div class="cat" style="margin-top:20px">
+      <label class="opt-hit"><input type="checkbox" id="unrankedon" />
+        <span><strong>Unranked queue</strong></span></label>
+      <p class="muted" style="margin:8px 0 0">A queue anyone can enter, in its own
+      <b>#unranked</b> channel that is not locked to a division. No rating moves and no
+      win or loss is recorded, but every score is read and kept the same way - so it is
+      also where you can see what somebody shoots before placing them. Turning it off
+      deletes the channel.</p>
+    </div>
+
     <div class="bar">
       <button class="btn solid" id="savequeues">Save queues</button>
       <span class="status" id="queuestatus"></span>
@@ -1404,13 +1447,10 @@ async function renderGuild(guild) {
 
     <section id="players">
     <h2>Players</h2>
-    <p class="muted">Where a rating starts, set in Ranks. Only until someone has played. Who plays whom is set in Queues.</p>
+    <p class="muted">The rank is the Discord role - hand one out and Quorum starts them at its floor. Correcting a rating here keeps their record and their matches; only Reset takes those. Who plays whom is set in Queues.</p>
     <input type="text" id="playerq" placeholder="Search players" spellcheck="false" style="margin-bottom:12px" />
     <table class="ladder"><tbody id="playerlist"></tbody></table>
-    <div class="bar">
-      <button class="btn solid" id="savetiers">Save starting ranks</button>
-      <span class="status" id="tierstatus"></span>
-    </div>
+    <div class="bar"><span class="status" id="tierstatus"></span></div>
 
     <div class="cat danger" style="margin-top:32px">
       <div class="cat-top"><strong>Reset ratings</strong></div>
@@ -1549,14 +1589,30 @@ async function renderGuild(guild) {
   };
   drawQueues();
 
+  const unrankedOn = document.getElementById('unrankedon');
+  unrankedOn.checked = !!data.unranked;
+
   document.getElementById('savequeues').onclick = async () => {
     const el = document.getElementById('queuestatus');
+    // Said before the save, not after: turning it off deletes a channel, and a
+    // channel is not something to bin on a click somebody did not mean.
+    if (data.unranked && !unrankedOn.checked) {
+      const ok = await confirmDanger({
+        title: 'Turn the unranked queue off?',
+        body: 'The <b>#unranked</b> channel is deleted, along with the panel in it and anything said there. Matches already played stay in History.',
+        confirm: 'Turn it off',
+      });
+      if (!ok) { unrankedOn.checked = true; return; }
+    }
     el.textContent = 'Saving…';
     const res = await fetch(\`/api/guild/\${guild.id}/queues\`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ spread }),
+      body: JSON.stringify({ spread, unranked: unrankedOn.checked }),
     });
-    el.textContent = res.ok ? 'Saved' : 'Save failed';
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) { el.textContent = 'Save failed'; return; }
+    data.unranked = out.unranked;
+    el.textContent = out.error ?? 'Saved';
   };
 
   // A match is one line: the order players appear IS the result, so the winner
@@ -1570,7 +1626,8 @@ async function renderGuild(guild) {
         <tr class="th"><td></td>\${m.played.map((sc) => \`<td>\${h(sc)}</td>\`).join('')}</tr>
         \${m.players.map((p) => \`<tr>
           <td class="\${p.placing === 1 ? 'won' : 'hint'}">\${h(p.name)}</td>
-          \${m.played.map((sc) => \`<td>\${
+          \${m.played.map((sc) => \`<td class="\${
+            (p.took ?? []).includes(sc) ? 'took' : ''}">\${
             p.scores?.[sc] == null ? '<span class="hint">–</span>' : Math.round(p.scores[sc])
           }</td>\`).join('')}
         </tr>\`).join('')}
@@ -1586,10 +1643,11 @@ async function renderGuild(guild) {
     ? data.history.map((m) => \`
       <tr class="hrow" data-m="\${m.id}" tabindex="0" role="button" aria-expanded="false">
         <td class="hint" style="width:1px;white-space:nowrap">#\${m.id}</td>
-        <td style="width:1px;white-space:nowrap"><strong>\${h(m.format)}</strong></td>
+        <td style="width:1px;white-space:nowrap"><strong>\${h(m.format)}</strong>\${
+          m.ranked === false ? '<span class="hint"> unranked</span>' : ''}</td>
         <td style="width:100%">\${m.players.map((p) => \`<span class="hp\${
-          p.placing === 1 ? ' won' : ''}">\${h(p.name)}<em>\${
-          p.delta >= 0 ? '+' : ''}\${p.delta}</em></span>\`).join('')}</td>
+          p.placing === 1 ? ' won' : ''}">\${h(p.name)}\${
+          m.ranked === false ? '' : \`<em>\${p.delta >= 0 ? '+' : ''}\${p.delta}</em>\`}</span>\`).join('')}</td>
         <td class="hint" style="white-space:nowrap">\${m.played.length} scn</td>
         <td class="hint" style="white-space:nowrap">\${m.ended_at ? ago(m.ended_at) : ''}
           <button type="button" class="icon-btn hdel" data-del="\${m.id}"
@@ -1657,7 +1715,7 @@ async function renderGuild(guild) {
           <span class="pill\${m.status === 'live' ? ' live' : ''}">\${
             m.status === 'live' ? 'Running'
               : m.status === 'banning' ? 'Banning scenarios'
-              : 'Waiting for a taker'}</span>
+              : 'Waiting for an opponent'}</span>
           <span class="hint">\${ago(m.started_at ?? m.created_at)}</span>
           \${m.status === 'live' && m.players.length === 2
             ? \`<span class="score">\${m.players.map((p) => p.won).join('–')}</span>\`
@@ -1721,13 +1779,13 @@ async function renderGuild(guild) {
   // so you should be able to compare them without clicking.
   const SEED_OPTS = [
     ['flat', 'Flat', 'Everyone starts at 1050.'],
-    ['staff', 'Staff', 'You pick a rank before their first match.'],
+    ['staff', 'Staff', 'From the division role they are wearing, at its floor.'],
     ['voltaic', 'Voltaic S5', 'From their S5 standing, or flat without one.'],
   ];
   let rankMode = data.rankMode ?? 'auto';
   const RANK_OPTS = [
     ['auto', 'Quorum', 'Ratings decide the rank, and the role moves with them.'],
-    ['manual', 'Staff', 'You hand out the division roles. Quorum never adds or removes one, and a queue is gated on the role rather than on Elo. Ratings still move, as the evidence you promote on.'],
+    ['manual', 'Staff', 'You hand out the division roles. Quorum never adds or removes one, and a queue is gated on the role rather than on Elo. Matches move the rating inside a division; moving someone to a new one restarts them at its floor.'],
   ];
   const drawRankMode = () => {
     document.getElementById('rankmodebox').innerHTML = \`
@@ -1992,9 +2050,10 @@ async function renderGuild(guild) {
     el.textContent = res.ok ? \`Saved \${out.scenarios.length} scenarios\` : out.error ?? 'Save failed';
   };
 
-  const seeds = {};
-  // An exact rating per player, when the band's floor is not where they belong.
-  const seedElo = {};
+  /* Which row is open for editing, if any - one at a time on purpose. A rating
+     is a rare, deliberate correction, and nine live number boxes sitting over
+     the standings is how one of them gets changed by leaning on a keyboard. */
+  let editing = null;
   const drawPlayers = () => {
   // The whole list is already here, so the search is a filter over it rather
   // than a round trip. Name or Discord id, because half of finding someone in
@@ -2012,50 +2071,92 @@ async function renderGuild(guild) {
         // The reset is always on the row so the control is findable; dimmed
         // when the player has neither a record nor a starting rank, because
         // then it would undo nothing.
-        const canReset = p.wins + p.losses || p.seeded_from;
+        const canReset = p.wins + p.losses + p.draws || p.seeded_from;
+        const open = editing === p.discord_id;
+        /* Where their ROLE puts them against where their RATING does. With
+           staff-owned brackets those are two separate answers and only staff
+           can reconcile them - so a promotion that leaves somebody bottom of
+           the board says so on the row, instead of waiting to be noticed. The
+           hint is the control: it opens the editor already filled with the
+           floor of the bracket they were actually put in. */
+        const byElo = rankOf(p.elo);
+        const adrift =
+          data.rankMode === 'manual' && rank && byElo && byElo.id !== rank.id ? byElo : null;
         return \`
       <tr>
         <td style="width:1px"><img class="pfp" src="\${avatarUrl({ id: p.discord_id, avatar: p.avatar })}" alt="" /></td>
         <td style="width:100%">
           \${h(p.kovaaks_username)}
-          <span class="hint">\${p.wins}W \${p.losses}L</span>
+          <span class="hint">\${p.wins}W \${p.losses}L\${p.draws ? ' ' + p.draws + 'D' : ''}</span>
         </td>
         <td style="white-space:nowrap">\${voltaicChip(p.voltaic)}</td>
         <td style="white-space:nowrap">\${rank
           ? \`<span class="rank" style="--c:\${h(rank.color)}"><span class="dot"></span>\${h(rank.name)}</span>\`
           : ''}</td>
-        <td style="white-space:nowrap"><strong>\${p.elo}</strong></td>
-        <td style="white-space:nowrap">\${seedMode !== 'staff'
-          ? \`<span class="hint">\${p.wins + p.losses ? '' : h(p.seeded_from ?? 'flat')}</span>\`
-          : p.wins + p.losses
-            ? \`<span class="hint" title="their record is their rating now - a starting rank only applies before the first match">seeded \${h(p.seeded_from ?? 'flat')}</span>\`
-            // One row, because they are one control: the rank sets the floor
-            // and the box overrides the number without moving the bracket. The
-            // picker is a full-width block on its own, so it needs the flex.
-            : \`<div class="seed-cell">\` +
-              selectField('sd-' + p.discord_id,
-                [{ id: '', name: 'Not set' }].concat(data.ranks.map((r) => ({ id: r.name, name: r.name }))),
-                seeds[p.discord_id] ?? p.seeded_from ?? '',
-                \`data-id="\${h(p.discord_id)}"\`) +
-              \`<input class="seed-elo" type="number" min="0" max="5000" step="1"
-                 data-id="\${h(p.discord_id)}" placeholder="floor"
-                 title="Exact rating - leave empty for the rank's floor"
-                 value="\${seedElo[p.discord_id] ?? ''}" /></div>\`}</td>
+        <td style="white-space:nowrap">\${open
+          ? \`<span class="rate-edit"><input class="rate-in" type="number" min="0" max="5000" step="1"
+               value="\${p.elo}" aria-label="Rating for \${h(p.kovaaks_username)}" />
+             <button class="icon-btn rate-ok" title="Save this rating">\${icon('check')}</button>
+             <button class="icon-btn rate-no" title="Cancel">\${icon('x')}</button></span>\`
+          : \`<span class="rate-cell"><strong>\${p.elo}</strong>
+             <button class="icon-btn rate-go" data-edit="\${h(p.discord_id)}" data-to="\${p.elo}"
+               title="Correct this rating - their record and their matches stay">\${icon('pencil')}</button></span>\`}</td>
+        <td style="white-space:nowrap">\${adrift
+          ? \`<button type="button" class="drift" data-edit="\${h(p.discord_id)}" data-to="\${rank.min_elo}"
+               title="Their role says \${h(rank.name)} but \${p.elo} sits in \${h(adrift.name)}. Click to put them at the bottom of \${h(rank.name)}, or move the role instead.">rating in \${h(adrift.name)}</button>\`
+          : p.wins + p.losses + p.draws
+            ? ''
+            : \`<span class="hint" title="Their first match will decide it from here">seeded \${h(p.seeded_from ?? 'flat')}</span>\`}</td>
         <td style="width:1px"><button class="icon-btn" data-reset="\${h(p.discord_id)}"
           data-name="\${h(p.kovaaks_username)}"\${canReset ? '' : ' disabled'}
           title="\${canReset ? 'Reset this rating' : 'Nothing to reset - no matches and no starting rank'}">\${icon('undo')}</button></td>
       </tr>\`;
       }).join('')
     : \`<tr><td class="hint">\${q ? 'Nobody by that name.' : 'Nobody has played yet.'}</td></tr>\`;
-  // Only offered to players with no games: seedPlayer refuses to move anyone
-  // else, so a control there would be a lie.
   const scope = document.getElementById('playerlist');
-  wireSelects(scope);
-  scope.querySelectorAll('.sel').forEach((el) => (el.onchange = () => {
-    seeds[el.dataset.id] = el.dataset.value;
+  // Both the pencil and the drift hint open the same editor - they differ only
+  // in what they fill it with: where the player is now, or the floor of the
+  // bracket their role says they are in.
+  scope.querySelectorAll('[data-edit]').forEach((el) => (el.onclick = () => {
+    editing = el.dataset.edit;
+    const to = el.dataset.to;
+    drawPlayers();
+    const input = scope.querySelector('.rate-in');
+    if (!input) return;
+    input.value = to;
+    input.focus();
+    input.select();
   }));
-  scope.querySelectorAll('.seed-elo').forEach((el) => (el.oninput = () => {
-    seedElo[el.dataset.id] = el.value.trim();
+  const stopEditing = () => { editing = null; drawPlayers(); };
+  scope.querySelectorAll('.rate-no').forEach((el) => (el.onclick = stopEditing));
+
+  // One save per edit, the moment it is confirmed. A bar at the bottom holding
+  // nine pending rating changes is a bar somebody navigates away from.
+  const saveRating = async () => {
+    const input = scope.querySelector('.rate-in');
+    const id = editing;
+    if (!input || !id) return;
+    const el = document.getElementById('tierstatus');
+    el.textContent = 'Saving…';
+    const res = await fetch(\`/api/guild/\${guild.id}/rating\`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ discord_id: id, elo: Number(input.value) }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) { el.textContent = out.error ?? 'Save failed'; return; }
+    // Patched in place off what came back, so the row shows the rating the
+    // server actually stored rather than the one that was typed at it - and so
+    // the rest of the row, none of which this route knows about, survives.
+    const row = data.players.find((x) => x.discord_id === out.discord_id);
+    if (row) row.elo = out.elo;
+    editing = null;
+    drawPlayers();
+    el.textContent = 'Saved';
+  };
+  scope.querySelectorAll('.rate-ok').forEach((el) => (el.onclick = saveRating));
+  scope.querySelectorAll('.rate-in').forEach((el) => (el.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveRating(); }
+    if (e.key === 'Escape') { e.preventDefault(); stopEditing(); }
   }));
   // One player, same act as the whole-server reset below and the same warning:
   // their record goes, the matches stay, and it cannot be undone.
@@ -2090,32 +2191,6 @@ async function renderGuild(guild) {
   // The box lives outside the tbody the redraw replaces, so it keeps its focus
   // and its caret while you type.
   document.getElementById('playerq').oninput = drawPlayers;
-
-  document.getElementById('savetiers').onclick = async () => {
-    const el = document.getElementById('tierstatus');
-    const body = Object.entries(seeds)
-      .filter(([, rank]) => rank)
-      .map(([discord_id, rank]) => ({
-        discord_id,
-        rank,
-        // empty means "use the rank's floor" - the server treats a missing elo
-        // and a blank one the same way
-        elo: seedElo[discord_id] === '' || seedElo[discord_id] == null
-          ? undefined
-          : Number(seedElo[discord_id]),
-      }));
-    if (!body.length) { el.textContent = 'Pick a rank first'; return; }
-    const res = await fetch(\`/api/guild/\${guild.id}/seeds\`, {
-      method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ seeds: body }),
-    });
-    if (!res.ok) { el.textContent = 'Save failed'; return; }
-    // Redraw off what came back, so the rating column shows the new number
-    // rather than the flat one it was saved over.
-    const out = await res.json().catch(() => ({}));
-    if (out.players) { data.players = out.players; drawPlayers(); }
-    el.textContent = 'Saved';
-  };
 
   // Same dialog as removing the bot: no undo, so it spells out what goes and
   // asks for the server's name before it will do it.

@@ -92,9 +92,14 @@ https://quorum.example.com/callback
 
 Discord matches it character for character, so no trailing slash.
 
-On the **Bot** page, leave all three privileged intents OFF - the bot asks for
-`Guilds`, which is not privileged. Turn **Public Bot** off too while you're
-there: with `ALLOWED_GUILD_IDS` set, nobody else can usefully add it anyway.
+On the **Bot** page, turn **Server Members Intent** ON and leave the other two
+(Presence, Message Content) OFF. Server Members is what lets Quorum read the
+division roles staff hand out - without it a rank set by hand shows up on the
+dashboard and nowhere else. It only needs Discord's review once a bot is in
+10,000 servers; below that it is a toggle.
+
+Turn **Public Bot** off too while you're there: with `ALLOWED_GUILD_IDS` set,
+nobody else can usefully add it anyway.
 
 ### When it doesn't come up
 

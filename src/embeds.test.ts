@@ -49,12 +49,21 @@ const table = description!.split('```')[1].trim().split('\n');
 assert.equal(table.length, 4, 'a header and one row per scenario');
 // Every score starts at the same column, whatever the scenario is called -
 // which is the whole point of the block.
+const nameWidth = Math.max(8, ...scenarios.map((s) => s.length));
 assert.ok(
-  table.every((line) => line.length > 20 && line[20] !== ' '),
-  'the name column is 20 wide and the first score starts right after it',
+  table.every((line) => line.length > nameWidth + 1 && line[nameWidth + 1] !== ' '),
+  'the name column fits the longest scenario and the first score starts right after it',
 );
-assert.ok(table[2].startsWith('Whisphere Small &'), 'a long name is cut, not wrapped');
-assert.ok(table[2].includes('… '), 'and a cut name still leaves a gap before the score');
+// A scenario is named here and nowhere else on the card, so it is never cut:
+// half a name is not something anybody can go and look up in KovaaK's.
+assert.ok(
+  table[2].startsWith('Whisphere Small & Slow '),
+  'the longest name is printed whole, with a gap before the score',
+);
+assert.ok(
+  table.slice(1).every((line) => !line.includes('…')),
+  'no scenario name is truncated',
+);
 
 // The star marks who took each scenario, which is what the scoreline counts.
 assert.equal(table.filter((l) => l.includes('*')).length, 3, 'ness took all three');
@@ -69,6 +78,28 @@ assert.ok(fields![0].value.includes('(+15)'));
 assert.ok(fields![0].value.includes('1 personal best'), 'and only the ones actually beaten');
 assert.ok(fields![1].value.includes('(-15)'));
 assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts forfeits nothing');
+
+// Unranked: the same scoreboard, and none of the consequences. The card has to
+// say so itself - it outlives the thread and the panel it was queued from, so a
+// reader has no other way to tell why nobody's rating moved.
+{
+  const e = resultsEmbed(
+    { ...match, ranked: 0 } as unknown as typeof match,
+    rows,
+    players,
+    new Map([['a', 0], ['b', 0]]),
+  );
+  assert.ok(e.data.title!.endsWith('· unranked'), `title says so, got ${e.data.title}`);
+  assert.ok(e.data.description!.includes('no rating moved'), 'and the body explains it');
+  assert.ok(e.data.description!.includes('```'), 'the scoreboard is still there');
+  assert.ok(
+    e.data.fields!.every((f) => !f.value.includes('(+0)') && !f.value.includes('(-0)')),
+    'no delta at all, rather than a (+0) that reads as a rated game worth nothing',
+  );
+  // ...and the rated card is untouched by any of it.
+  assert.ok(!embed.data.title!.includes('unranked'), 'a rated match says nothing about it');
+  assert.ok(embed.data.fields![0].value.includes('(+15)'), 'and still shows its delta');
+}
 
 // Runs left unused score 0, and the card has to say so - otherwise it shows
 // somebody losing a scenario the numbers say they won. The scoreline reads the

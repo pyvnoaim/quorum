@@ -35,7 +35,8 @@ db.exec(`
     seeded_from      text,
     elo              integer not null default 1050,
     wins             integer not null default 0,
-    losses           integer not null default 0
+    losses           integer not null default 0,
+    draws            integer not null default 0
   );
   create table if not exists match (
     id         integer primary key autoincrement,
@@ -142,6 +143,25 @@ for (const stmt of [
   // switching is for Challenger and Master" is not a floor - the brackets that
   // play a thing are the brackets someone picked, and they need not be a run.
   'alter table scenario add column rank_ids text',
+  // Two sides can finish a match dead level - and until this column they were
+  // both written down as a win, which inflated every record it touched and made
+  // a win rate a number that could exceed the games played. An existing row
+  // defaults to 0: matches already drawn stay counted the old way rather than
+  // being guessed at, and only a draw from here is recorded as one.
+  'alter table player add column draws integer not null default 0',
+  // 0 = played for nothing. The scores are still read, still posted and still
+  // kept, but no rating moves and no W/L is written - so somebody staff have
+  // not placed yet can play, and be judged on what they actually scored. Every
+  // match that existed before this was rated, hence the default.
+  'alter table match add column ranked integer not null default 1',
+  // The unranked queue's channel. Its own, and not one of the bracket channels:
+  // those are private to their roles, so the players this queue exists for -
+  // the ones with no role yet - can see none of them.
+  'alter table guild_config add column split_unranked_id text',
+  // 1 = run an unranked queue alongside the brackets. Off by default and off
+  // on every server that upgrades into it: it means a channel appearing, and a
+  // channel nobody asked for is not a thing to hand somebody on a redeploy.
+  'alter table guild_config add column unranked_enabled integer',
   // Which of the three fixed mains a category rolls up into. A category named
   // after a main is its own main; everything else is a subcategory of one.
   'alter table scenario add column main text',
@@ -202,6 +222,9 @@ export interface Player {
   elo: number;
   wins: number;
   losses: number;
+  /** Matches that ended dead level. Not a loss and not a win: scoring is by
+   *  placing, so two sides can genuinely share first. */
+  draws: number;
 }
 
 export function setVoltaic(discordId: string, value: { rank: string } | null) {
@@ -237,6 +260,10 @@ export interface Match {
    *  opener held. Resolved once at open time, so a role change mid-lobby can't
    *  move the goalposts under people already in. Null in automatic mode. */
   division_role_id: string | null;
+  /** 0 = nothing is at stake. Scores are read and kept exactly as they are for
+   *  a rated match, but no Elo moves and no W/L is written - which is what lets
+   *  a player staff have not placed yet get a game at all. */
+  ranked: number;
 }
 
 export interface GuildConfig {
@@ -258,6 +285,12 @@ export interface GuildConfig {
    *  inside it. Both owned by Quorum: it makes them and it deletes them. */
   split_category_id: string | null;
   split_results_id: string | null;
+  /** The unranked queue's channel, also Quorum's own. Open to whoever can see
+   *  the category rather than locked to a bracket - see syncRankChannels. */
+  split_unranked_id: string | null;
+  /** 1 = the unranked queue exists. Null or 0 = it does not, and its channel
+   *  is removed the same way a deleted rank's is. */
+  unranked_enabled: number | null;
   /** Minutes before an untaken call is binned. 0 = never, null = the default. */
   call_ttl_min: number | null;
   /** JSON: the format's own knobs - see getFormat(). Null = every default. */
@@ -405,6 +438,12 @@ export interface PanelRef {
   channel: string;
   message: string;
   formats: Format[];
+  /** false on the unranked queue's panel. Remembered rather than worked out
+   *  from the channel, so the tick rewrites the panel it actually found there -
+   *  refreshing every panel as a rated one would quietly turn the unranked
+   *  queue into a rated one on the next minute. Absent on rows written before
+   *  the unranked queue existed, which were all rated. */
+  ranked?: boolean;
 }
 
 export function getPanels(guildId: string): PanelRef[] {
@@ -479,6 +518,8 @@ export function getConfig(guildId: string): GuildConfig {
       seed_mode: null,
       split_category_id: null,
       split_results_id: null,
+      split_unranked_id: null,
+      unranked_enabled: null,
       call_ttl_min: null,
       format_cfg: null,
       panel_msgs: null,
@@ -497,9 +538,10 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     `insert into guild_config
        (guild_id, panel_channel_id, results_channel_id, ping_role_id,
         rank_spread, split_channels, rank_mode, seed_mode, call_ttl_min,
-        split_category_id, split_results_id, format_cfg, panel_msgs, queues_paused,
+        split_category_id, split_results_id, split_unranked_id, unranked_enabled,
+        format_cfg, panel_msgs, queues_paused,
         announce_channel_id, visible_role_id, leaderboard_channel_id, leaderboard_msg_id)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
@@ -511,6 +553,8 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
        call_ttl_min = excluded.call_ttl_min,
        split_category_id = excluded.split_category_id,
        split_results_id = excluded.split_results_id,
+       split_unranked_id = excluded.split_unranked_id,
+       unranked_enabled = excluded.unranked_enabled,
        format_cfg = excluded.format_cfg,
        panel_msgs = excluded.panel_msgs,
        queues_paused = excluded.queues_paused,
@@ -530,6 +574,8 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.call_ttl_min,
     next.split_category_id,
     next.split_results_id,
+    next.split_unranked_id,
+    next.unranked_enabled,
     next.format_cfg,
     next.panel_msgs,
     next.queues_paused,
@@ -751,7 +797,7 @@ export function resetRatings(
     : playersInGuild(guildId);
 
   const stmt = db.prepare(
-    'update player set elo = ?, wins = 0, losses = 0, seeded_from = null where discord_id = ?',
+    'update player set elo = ?, wins = 0, losses = 0, draws = 0, seeded_from = null where discord_id = ?',
   );
   tx(() => {
     for (const id of ids) stmt.run(BASE_ELO, id);
@@ -776,13 +822,35 @@ export function playersInGuild(guildId: string) {
  *  record is the truth - re-seeding then would wipe it, so it does nothing. */
 export function seedPlayer(discordId: string, elo: number, from: string) {
   const p = getPlayer(discordId);
-  if (!p || p.wins + p.losses > 0) return false;
+  // Draws count as having played. Without them a match that ended level left a
+  // record seeding would happily write over.
+  if (!p || p.wins + p.losses + p.draws > 0) return false;
   db.prepare('update player set elo = ?, seeded_from = ? where discord_id = ?').run(
     Math.round(elo),
     from,
     discordId,
   );
   return true;
+}
+
+/** Moves a rating that has already been played for, and leaves the record that
+ *  earned it alone.
+ *
+ *  Deliberately NOT seedPlayer with the guard removed. Seeding refuses anyone
+ *  who has played, and that refusal is what stops a re-seed quietly erasing a
+ *  season - it has to keep refusing. This is the other half of the job: staff
+ *  correcting a placement that was wrong, where the wins, the losses and every
+ *  match already in History are all still true and only the number is not.
+ *
+ *  Returns what moved, so the change can be said out loud. A rating edited in
+ *  silence is the one thing on the dashboard nobody could ever spot after the
+ *  fact - it looks exactly like a match result. */
+export function setPlayerElo(discordId: string, elo: number) {
+  const p = getPlayer(discordId);
+  if (!p) return null;
+  const now = Math.round(elo);
+  db.prepare('update player set elo = ? where discord_id = ?').run(now, discordId);
+  return { name: p.kovaaks_username, was: p.elo, now };
 }
 export interface MatchPlayer {
   match_id: number;
@@ -894,17 +962,24 @@ export function matchHistory(guildId: string, limit = 25) {
  *  something that happens every night. */
 export function deleteMatch(matchId: number) {
   tx(() => {
-    for (const r of matchPlayers(matchId)) {
+    const rows = matchPlayers(matchId);
+    // Whether this match was a draw, read back the way it was written: more than
+    // one TEAM on placing 1. Counting rows would not do it - both members of a
+    // winning 2v2 are placing 1 and that is a win, not a draw.
+    const drawn = new Set(rows.filter((r) => r.placing === 1).map((r) => r.team)).size > 1;
+    for (const r of rows) {
       if (r.placing == null || r.elo_before == null || r.elo_after == null) continue;
+      const first = r.placing === 1;
       // max(0, ...) so a half-reverted row can never drive a record negative.
       db.prepare(
         `update player set elo = elo - ?,
-           wins = max(0, wins - ?), losses = max(0, losses - ?)
+           wins = max(0, wins - ?), losses = max(0, losses - ?), draws = max(0, draws - ?)
          where discord_id = ?`,
       ).run(
         r.elo_after - r.elo_before,
-        r.placing === 1 ? 1 : 0,
-        r.placing === 1 ? 0 : 1,
+        first && !drawn ? 1 : 0,
+        first ? 0 : 1,
+        first && drawn ? 1 : 0,
         r.discord_id,
       );
     }
@@ -973,13 +1048,23 @@ export function guildStats(guildId: string, channelId?: string) {
       ...where,
       Date.now() - 7 * 24 * 60 * 60 * 1000,
     ),
+    // A 'lobby' is a call nobody has taken: one person waiting on somebody
+    // else, which is not a match and must not be counted as one. The two used
+    // to be a single number, so a panel with one open call announced "1 match
+    // up right now" and sent people looking for a game that did not exist.
     running: one(
-      `select count(*) as n from match where guild_id = ?${here} and status in ('lobby','banning','live')`,
+      `select count(*) as n from match where guild_id = ?${here} and status in ('banning','live')`,
+      ...where,
+    ),
+    // Counted separately because it is the one a reader can act on: a call
+    // waiting is an invitation, where a match in play is just news.
+    waiting: one(
+      `select count(*) as n from match where guild_id = ?${here} and status = 'lobby'`,
       ...where,
     ),
     rated: one(
       `select count(*) as n from player p
-       where p.wins + p.losses > 0 and exists (
+       where p.wins + p.losses + p.draws > 0 and exists (
          select 1 from match_player mp join match m on m.id = mp.match_id
          where mp.discord_id = p.discord_id and m.guild_id = ?
        )`,
@@ -1005,7 +1090,7 @@ export function leaderboard(guildId: string, limit = 20, offset = 0) {
   return db
     .prepare(
       `select p.* from player p
-       where p.wins + p.losses > 0 and exists (
+       where p.wins + p.losses + p.draws > 0 and exists (
          select 1 from match_player mp join match m on m.id = mp.match_id
          where mp.discord_id = p.discord_id and m.guild_id = ?
        )
@@ -1021,7 +1106,7 @@ export function ladderSize(guildId: string): number {
   const row = db
     .prepare(
       `select count(*) as n from player p
-       where p.wins + p.losses > 0 and exists (
+       where p.wins + p.losses + p.draws > 0 and exists (
          select 1 from match_player mp join match m on m.id = mp.match_id
          where mp.discord_id = p.discord_id and m.guild_id = ?
        )`,

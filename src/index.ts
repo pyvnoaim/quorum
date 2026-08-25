@@ -46,12 +46,14 @@ import {
   recentMatches,
   seedPlayer,
   setConfig,
+  setPlayerElo,
   type Match,
   type MatchPlayer,
 } from './db.js';
 import {
   leaderboardMessage,
   rankLabel,
+  useClient,
   liveEmbed,
   messageGone,
   noContestEmbed,
@@ -86,9 +88,13 @@ const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set');
 
 const client = new Client({
-  // Guilds alone. A match talks in its own private thread now, so nothing here
-  // reads a voice state and no second intent has to be justified.
-  intents: [GatewayIntentBits.Guilds],
+  // A match talks in its own private thread, so nothing here reads a voice
+  // state. GuildMembers is the one addition and manual mode is why: staff hand
+  // out the division roles there, so the role IS the rank, and naming somebody's
+  // rank means reading their roles. Without it the bot only knows the roles of
+  // people it has happened to see press a button - so a rank vanished from every
+  // embed on restart and came back one player at a time.
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
 const NO_LINK =
@@ -276,7 +282,7 @@ function render(match: Match) {
 }
 
 /** The roles an interaction's member holds, or none where the gateway handed
- *  back a partial member - Quorum runs on the Guilds intent alone. */
+ *  back a partial member. */
 function roleIds(member: Interaction['member']) {
   return member?.roles && 'cache' in member.roles ? [...member.roles.cache.keys()] : [];
 }
@@ -647,21 +653,55 @@ async function finishMatch(match: Match) {
     return { match: getMatch(done.id)!, deltas: new Map<string, number>(), voided: true };
   }
 
+  // Worked out either way: an unranked match is still a match, and the card
+  // still has to be able to say who took it and by how many rounds. What it
+  // does NOT do is spend any of it.
   const placing = placings(scoring, scenarios);
-  const deltas = eloDeltas(scoring, placing);
+  const rated = done.ranked !== 0;
+  const deltas = rated
+    ? eloDeltas(scoring, placing)
+    : new Map(scoring.map((e) => [e.id, 0] as const));
+
+  // Two sides can genuinely share first. Rounds are scored by PLACING and a
+  // round they tie hands both the same points, so level on points is level on
+  // the match - and writing that down as a win for each of them, which is what
+  // this did, inflated both records and made a win rate that could run past the
+  // games played. Elo needed no such fix: a shared placing is already worth 0.5
+  // to each side in eloDeltas, which is exactly a draw.
+  const sharedFirst = [...placing.values()].filter((p) => p === 1).length > 1;
 
   for (const entrant of scoring) {
     const place = placing.get(entrant.team)!;
     const delta = deltas.get(entrant.id)!;
-    // ponytail: a win is placing 1, everything else is a loss - no draws column
-    // until someone actually ties for first and complains.
-    db.prepare(
-      `update player set elo = elo + ?, wins = wins + ?, losses = losses + ? where discord_id = ?`,
-    ).run(delta, place === 1 ? 1 : 0, place === 1 ? 0 : 1, entrant.id);
+    const first = place === 1;
+    // Nothing was staked, so nothing is paid out: no rating, no W/L, no draw.
+    // The scores are already saved on the match_player row above and the result
+    // still posts - that is the whole of what an unranked match leaves behind.
+    if (rated) {
+      db.prepare(
+        `update player set elo = elo + ?, wins = wins + ?, losses = losses + ?, draws = draws + ?
+         where discord_id = ?`,
+      ).run(
+        delta,
+        first && !sharedFirst ? 1 : 0,
+        first ? 0 : 1,
+        first && sharedFirst ? 1 : 0,
+        entrant.id,
+      );
+    }
+    // The placing is written either way - it is who won, and History reads it.
+    // elo_before/elo_after stay null on an unranked row, which is also what
+    // stops deleteMatch trying to hand back points nobody was ever given.
     db.prepare(
       `update match_player set placing = ?, elo_before = ?, elo_after = ?
        where match_id = ? and discord_id = ?`,
-    ).run(place, entrant.elo, entrant.elo + delta, done.id, entrant.id);
+    ).run(
+      place,
+      rated ? entrant.elo : null,
+      rated ? entrant.elo + delta : null,
+      done.id,
+      entrant.id,
+    );
   }
 
   // The thread outlives this on purpose - concludeMatch still has to reach the
@@ -759,7 +799,11 @@ async function concludeMatch(match: Match) {
     // sitting in the queue channel.
     if (!done.thread_id) await msg?.delete().catch(() => {});
   }
-  if (!voided) await syncRankRoles(done.guild_id, rows.map((r) => r.discord_id));
+  // Not after an unranked one: no rating moved, so no rank can have changed,
+  // and syncRankRoles fetches a member apiece to work that out the slow way.
+  if (!voided && done.ranked !== 0) {
+    await syncRankRoles(done.guild_id, rows.map((r) => r.discord_id));
+  }
 }
 
 function activeMatchFor(discordId: string, guildId: string) {
@@ -838,7 +882,7 @@ const panelText = new Map<string, string>();
 async function refreshPanels() {
   for (const [guildId] of client.guilds.cache) {
     for (const panel of getPanels(guildId)) {
-      const body = panelMessage(panel.formats, guildId, panel.channel);
+      const body = panelMessage(panel.formats, guildId, panel.channel, panel.ranked !== false);
       const next = body.embeds[0].data.description ?? '';
       if (panelText.get(panel.message) === next) continue;
 
@@ -945,10 +989,75 @@ async function leaveIfNotAllowed(guild: Guild) {
 
 client.on('guildCreate', (guild) => void leaveIfNotAllowed(guild).catch(console.error));
 
+/** Staff moved somebody's division, so their rating moves with it.
+ *
+ *  With staff-owned brackets the ROLE is the truth and the rating is the
+ *  evidence inside it - so changing bracket starts that evidence again at the
+ *  new floor. A promotion is not a player who is suddenly bottom of the whole
+ *  ladder, and a demotion is not one who still sits above the bracket they
+ *  came from.
+ *
+ *  Manual mode only. Automatic mode hands out these same roles ITSELF, off the
+ *  rating, so a rating that then followed the role would chase its own tail.
+ *  It cannot fight syncRankRoles either: that returns early in manual mode, so
+ *  a division role there only ever moves because a person moved it. */
+client.on('guildMemberUpdate', async (before, after) => {
+  // This event fires for a nickname, an avatar, a timeout, any role at all - so
+  // the free checks go first and the database is only asked once something
+  // might actually have happened. Without the old roles there is no way to tell
+  // a division change from a rename, and snapping a rating on a rename would be
+  // the worst kind of wrong.
+  if (before.partial) return;
+  const guildId = after.guild.id;
+  if (!guildAllowed(guildId)) return;
+  // Same roles, whatever else moved. Cheaper than reading the ladder to find
+  // out, and it is the case nearly every one of these events is.
+  if (
+    before.roles.cache.size === after.roles.cache.size &&
+    before.roles.cache.every((r) => after.roles.cache.has(r.id))
+  ) {
+    return;
+  }
+  if (getRankMode(guildId) !== 'manual') return;
+  const ranks = getRanks(guildId);
+  // Compared as BANDS, not as role lists: handing someone a second role they
+  // already outrank changes nothing, and neither should this.
+  const was = rankForRoles(ranks, before.roles.cache.map((r) => r.id));
+  const now = rankForRoles(ranks, after.roles.cache.map((r) => r.id));
+  // No band now means staff took the division away rather than swapping it.
+  // There is no floor to move to, and an unplaced player cannot queue anyway.
+  if (!now || was?.id === now.id) return;
+  // Nobody Quorum has on the books is nobody to move: an unplayed member is
+  // seeded off this very role the first time they press anything.
+  if (!getPlayer(after.id)) return;
+  const moved = setPlayerElo(after.id, now.min_elo);
+  if (!moved || moved.was === moved.now) return;
+  // Logged, not announced. The role landing on them is already visible in
+  // Discord and the rating following it is policy rather than a decision, so
+  // there is nobody to attribute it to - unlike a rating edited on the
+  // dashboard, which is somebody's choice and says whose.
+  console.log(
+    `${guildId}: ${moved.name} ${was?.name ?? 'unplaced'} -> ${now.name}, ` +
+      `rating ${moved.was} -> ${moved.now}`,
+  );
+});
+
 client.once('clientReady', async (c) => {
   for (const guild of c.guilds.cache.values()) await leaveIfNotAllowed(guild);
+  // Everything that names a rank goes through here - see useClient().
+  useClient(c);
   await c.application.commands.set([command.toJSON()]);
   startWeb(c, { concludeMatch, cancelMatch, syncRankRoles, refreshPanels });
+  // Warmed after the bot is already answering, not before it. On a big server
+  // this is a slow download, and blocking on it would hold the dashboard and
+  // every slash command shut for as long as it took - to populate something
+  // only rank LABELS need. After this GUILD_MEMBER_UPDATE keeps it current on
+  // its own, so a role staff move lands on the next embed rather than whenever
+  // that player next presses a button. A guild that refuses the fetch fills in
+  // from interactions, as it did before there was an intent to ask with.
+  void Promise.all(
+    [...c.guilds.cache.values()].map((guild) => guild.members.fetch().catch(() => {})),
+  );
   setInterval(() => void tick().catch(console.error), TICK_MS).unref();
   console.log(`ready as ${c.user.tag}`);
 });
@@ -984,7 +1093,8 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
       await i.reply({ content: 'No games played yet.', flags: MessageFlags.Ephemeral });
       return;
     }
-    const games = p.wins + p.losses;
+    // Draws are games played, so they belong in the total the rate is over.
+    const games = p.wins + p.losses + p.draws;
     const band = rankLabel(i.guildId!, target.id, p.elo, i.guild);
     const embed = new EmbedBuilder()
       .setTitle(p.kovaaks_username)
@@ -993,7 +1103,7 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
         // One player, so the bracket can come off their role where Quorum has
         // seen them - unlike the leaderboard, there is no other row to be
         // inconsistent with.
-        `**${p.elo}**${band ? ` ${band}` : ''}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
+        `**${p.elo}**${band ? ` ${band}` : ''}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ''}${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
       );
 
     const recent = recentMatches(target.id, i.guildId!);
@@ -1102,7 +1212,11 @@ async function onLeaderboardPage(i: import('discord.js').ButtonInteraction, page
 async function onButton(i: import('discord.js').ButtonInteraction) {
   const [, action, arg, extra] = i.customId.split(':');
 
-  if (action === 'open') return onOpen(i, arg as Format);
+  // 'pug:open:1v1' is the rated queue and 'pug:open:1v1:casual' the one with
+  // nothing on it. Carried on the button rather than worked out from the
+  // channel, so a panel reposted into the wrong place cannot quietly start
+  // rating games nobody meant to play for.
+  if (action === 'open') return onOpen(i, arg as Format, extra !== 'casual');
   if (action === 'notify') return onNotify(i);
   // Not a match id, so it has to answer before the lookup below turns it into
   // "That match is gone."
@@ -1194,7 +1308,15 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       return;
     }
 
-    if (match.division_role_id) {
+    if (match.ranked === 0) {
+      // Nothing at stake, so nothing to protect: an unranked call takes anyone,
+      // placed or not. This is the branch that lets a newcomer play at all.
+      //
+      // Tested for 0 rather than falsiness, so the gate fails CLOSED: a row
+      // that somehow arrived without the column would be waved past every rank
+      // check by `!match.ranked`, and letting the wrong people into a rated
+      // match is the one direction this must never get wrong.
+    } else if (match.division_role_id) {
       // Manual mode: the call carries its division, so the gate is roles all
       // the way down - nothing here reads Elo. The spread still applies, in
       // ladder positions: at 1 the bracket either side may join too.
@@ -1389,7 +1511,11 @@ async function onNotify(i: import('discord.js').ButtonInteraction) {
   });
 }
 
-async function onOpen(i: import('discord.js').ButtonInteraction, format: Format) {
+async function onOpen(
+  i: import('discord.js').ButtonInteraction,
+  format: Format,
+  ranked = true,
+) {
   if (!FORMATS[format] || !i.guildId) {
     await i.reply({ content: 'Unknown format.', flags: MessageFlags.Ephemeral });
     return;
@@ -1416,15 +1542,22 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   // Manual mode: the call is opened INTO a bracket - the channel's, or the one
   // the opener holds a role for in a shared channel. Nobody unplaced queues,
   // because placing people is the whole point of staff-owned brackets.
+  //
+  // ...except here, which is the one queue with no bracket to be in. Nothing is
+  // at stake, so there is nothing to gate: an unranked call belongs to no
+  // division, admits anyone, and is how somebody nobody has placed yet gets a
+  // game at all - and how staff get the scores to place them on.
   const manual = getRankMode(i.guildId) === 'manual';
   const held = i.member?.roles && 'cache' in i.member.roles ? i.member.roles.cache : null;
-  const division = manual
+  const division = manual && ranked
     ? ranks.find((r) => rankChannels(r).queue === i.channelId) ??
       rankForRoles(ranks, held?.map((r) => r.id) ?? [])
     : undefined;
-  if (manual && !division?.discord_role_id) {
+  if (manual && ranked && !division?.discord_role_id) {
     await i.reply({
-      content: 'You need a division role to queue - ask staff to place you.',
+      content:
+        'You need a division role to queue here - ask staff to place you. ' +
+        'Unranked is open to everyone in the meantime.',
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1435,6 +1568,7 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
     i.user.id,
     format,
     division?.discord_role_id ?? null,
+    ranked,
   );
 
   // Ping the bands this queue would actually admit, rather than everyone. That
@@ -1457,13 +1591,20 @@ async function onOpen(i: import('discord.js').ButtonInteraction, format: Format)
   const optIn = set && i.guild?.roles.cache.has(set) ? set : null;
   const mentions = optIn
     ? [optIn]
-    : [
-        ...new Set(
-          bandsInReach(ranks, owner?.min_elo ?? opener.elo, getRankSpread(i.guildId)[format])
-            .map((r) => r.discord_role_id)
-            .filter((id): id is string => !!id),
-        ),
-      ];
+    : !ranked
+      ? // An unranked call belongs to no bracket, so there is no bracket to
+        // summon. Falling through to the reach below would have pinged the
+        // bands around the OPENER's rating - dragging the ladder into the one
+        // queue that is deliberately outside it, and pinging roles for a game
+        // that half the people holding them cannot be beaten by anyway.
+        []
+      : [
+          ...new Set(
+            bandsInReach(ranks, owner?.min_elo ?? opener.elo, getRankSpread(i.guildId)[format])
+              .map((r) => r.discord_role_id)
+              .filter((id): id is string => !!id),
+          ),
+        ];
 
   await i.reply({
     ...render(match),
@@ -1486,13 +1627,14 @@ function createCall(
   hostId: string,
   format: Format,
   divisionRoleId: string | null = null,
+  ranked = true,
 ) {
   const { lastInsertRowid } = db
     .prepare(
-      `insert into match (guild_id, channel_id, host_id, format, division_role_id, created_at)
-       values (?, ?, ?, ?, ?, ?)`,
+      `insert into match (guild_id, channel_id, host_id, format, division_role_id, ranked, created_at)
+       values (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(guildId, channelId, hostId, format, divisionRoleId, Date.now());
+    .run(guildId, channelId, hostId, format, divisionRoleId, ranked ? 1 : 0, Date.now());
   const id = Number(lastInsertRowid);
   db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(id, hostId);
   return getMatch(id)!;
@@ -1527,6 +1669,11 @@ async function onRematch(i: import('discord.js').ButtonInteraction, old: Match) 
     i.user.id,
     old.format,
     old.division_role_id,
+    // Carried over, or a rematch of an unranked game would come back rated -
+    // and it is posted straight into the channel with everyone pinged, so the
+    // first anyone would know is a rating moving after a game they thought was
+    // for nothing. An unplaced player could not have joined it either.
+    old.ranked !== 0,
   );
   const others = was.map((r) => r.discord_id).filter((id) => id !== i.user.id);
   const msg = await channel.send({

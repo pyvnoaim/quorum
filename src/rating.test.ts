@@ -37,6 +37,28 @@ const p = (id: string, elo: number, team: number, s: (number | null)[]): Entrant
   assert.equal(d.get('lose'), -16);
 }
 
+// An exact tie on a scenario: nobody takes that round, and the other two split
+// it, so the match ends level. Not a rare shape - a scenario scoring in the low
+// hundreds has real odds of two players landing on the same number, and the
+// forfeit rule puts a 0 on both sides of any round neither of them played out.
+{
+  const e = [p('ness', 1000, 0, [114, 500, 100]), p('jay', 1000, 1, [114, 400, 200])];
+  assert.deepEqual(
+    scenarioWinners(e, scenarios),
+    [null, 0, 1],
+    'the tied round goes to nobody rather than to both',
+  );
+  const placing = placings(e, scenarios);
+  assert.equal(placing.get(0), 1);
+  assert.equal(placing.get(1), 1, 'level on points is level on the match');
+  const d = eloDeltas(e, placing);
+  assert.equal(d.get('ness'), 0, 'a shared placing is worth 0.5 each, which is a draw');
+  assert.equal(d.get('jay'), 0);
+  // finishMatch reads exactly this to tell a draw from a win: more than one TEAM
+  // on placing 1. Both sides used to be written down as a win.
+  assert.equal([...placing.values()].filter((v) => v === 1).length, 2, 'two teams share first');
+}
+
 // Nobody ran anything: every side ties at 0 and a tie shares the better
 // placing, so scoring this hands EVERYONE first place - and a win each. That
 // is why finishMatch voids a match with no scores instead of rating it.

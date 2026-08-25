@@ -3,6 +3,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  type Client,
   type Guild,
 } from "discord.js";
 import {
@@ -160,7 +161,10 @@ export function openEmbed(
   const { max } = FORMATS[match.format as Format];
 
   return new EmbedBuilder()
-    .setTitle(`Looking for a ${match.format}`)
+    // Said on the call itself, not only on the panel above it. This is the
+    // message somebody presses Take on, and a rematch lands here too - so what
+    // is at stake has to be readable without scrolling up to find out.
+    .setTitle(`Looking for a ${match.format}${match.ranked === 0 ? " · unranked" : ""}`)
     .setColor(matchColor(match))
     .setDescription(
       // How many seats are left is the whole point of this message, so it goes
@@ -203,6 +207,7 @@ export function panelMessage(
   formats: readonly Format[] = PANEL_FORMATS,
   guildId?: string,
   channelId?: string,
+  ranked = true,
 ) {
   const { rounds, runs } = guildId
     ? getFormat(guildId)
@@ -214,25 +219,53 @@ export function panelMessage(
   // Paused: the panel has to say so where the button is, not only refuse the
   // press. A greyed button with no reason next to it reads as a broken bot.
   const paused = !!(guildId && getConfig(guildId).queues_paused);
+  // What is up right now, and only the halves of it that are true. A call
+  // nobody has taken is never folded into the match count: it is not a match,
+  // and it is the one thing on this panel a reader can act on - so an open call
+  // says so, instead of being announced as a game already being played.
+  const now = stats
+    ? [
+        stats.running
+          ? `**${stats.running}** ${stats.running === 1 ? "match" : "matches"} up right now`
+          : "",
+        stats.waiting
+          ? `**${stats.waiting}** ${stats.waiting === 1 ? "call" : "calls"} waiting for an opponent`
+          : "",
+      ].filter(Boolean)
+    : [];
   // An empty ladder is worth saying out loud - "0 played" reads as broken,
-  // where "be the first" reads as an invitation.
+  // where "be the first" reads as an invitation. But only when there is truly
+  // nothing here: a server with a call up has something better to say.
   const pulse = !stats
     ? ""
-    : stats.played === 0
+    : stats.played === 0 && !now.length
       ? "\n\nNobody has played here yet. Be the first."
-      : `\n\n**${stats.week}** played this week · **${stats.running}** ` +
-        `${stats.running === 1 ? "match" : "matches"} up right now`;
+      : "\n\n" +
+        [stats.played ? `**${stats.week}** played this week` : "", ...now]
+          .filter(Boolean)
+          .join(" · ");
 
   return {
     embeds: [
       new EmbedBuilder()
-        .setTitle(formats.length === 1 ? `Quorum · ${formats[0]}` : "Quorum")
-        .setColor(paused ? GREY : BLURPLE)
+        .setTitle(
+          ranked
+            ? formats.length === 1
+              ? `Quorum · ${formats[0]}`
+              : "Quorum"
+            : `Quorum · unranked`,
+        )
+        .setColor(paused ? GREY : ranked ? BLURPLE : GREY)
         .setDescription(
           (paused
             ? "**Queues are paused.** Staff have closed them for now - nothing new can be " +
               "opened or taken until they are back on. Matches already running play out.\n\n"
             : "") +
+            (ranked
+              ? ""
+              : "**Nothing is at stake here.** No rating moves and no win or loss is " +
+                "recorded - but every score is read and kept the same way, so this is " +
+                "also where staff can see what you actually shoot before placing you.\n\n") +
             `Press ${buttons}. Your call goes up here, and the first person to take it plays you.\n\n` +
             `You get a private thread to yourselves. Ban and pick **${rounds} scenarios** in it, ` +
             `**${runs} runs each**.\n\n` +
@@ -245,9 +278,10 @@ export function panelMessage(
     components: rows([
       ...formats.map((f) =>
         new ButtonBuilder()
-          .setCustomId(`pug:open:${f}`)
-          .setLabel(f)
-          .setStyle(ButtonStyle.Primary)
+          // The stake rides on the button, not on the channel - see onButton().
+          .setCustomId(ranked ? `pug:open:${f}` : `pug:open:${f}:casual`)
+          .setLabel(ranked ? f : `${f} unranked`)
+          .setStyle(ranked ? ButtonStyle.Primary : ButtonStyle.Secondary)
           .setDisabled(paused),
       ),
       // Only where there is a role to opt into. Self-serve, because the
@@ -269,13 +303,13 @@ export function panelMessage(
  *
  *  With staff-owned brackets the ROLE is the bracket, so a name read off Elo
  *  would print one nobody is in - a Champion who has had a bad month is still
- *  Champion. Quorum runs on the Guilds intent alone and so only knows the roles
- *  of people it has actually seen; where it cannot see them it says nothing,
- *  because a rating on its own beats a confident wrong bracket.
+ *  Champion. The GuildMembers intent is what makes that answerable at all; where
+ *  a member still cannot be resolved it says nothing, because a rating on its
+ *  own beats a confident wrong bracket.
  *
- *  Pass the guild only where every row can be resolved the same way. The
- *  leaderboard deliberately does not: half a board labelled and half not reads
- *  as a bug. */
+ *  The guild argument is only an override for a caller that already holds one -
+ *  everything else goes through the client below, because a rank the caller had
+ *  to remember to make resolvable is one three call sites out of four forgot. */
 export function rankLabel(
   guildId: string,
   discordId: string,
@@ -284,11 +318,25 @@ export function rankLabel(
 ) {
   const ranks = getRanks(guildId);
   if (getRankMode(guildId) !== "manual") return rankName(ranks, elo);
-  const held = guild?.members.cache.get(discordId)?.roles.cache;
+  const where = guild ?? client?.guilds.cache.get(guildId) ?? null;
+  const held = where?.members.cache.get(discordId)?.roles.cache;
   return held
     ? (rankForRoles(ranks, held.map((r) => r.id) as string[])?.name ?? "")
     : "";
 }
+
+/** The client, handed over once at boot.
+ *
+ *  In manual mode a rank IS a Discord role, so naming one needs the member -
+ *  and threading a Guild down through every embed that shows a rank is exactly
+ *  how the call embed, the leaderboard and the result card all came to leave it
+ *  out and print nothing at all. One accessor set once, and no call site can
+ *  get it wrong. Null before boot and under test, where rankLabel falls back to
+ *  saying nothing, which is what it did everywhere before. */
+let client: Client | null = null;
+export const useClient = (c: Client) => {
+  client = c;
+};
 
 /** Discord's "Unknown Message" (10008) - the one refusal that means a message
  *  really is gone, rather than that we could not reach it just now.
@@ -322,7 +370,9 @@ export function leaderboardMessage(guildId: string, page = 0) {
   const rows = leaderboard(guildId, LADDER_PAGE, at * LADDER_PAGE);
 
   const line = (p: Player, n: number) => {
-    const games = p.wins + p.losses;
+    // Draws are games. Left out of the total they would put the rate over what
+    // was actually played; counted as wins they would flatter it.
+    const games = p.wins + p.losses + p.draws;
     const rate = games ? ` (${Math.round((p.wins / games) * 100)}%)` : "";
     // The top three are the only rows worth a marker - a medal beside eleventh
     // place is decoration, and it pushes the name out of line with the rest.
@@ -330,7 +380,9 @@ export function leaderboardMessage(guildId: string, page = 0) {
     const band = rankLabel(guildId, p.discord_id, p.elo);
     return (
       `${place} <@${p.discord_id}> - **${p.elo}**${band ? ` ${band}` : ""} · ` +
-      `${p.wins}W ${p.losses}L${rate}`
+      // The D only shows on a record that has one - most never will, and a
+      // column of "0D" down the board is noise for a thing that rarely happens.
+      `${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ""}${rate}`
     );
   };
 
@@ -510,9 +562,14 @@ export function noContestEmbed(match: Match, rows: MatchPlayer[]) {
     .setFooter(footer());
 }
 
-/** Fits a name into a fixed column, so a long scenario cannot shove a whole
- *  table sideways on a phone. Cut names keep a marker, or a truncation reads as
- *  the scenario's actual name. */
+/** Width in characters, not code units: a KovaaK's name with an emoji in it
+ *  occupies one column, and padEnd would count it as two and misalign the row
+ *  under it. */
+const glyphCount = (text: string) => [...text].length;
+
+/** Fits a name into a fixed column, so a long name cannot shove a whole table
+ *  sideways on a phone. Cut names keep a marker, or a truncation reads as the
+ *  name itself. */
 const fit = (text: string, width: number) => {
   // by character, not by code unit: slicing a KovaaK's name with an emoji in it
   // halfway through a surrogate pair prints a broken glyph.
@@ -522,10 +579,14 @@ const fit = (text: string, width: number) => {
   ).padEnd(width);
 };
 
+/** Pads to a column width by character, so an emoji in a name still leaves the
+ *  scores under each other. */
+const pad = (text: string, width: number) =>
+  text + " ".repeat(Math.max(0, width - glyphCount(text)));
+
 /** The scoreboard both the live card and the result share: one row per
  *  scenario, one column per player, everything aligned so a number can be read
- *  against the scenario it was set on. A phone shows about 40 characters of a
- *  code block before it scrolls, which is what the widths are cut to. */
+ *  against the scenario it was set on. */
 function scoreTable(
   scenarios: string[],
   cols: { head: string; cell: (s: string) => string }[],
@@ -537,14 +598,21 @@ function scoreTable(
       ...scenarios.map((s) => c.cell(s).length),
     ),
   );
+  // The scenario column is never cut. Every other name on this card is carried
+  // in full somewhere else - the players are named in the fields below - but a
+  // scenario is named HERE and nowhere else, and half a name is not something
+  // anyone can go and find in KovaaK's. So it is sized to the longest name in
+  // the match: on a narrow screen the block scrolls sideways, which is a swipe,
+  // where a cut name is a scenario nobody can look up.
+  const nameWidth = Math.max(8, ...scenarios.map(glyphCount));
   const row = (
     name: string,
     cell: (c: (typeof cols)[number], n: number) => string,
   ) =>
-    // 19 and a space, not 20: a name that fills its column whole would
-    // otherwise run straight into the first score.
+    // The space sits outside the column, not inside it: a name that fills its
+    // column whole would otherwise run straight into the first score.
     (
-      fit(name, 19) +
+      pad(name, nameWidth) +
       " " +
       cols.map((c, n) => cell(c, n).padEnd(widths[n])).join(" ")
     ).trimEnd();
@@ -562,6 +630,10 @@ export function resultsEmbed(
   deltas: Map<string, number>,
 ) {
   const scenarios: string[] = JSON.parse(match.scenarios);
+  // Only an explicit 0 is unranked. The column defaults to 1 and every row that
+  // existed before it was added was rated, so anything else - including a row
+  // that never carried the field - is a rated match.
+  const rated = match.ranked !== 0;
   const ordered = [...rows].sort(
     (a, b) => (a.placing ?? 99) - (b.placing ?? 99),
   );
@@ -672,7 +744,15 @@ export function resultsEmbed(
       name: `${r.placing == null ? "·" : (medal[r.placing - 1] ?? `#${r.placing}`)} ${p.kovaaks_username}`,
       value:
         `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ""} ` +
-        `${r.placing == null ? "· _no scores, not rated_" : `(${delta >= 0 ? "+" : ""}${delta})`}` +
+        // No delta on an unranked row rather than a "(+0)", which reads as a
+        // rated game that happened to be worth nothing.
+        `${
+          r.placing == null
+            ? "· _no scores, not rated_"
+            : rated
+              ? `(${delta >= 0 ? "+" : ""}${delta})`
+              : ""
+        }` +
         (pbs ? `\n_${pbs} personal best${pbs === 1 ? "" : "s"}_` : "") +
         (gaveUp
           ? `\n_forfeited the match - did not play all ${scenarios.length} out_`
@@ -706,9 +786,18 @@ export function resultsEmbed(
     .join("\n");
 
   return new EmbedBuilder()
-    .setTitle(title)
-    .setColor(GREEN)
-    .setDescription("```\n" + table + "\n```" + (draft ? `\n${draft}` : ""))
+    .setTitle(rated ? title : `${title} · unranked`)
+    .setColor(rated ? GREEN : GREY)
+    .setDescription(
+      "```\n" +
+        table +
+        "\n```" +
+        // Said on the result, not only on the panel they queued from: the card
+        // outlives the thread, and somebody reading it later has no other way to
+        // tell why nobody's rating moved.
+        (rated ? "" : "\n_Unranked - no rating moved and no record was kept._") +
+        (draft ? `\n${draft}` : ""),
+    )
     .addFields(fields)
     .setFooter(footer());
 }

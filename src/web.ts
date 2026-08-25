@@ -6,6 +6,7 @@ import {
   type Client,
   type Guild,
   type GuildBasedChannel,
+  type PermissionOverwriteOptions,
 } from 'discord.js';
 import {
   FORMATS,
@@ -19,6 +20,7 @@ import {
 } from './config.js';
 import {
   deleteMatch,
+  dropPanel,
   getConfig,
   getMatch,
   getSeedMode,
@@ -46,7 +48,7 @@ import {
   setRanks,
   setScenarios,
   resetRatings,
-  seedPlayer,
+  setPlayerElo,
   type GuildConfig,
   type Match,
   type Player,
@@ -261,6 +263,54 @@ const slug = (name: string) =>
  *  ranks a player holds no role until their first match finishes, so locking
  *  would leave every new player staring at a server with no queue they can see.
  *  With staff handing roles out first, that deadlock cannot happen. */
+/** One overwrite, in the shape permissionOverwrites.edit() takes. */
+type OwnedPerm = { id: string; options: PermissionOverwriteOptions };
+
+/** channels.create() wants allow/deny lists where edit() wants the record
+ *  above. The record is the single source and this translates it: writing the
+ *  same permissions out twice, in two shapes, is how the channel Quorum makes
+ *  and the channel Quorum keeps end up disagreeing. */
+const asOverwrite = (o: OwnedPerm) => {
+  const flags = (want: boolean) =>
+    (Object.keys(o.options) as (keyof typeof PermissionFlagsBits)[])
+      .filter((k) => o.options[k as keyof PermissionOverwriteOptions] === want)
+      .map((k) => PermissionFlagsBits[k]);
+  return { id: o.id, allow: flags(true), deny: flags(false) };
+};
+
+/** Writes the overwrites Quorum owns and leaves every other one alone.
+ *
+ *  NOT edit({ permissionOverwrites }), which is what this used to be: that
+ *  REPLACES the channel's whole list, and this sync runs on every dashboard
+ *  save - so an admin who gave somebody a voice in a rank channel by hand
+ *  watched it vanish the next time anyone touched the ladder. Anything the
+ *  server put there is now none of our business and survives the sync.
+ *
+ *  Ours that no longer belong are still removed: a rank role that drops out of
+ *  the spread has to lose its view, and this is the only place that can tell
+ *  that overwrite apart from one somebody added on purpose. */
+async function applyOwnedPerms(
+  channel: GuildBasedChannel,
+  desired: OwnedPerm[],
+  owned: Set<string>,
+) {
+  if (!('permissionOverwrites' in channel)) return;
+  const want = new Set(desired.map((o) => o.id));
+  // Everything on the channel that is not ours to touch, carried across exactly
+  // as it is: an id Quorum has never issued belongs to the server. An id of ours
+  // that is no longer wanted is simply left out, which is how a rank dropping
+  // out of a spread loses its view.
+  const theirs = [...channel.permissionOverwrites.cache.values()].filter(
+    (o) => !owned.has(o.id) && !want.has(o.id),
+  );
+  // One request, not one per overwrite. edit() and delete() are a round trip
+  // each, and a sync across every bracket channel would spend dozens of them on
+  // a rate limit shared with everything else the bot is trying to do.
+  await channel.permissionOverwrites
+    .set([...theirs, ...desired.map(asOverwrite)])
+    .catch(() => {});
+}
+
 async function syncRankChannelsToDiscord(
   guild: Guild,
   ranks: Rank[],
@@ -287,13 +337,17 @@ async function syncRankChannelsToDiscord(
 
   if (teardown) {
     for (const rank of ranks) await drop(rank);
-    if (cfg.split_results_id) {
-      await guild.channels.cache.get(cfg.split_results_id)?.delete().catch(() => {});
+    for (const id of [cfg.split_results_id, cfg.split_unranked_id]) {
+      if (id) await guild.channels.cache.get(id)?.delete().catch(() => {});
     }
     if (cfg.split_category_id) {
       await guild.channels.cache.get(cfg.split_category_id)?.delete().catch(() => {});
     }
-    setConfig(guild.id, { split_category_id: null, split_results_id: null });
+    setConfig(guild.id, {
+      split_category_id: null,
+      split_results_id: null,
+      split_unranked_id: null,
+    });
     return { ok: true };
   }
   if (!ranks.length) return { ok: true };
@@ -364,11 +418,72 @@ async function syncRankChannelsToDiscord(
   // two are separate questions, and Discord cannot ask both at once - a role
   // allow always beats a role deny, so there is no "this role AND that one".
   // The category setting is about the room; this is about the queue in it.
-  const onlyRank = (roleIds: string[]) => [
-    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-    ...roleIds.map((id) => ({ id, allow: [PermissionFlagsBits.ViewChannel] })),
-    ...meAllowed,
+  //
+  // It is also READ-ONLY. The channel holds one panel and a button; everything
+  // anyone has to say about a match belongs in that match's thread, and a queue
+  // channel people chat in is a panel nobody can find. So @everyone is denied
+  // Send Messages and the rank roles are not given it back.
+  //
+  // But threads stay open, which is the one flag that has to be said out loud:
+  // Send Messages and Send Messages in Threads are separate permissions, and
+  // locking the channel must not lock the matches inside it. The match thread
+  // is private and the bot adds exactly its players, so "anyone who can post in
+  // a thread here" already means "the two people in that match".
+  //
+  // A deny on the ROLE is deliberate rather than a deny on nobody: a member
+  // overwrite beats a role overwrite in Discord, so an admin can still hand one
+  // person a voice in one channel, and now it survives the next save.
+  const readOnly = {
+    SendMessages: false,
+    // nobody starts a thread off the panel - the bot opens the only ones that
+    // belong here, one per match
+    CreatePublicThreads: false,
+    CreatePrivateThreads: false,
+    SendMessagesInThreads: true,
+  };
+  const meFull: OwnedPerm[] = me
+    ? [
+        {
+          id: me,
+          options: {
+            ViewChannel: true,
+            SendMessages: true,
+            ManageChannels: true,
+            CreatePrivateThreads: true,
+            SendMessagesInThreads: true,
+            ManageThreads: true,
+          },
+        },
+      ]
+    : [];
+  const rankChannelPerms = (roleIds: string[]): OwnedPerm[] => [
+    { id: guild.roles.everyone.id, options: { ViewChannel: false, ...readOnly } },
+    ...roleIds.map((id) => ({ id, options: { ViewChannel: true, SendMessages: false } })),
+    ...meFull,
   ];
+
+  // The unranked queue: the same read-only channel, minus the lock. It is the
+  // one queue that must NOT be private to a bracket, because the players it
+  // exists for are the ones who have no bracket yet - a channel locked to the
+  // ranks would be invisible to every single person it is for.
+  //
+  // ViewChannel is left unsaid rather than set true, so it inherits the
+  // category: a server that keeps the whole of Quorum behind one role keeps
+  // this behind it too, which is that server's call and not ours to overrule.
+  const openChannelPerms = (): OwnedPerm[] => [
+    { id: guild.roles.everyone.id, options: { ViewChannel: null, ...readOnly } },
+    ...meFull,
+  ];
+
+  // Every overwrite id this sync is allowed to touch. The full ladder, not just
+  // the roles admitted here: a rank that drops out of one channel's spread has
+  // to lose its overwrite there, and an id we have never issued belongs to the
+  // server - see applyOwnedPerms().
+  const owned = new Set<string>([
+    guild.roles.everyone.id,
+    ...(me ? [me] : []),
+    ...[...ranks, ...orphaned].map((r) => r.discord_role_id).filter((id): id is string => !!id),
+  ]);
 
   // One category for the whole thing, whichever the server picked - or one of
   // ours if they picked none. Seven categories, one per rank, buried the
@@ -422,9 +537,43 @@ async function syncRankChannelsToDiscord(
   if (results && 'parentId' in results && results.parentId !== category.id) {
     await results.edit({ parent: category.id, lockPermissions: true }).catch(() => {});
   }
+  // The unranked queue, beside the results channel and open to whoever can see
+  // the category. It cannot live in a bracket channel: those are private to
+  // their roles, and the player this queue exists for is precisely the one
+  // holding no role - so the queue meant to let a newcomer in would be the one
+  // thing on the server they could not see.
+  //
+  // Optional, and off unless the server asked. Turning it off takes the channel
+  // with it, the same as a rank that leaves the ladder: Quorum made it, so
+  // Quorum clears it up rather than leaving a dead queue behind with a live
+  // button in it.
+  const wantUnranked = cfg.unranked_enabled === 1;
+  let unranked = cfg.split_unranked_id
+    ? (guild.channels.cache.get(cfg.split_unranked_id) ?? null)
+    : null;
+  if (!wantUnranked) {
+    await unranked?.delete().catch(() => {});
+    if (cfg.split_unranked_id) dropPanel(guild.id, cfg.split_unranked_id);
+    unranked = null;
+  } else {
+    unranked ??= (await guild.channels
+      .create({ name: 'unranked', type: ChannelType.GuildText, parent: category.id })
+      .catch(() => null)) as typeof unranked;
+    if (unranked) {
+      if ('parentId' in unranked && unranked.parentId !== category.id) {
+        await unranked.edit({ parent: category.id }).catch(() => {});
+      }
+      await applyOwnedPerms(unranked, openChannelPerms(), owned);
+      // Only when it is new. A repost every save would bin the panel people are
+      // looking at and put an identical one underneath it - "Post panel" on the
+      // dashboard is the button for doing that on purpose.
+      if (!cfg.split_unranked_id) await postPanel(unranked, PANEL_FORMATS, false);
+    }
+  }
   setConfig(guild.id, {
     split_category_id: category.id,
     split_results_id: results?.id ?? null,
+    split_unranked_id: unranked?.id ?? null,
   });
 
   // One channel per rank, holding one panel with every format's button: the
@@ -451,14 +600,14 @@ async function syncRankChannelsToDiscord(
         if (band.discord_role_id) admits.add(band.discord_role_id);
       }
     }
-    const perms = onlyRank([...admits]);
+    const perms = rankChannelPerms([...admits]);
     const existing = have.queue && guild.channels.cache.get(have.queue);
     if (existing) {
       // re-applied every sync: a renamed or recoloured rank keeps its channel,
       // and a rank whose role was recreated needs the new id in the overwrite.
-      await existing
-        .edit({ name, parent: category.id, permissionOverwrites: perms })
-        .catch(() => {});
+      // Ours only - the server's own overwrites here are left where they are.
+      await existing.edit({ name, parent: category.id }).catch(() => {});
+      await applyOwnedPerms(existing, perms, owned);
       setRankChannels(rank.id, { queue: existing.id });
       continue;
     }
@@ -468,7 +617,7 @@ async function syncRankChannelsToDiscord(
         name,
         type: ChannelType.GuildText,
         parent: category.id,
-        permissionOverwrites: perms,
+        permissionOverwrites: perms.map(asOverwrite),
       })
       .catch(() => null);
     if (!made) continue;
@@ -544,7 +693,11 @@ async function clearPanels(channel: GuildBasedChannel | undefined) {
   }
 }
 
-async function postPanel(channel: GuildBasedChannel | undefined, formats: readonly Format[]) {
+async function postPanel(
+  channel: GuildBasedChannel | undefined,
+  formats: readonly Format[],
+  ranked = true,
+) {
   if (!channel?.isSendable()) return false;
   await clearPanels(channel);
   // A refused send is nearly always a missing Send Messages in that one
@@ -552,10 +705,15 @@ async function postPanel(channel: GuildBasedChannel | undefined, formats: readon
   // be swallowed either - a queue channel with no panel is a dead queue, and
   // the whole reason this button exists is that nobody could tell.
   const posted = await channel
-    .send(panelMessage(formats, channel.guild.id, channel.id))
+    .send(panelMessage(formats, channel.guild.id, channel.id, ranked))
     .catch(() => null);
   if (posted) {
-    setPanel(channel.guild.id, { channel: channel.id, message: posted.id, formats: [...formats] });
+    setPanel(channel.guild.id, {
+      channel: channel.id,
+      message: posted.id,
+      formats: [...formats],
+      ranked,
+    });
   }
   return !!posted;
 }
@@ -913,8 +1071,9 @@ export function startWeb(client: Client, hooks: Hooks) {
         // With staff-owned brackets the ROLE is the bracket, so the list has to
         // read it off the member rather than off the rating - a 1050 in a
         // ladder whose top floor is 300 is not Elite, they are whatever you put
-        // them in. One member at a time by id, which needs no privileged
-        // intent, and discord.js caches each one after the first load.
+        // them in. Normally a no-op now that the members intent warms the whole
+        // cache at boot - this is what covers anyone who joined since, and what
+        // kept the pane right back when there was no intent to warm it.
         const manual = getRankMode(guildId) === 'manual';
         if (manual) {
           await Promise.all(
@@ -966,6 +1125,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           // server has put anything under it yet
           mains: MAIN_CATEGORIES,
           spread: getRankSpread(guildId),
+          unranked: getConfig(guildId).unranked_enabled === 1,
           categories: guild.channels.cache
             .filter((c) => c.type === ChannelType.GuildCategory)
             .map((c) => ({ id: c.id, name: c.name })),
@@ -990,10 +1150,41 @@ export function startWeb(client: Client, hooks: Hooks) {
           history: matchHistory(guildId, 25).map(({ match, players }) => {
             const played: string[] = JSON.parse(match.scenarios);
             const pool: string[] = match.ban_pool ? JSON.parse(match.ban_pool) : [];
+            // The scores that COUNTED, not the raw ones. A scenario somebody
+            // stopped short on scored 0 in the maths, so a history showing the
+            // run they walked away from has them winning a round the result
+            // says they lost - and now that the winning score is marked, it
+            // would mark the loser's. Same call the Discord card makes.
+            const counted = forfeits(
+              players.map((r) => ({
+                id: r.discord_id,
+                scores: JSON.parse(r.scores) as Record<string, number | null>,
+                runCounts: r.run_counts
+                  ? (JSON.parse(r.run_counts) as Record<string, number>)
+                  : null,
+              })),
+              played,
+              getFormat(guildId).runs,
+            );
+            // Who took each scenario, worked out the same way the placings
+            // were: the bold score and the medal beside the name are one sum
+            // counted twice, and they must never disagree.
+            const took = scenarioWinners(
+              players.map((r) => ({
+                id: r.discord_id,
+                elo: 0,
+                team: r.team,
+                scores: counted.get(r.discord_id)!,
+              })),
+              played,
+            );
             return {
               id: match.id,
               format: match.format,
               ended_at: match.ended_at,
+              // An unranked row has no elo_before/after, so the delta below
+              // works out to a "+0" that reads as a rated game worth nothing.
+              ranked: match.ranked !== 0,
               played,
               // What is in the pool but not in the end is exactly what was
               // banned. Empty for group and for any match that never had a
@@ -1003,7 +1194,10 @@ export function startWeb(client: Client, hooks: Hooks) {
                 name: r.kovaaks_username,
                 placing: r.placing,
                 delta: (r.elo_after ?? 0) - (r.elo_before ?? 0),
-                scores: JSON.parse(r.scores) as Record<string, number | null>,
+                scores: counted.get(r.discord_id)!,
+                // the scenarios this player's side took, which is what the page
+                // puts in bold. A tie belongs to nobody, so nothing is marked.
+                took: played.filter((_, i) => took[i] != null && took[i] === r.team),
               })),
             };
           }),
@@ -1286,7 +1480,31 @@ export function startWeb(client: Client, hooks: Hooks) {
               return `${f} queues with **${say(wasSpread[f])}** → **${say(nowSpread[f])}**`;
             }),
         );
-        json(res, 200, { spread: nowSpread });
+        // The unranked queue rides along here because it is a queue setting -
+        // and because turning it on or off is a channel appearing or going, so
+        // it has to reach Discord and not only the database.
+        const wasOpen = getConfig(guildId).unranked_enabled === 1;
+        const nowOpen = body.unranked === true;
+        let built: { ok: boolean; error?: string } = { ok: true };
+        if (wasOpen !== nowOpen) {
+          setConfig(guildId, { unranked_enabled: nowOpen ? 1 : null });
+          await announce(guild, session.user.id, [
+            nowOpen
+              ? 'Unranked queue is **on** - anyone can play, nothing is rated'
+              : 'Unranked queue is **off**',
+          ]);
+          // Awaited, so a failure is reported rather than swallowed - a toggle
+          // that says Saved while the channel it promised is missing is worse
+          // than one that says why not.
+          built = await syncRankChannelsToDiscord(guild, getRanks(guildId), []);
+          // ...and the sync has its own quiet way out: it builds nothing at all
+          // until the ladder exists, so on a fresh server this would report ok
+          // and leave no channel behind. Checked rather than assumed.
+          if (nowOpen && !built.error && !getConfig(guildId).split_unranked_id) {
+            built = { ok: false, error: 'set up the rank ladder first - the channels are built with it' };
+          }
+        }
+        json(res, 200, { spread: nowSpread, unranked: nowOpen, error: built.error });
         return;
       }
 
@@ -1341,32 +1559,51 @@ export function startWeb(client: Client, hooks: Hooks) {
         return;
       }
 
-      if (action === '/seeds' && req.method === 'PUT') {
+      // Correcting a rating, whether or not it has been played for. seedPlayer
+      // cannot do this and must not learn how: it refuses anyone with a record
+      // on purpose, and that refusal is what stops a re-seed erasing a season.
+      // So this is the only way to fix a placement without the reset that would
+      // throw the record away with it.
+      if (action === '/rating' && req.method === 'PUT') {
         const body = await readJson(req);
-        // seedPlayer rewrites the rating of anyone who has not played, so an id
-        // from the request is not enough - it has to be someone this server has.
+        // Same guard as the seeds route: an id in a request body is not proof
+        // that this server has any business moving that player's rating.
         const mine = new Set(playersInGuild(guildId).map((p) => p.discord_id));
-        const ranks = getRanks(guildId);
-        const moved: string[] = [];
-        for (const row of Array.isArray(body.seeds) ? body.seeds : []) {
-          const id = String(row.discord_id ?? '');
-          const rank = ranks.find((r) => r.name === String(row.rank ?? ''));
-          if (!mine.has(id) || !rank) continue;
-          // An exact rating beats the band's floor, for placing somebody whose
-          // level is known - bottom of Elite is not where a top Elite starts.
-          // Bounded and rounded here, not trusted: this comes from a browser.
-          const asked = Number(row.elo);
-          const elo =
-            Number.isFinite(asked) && asked >= 0 && asked <= 5000
-              ? Math.round(asked)
-              : rank.min_elo;
-          if (seedPlayer(id, elo, rank.name)) moved.push(id);
+        const id = String(body.discord_id ?? '');
+        if (!mine.has(id)) {
+          json(res, 404, { error: 'nobody by that id plays here' });
+          return;
         }
-        // Hand out the roles now rather than after their first match: a rank
-        // channel is private to its role, so a seeded player who holds none
-        // would be seeded into a queue they cannot see.
-        if (moved.length) await hooks.syncRankRoles(guildId, moved);
-        json(res, 200, { players: playersInGuild(guildId) });
+        // Bounded and rounded here, not trusted: this comes from a browser.
+        const asked = Number(body.elo);
+        if (!Number.isFinite(asked) || asked < 0 || asked > 5000) {
+          json(res, 400, { error: 'a rating has to be a number from 0 to 5000' });
+          return;
+        }
+        const moved = setPlayerElo(id, asked);
+        if (!moved) {
+          json(res, 404, { error: 'nobody by that id plays here' });
+          return;
+        }
+        // Announced for the reason setPlayerElo returns this at all - staff
+        // moving somebody up the ladder by hand should not be the one change
+        // here that leaves no trace. Never blocks the save, see announce().
+        if (moved.was !== moved.now) {
+          await announce(guild, session.user.id, [
+            `Rating: ${moved.name} ${moved.was} → ${moved.now}`,
+          ]);
+        }
+        // Automatic mode reads the rank off the rating, so the role has to
+        // follow it here or Discord and the ladder disagree until their next
+        // match. Manual mode owns its own roles and is left alone - moving one
+        // is staff's decision there, and this is not it.
+        if (getRankMode(guildId) !== 'manual') await hooks.syncRankRoles(guildId, [id]);
+        // Just what moved, not the whole list. playersInGuild carries none of
+        // the things the GET above hangs off each row - the avatar, the S5
+        // standing, and in manual mode the division that IS their rank - so
+        // handing the page a fresh list would blank the rank off every row on
+        // this pane the moment one rating was corrected.
+        json(res, 200, { discord_id: id, elo: moved.now });
         return;
       }
 
@@ -1382,6 +1619,14 @@ export function startWeb(client: Client, hooks: Hooks) {
             const id = rankChannels(rank).queue;
             if (!id) continue;
             if (await postPanel(guild.channels.cache.get(id), PANEL_FORMATS)) posted++;
+            else missed++;
+          }
+          // The unranked queue has a panel to lose the same way the brackets do,
+          // and it is the one nobody would think to check - it is not a rank, so
+          // nothing on the ladder page points at it.
+          const open = getConfig(guildId).split_unranked_id;
+          if (open) {
+            if (await postPanel(guild.channels.cache.get(open), PANEL_FORMATS, false)) posted++;
             else missed++;
           }
           if (!posted && !missed) {

@@ -32,6 +32,7 @@ const {
   setRanks,
   setScenarios,
   seedPlayer,
+  setPlayerElo,
   db,
 } = await import('./db.js');
 const { rankFor } = await import('./rating.js');
@@ -140,6 +141,19 @@ assert.equal(getPlayer('u1')!.seeded_from, 'Diamond');
 db.prepare('update player set wins = 3, elo = 1400 where discord_id = ?').run('u1');
 assert.equal(seedPlayer('u1', 950, 'Silver'), false, 'a played record refuses a re-seed');
 assert.equal(getPlayer('u1')!.elo, 1400, 'and keeps its rating');
+
+// The other half of the same job: correcting a rating that HAS been played for.
+// u1 is sitting on 3 wins and 1400 from the re-seed refusal just above, which is
+// exactly the row seeding will not touch and this one has to.
+{
+  const moved = setPlayerElo('u1', 1120);
+  assert.deepEqual(moved, { name: 'fresh', was: 1400, now: 1120 }, 'it reports what it moved');
+  assert.equal(getPlayer('u1')!.elo, 1120, 'the rating moves');
+  assert.equal(getPlayer('u1')!.wins, 3, 'and the record that earned it does not');
+  assert.equal(getPlayer('u1')!.seeded_from, 'Diamond', 'nor where they started');
+  assert.equal(setPlayerElo('u1', 1120.6)!.now, 1121, 'and a fraction is rounded to a rating');
+  assert.equal(setPlayerElo('nobody', 1000), null, 'a stranger is not moved into existence');
+}
 
 // A seed at creation is honoured, and never moved by a later sighting.
 ensurePlayer('u2', 'seeded', null, { elo: 1190, from: 'Voltaic Master' });
