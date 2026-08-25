@@ -2119,8 +2119,10 @@ async function renderGuild(guild) {
       <tr>
         <td style="width:1px"><img class="pfp" src="\${avatarUrl({ id: p.discord_id, avatar: p.avatar })}" alt="" /></td>
         <td style="width:100%">
-          <a class="pname" href="/p/\${h(guild.id)}/\${h(p.discord_id)}" target="_blank" rel="noopener"
-             title="Their page - open to anyone with the link">\${h(p.kovaaks_username)}</a>
+          \${data.config.visible_role_id
+            ? h(p.kovaaks_username)
+            : \`<a class="pname" href="/p/\${h(guild.id)}/\${h(p.discord_id)}" target="_blank" rel="noopener"
+                 title="Their page - open to anyone with the link">\${h(p.kovaaks_username)}</a>\`}
           <span class="hint">\${p.wins}W \${p.losses}L\${p.draws ? ' ' + p.draws + 'D' : ''}</span>
         </td>
         <td style="white-space:nowrap">\${voltaicChip(p.voltaic)}</td>
@@ -2397,8 +2399,11 @@ function spark(values: number[]) {
  */
 export function profilePage(p: Profile): string {
   const games = p.wins + p.losses + p.draws;
+  // The hash comes off Discord rather than out of the database, so it is
+  // escaped like anything else that arrived from somewhere else - a quote in it
+  // would otherwise be a quote out of the attribute.
   const avatar = p.avatar
-    ? `https://cdn.discordapp.com/avatars/${p.discordId}/${p.avatar}.png?size=80`
+    ? esc(`https://cdn.discordapp.com/avatars/${p.discordId}/${p.avatar}.png?size=80`)
     : `https://cdn.discordapp.com/embed/avatars/${(BigInt(p.discordId) >> 22n) % 6n}.png`;
   const recent = [...p.history].reverse().slice(0, 10);
   // What the card in Discord says. The page gets pasted into chat far more than
@@ -2515,7 +2520,11 @@ ${p.rank ? `<meta name="theme-color" content="${esc(p.rank.color)}" />` : ''}
       <span class="n"><b>${c.won}</b>–${c.lost}</span></div>`,
           )
           .join('\n  ')
-      : '<p class="empty">Nothing played yet.</p>'
+      : `<p class="empty">${
+          // Played, but nothing that files anywhere: every scenario they ran
+          // has since left the pool, so there is no main to count it under.
+          games ? 'Nothing under the current pool.' : 'Nothing played yet.'
+        }</p>`
   }
 
   <h2>${recent.length ? `Last ${recent.length} ${recent.length === 1 ? 'game' : 'games'}` : 'Games'}</h2>
@@ -2535,7 +2544,15 @@ ${p.rank ? `<meta name="theme-color" content="${esc(p.rank.color)}" />` : ''}
               .join(' &amp; ')}</span>`
           : ''
       }
-      ${m.at ? `<time datetime="${new Date(m.at).toISOString()}"></time>` : ''}
+      ${
+        // The date is rendered here and only re-stated in the viewer's own
+        // locale below, so a page with no JavaScript still has one.
+        m.at
+          ? `<time datetime="${new Date(m.at).toISOString()}">${new Date(m.at)
+              .toISOString()
+              .slice(0, 10)}</time>`
+          : ''
+      }
       <span class="d${m.delta < 0 ? ' down' : ''}">${m.delta >= 0 ? '+' : ''}${m.delta}</span></div>`,
           )
           .join('\n  ')

@@ -32,6 +32,7 @@ import {
   getScenarios,
   getRankMode,
   categoryRecord,
+  playedIn,
   recentMatches,
   guildStats,
   leaderboard,
@@ -845,11 +846,21 @@ interface Hooks {
   refreshPanels: () => Promise<void>;
 }
 
-/** Where a player's page lives, or null where there is no dashboard running to
- *  serve it - startWeb() gives up on the same two variables, and a link to a
- *  port nothing is listening on is worse than no link. */
+/** Whether this server's ladder is a thing to publish, and whether this player
+ *  is part of it. One rule, read by the route that serves the page and by every
+ *  link that offers it - a link somewhere the route refuses is a 404 with a
+ *  promise attached. */
+const pageIsPublic = (guildId: string, discordId: string) =>
+  !getConfig(guildId).visible_role_id && playedIn(discordId, guildId);
+
+/** Where a player's page lives, or null where there is nothing to link to: no
+ *  dashboard running (startWeb() gives up on the same two variables, and a link
+ *  to a port nothing is listening on is worse than no link), or a page the
+ *  route would refuse anyway. */
 export const profileUrl = (guildId: string, discordId: string) =>
-  CLIENT_ID && CLIENT_SECRET ? `${BASE_URL}/p/${guildId}/${discordId}` : null;
+  CLIENT_ID && CLIENT_SECRET && pageIsPublic(guildId, discordId)
+    ? `${BASE_URL}/p/${guildId}/${discordId}`
+    : null;
 
 export function startWeb(client: Client, hooks: Hooks) {
   if (!CLIENT_ID || !CLIENT_SECRET) {
@@ -879,13 +890,22 @@ export function startWeb(client: Client, hooks: Hooks) {
       // A player's page, and the one thing here that is not behind a sign-in:
       // it exists to be pasted somewhere, and a link that asks whoever opens it
       // for Manage Server is not a link. It says what the results channel and
-      // the leaderboard message already say out loud.
+      // the leaderboard message already say out loud - which is also the limit
+      // of what it may say, hence the two refusals below.
       const who = /^\/p\/(\d{1,32})\/(\d{1,32})$/.exec(path);
       if (who && req.method === 'GET') {
         const [, guildId, discordId] = who;
         const guild = guildAllowed(guildId) ? client.guilds.cache.get(guildId) : undefined;
         const player = getPlayer(discordId);
-        if (!guild || !player) {
+        // Ratings are global and this page is not. A player this server has
+        // never seen is not this server's to publish - the same rule the
+        // players pane is built on, and the reason it reads playersInGuild.
+        //
+        // And a server that put its category behind one role has said its
+        // ladder is not public; a page anyone can open would be the way round
+        // that. Both refusals are the same 404 as an id that never existed,
+        // because saying which of the three it was is itself an answer.
+        if (!guild || !player || !pageIsPublic(guildId, discordId)) {
           res.writeHead(404, { 'content-type': 'text/plain' }).end('no such player');
           return;
         }
@@ -894,7 +914,10 @@ export function startWeb(client: Client, hooks: Hooks) {
         const band = rankLabel(guildId, discordId, player.elo, guild);
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
-          'cache-control': 'no-store',
+          // A minute is long enough for Discord's unfurler to stop asking twice
+          // for one paste, and short enough that a match result shows up while
+          // people are still talking about it.
+          'cache-control': 'public, max-age=60',
         });
         res.end(
           profilePage({

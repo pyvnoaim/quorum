@@ -840,6 +840,21 @@ export function playersInGuild(guildId: string) {
     .all(guildId) as unknown as Player[];
 }
 
+/** Has this server ever seen them? The same test playersInGuild() lists by, for
+ *  one player instead of all of them.
+ *
+ *  Ratings are global and the player LIST is not, on purpose: without this a
+ *  server could read the record of somebody who has never been in it. Anything
+ *  that answers for a named player in a named server has to ask this first. */
+export function playedIn(discordId: string, guildId: string) {
+  return !!db
+    .prepare(
+      `select 1 from match_player mp join match m on m.id = mp.match_id
+       where mp.discord_id = ? and m.guild_id = ? limit 1`,
+    )
+    .get(discordId, guildId);
+}
+
 /** Moves an unplayed player's starting rating. Once someone has played, their
  *  record is the truth - re-seeding then would wipe it, so it does nothing. */
 export function seedPlayer(discordId: string, elo: number, from: string) {
@@ -1087,6 +1102,10 @@ export interface Opponent {
  *  the same forfeited scores and the same scenarioWinners() the result card
  *  prints, so the breakdown and the scoreline can never disagree.
  *
+ *  ponytail: re-read from the rows on every call, no running total anywhere. A
+ *  player's whole history is two rows per match and this is one query - keep a
+ *  per-player tally on the player row if somebody ever gets to five figures.
+ *
  *  Unranked games are left out, the same as the W/L they never wrote. A
  *  scenario since dropped from the pool has no main left to file under and is
  *  skipped rather than guessed at, and so is a round nobody took. */
@@ -1112,7 +1131,11 @@ export function categoryRecord(discordId: string, guildId: string) {
   for (const group of byMatch.values()) {
     const me = group.find((r) => r.discord_id === discordId);
     if (!me) continue;
-    const scenarios = JSON.parse(group[0].scenarios) as string[];
+    // A match still in its pick phase keeps the PHASE in this column, not a
+    // list - and this reads finished matches on a page anyone can open, so it
+    // checks rather than trusting that no row is ever mid-flight.
+    const scenarios = JSON.parse(group[0].scenarios) as unknown;
+    if (!Array.isArray(scenarios)) continue;
     const scores = forfeits(
       group.map((r) => ({
         id: r.discord_id,

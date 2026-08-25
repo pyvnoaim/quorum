@@ -29,6 +29,7 @@ const {
   setRankChannels,
   setRankSpread,
   playersInGuild,
+  playedIn,
   setRankRole,
   setRanks,
   setScenarios,
@@ -324,6 +325,12 @@ assert.equal(claim(), 0, 'the second has nothing to score');
     ['Two'],
     'and nobody on their own',
   );
+
+  // The gate the public player page hangs off: a global rating is not a
+  // server's to publish unless that server has actually seen them.
+  assert.equal(playedIn('h1', 'gh'), true);
+  assert.equal(playedIn('h1', 'other'), false, 'never been in that one');
+  assert.equal(playedIn('nobody', 'gh'), false);
 }
 
 // Rounds by category: won where their side took the scenario, and filed under
