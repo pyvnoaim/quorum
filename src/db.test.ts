@@ -394,6 +394,25 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   assert.deepEqual(resetRatings('gr', 'r2'), { reset: [], shared: 1 }, 'not one who plays elsewhere');
   assert.equal(getPlayer('r2')!.elo, 1300, 'left exactly as it was');
   assert.deepEqual(resetRatings('gr', 'nobody'), { reset: [], shared: 0 }, 'nor a stranger');
+
+  // Back to where they STARTED, not to the flat rating. Someone wearing an
+  // Intermediate role starts at Intermediate's floor - and a reset that dropped
+  // them on BASE_ELO left them two divisions above the role they still had on,
+  // with nothing to put it right: seedFor only seeds a player it has never seen,
+  // so the row surviving the reset meant nothing re-seeded them, ever.
+  db.prepare("update player set elo = 900, wins = 4 where discord_id = 'r1'").run();
+  resetRatings('gr', 'r1', new Map([['r1', { elo: 400, from: 'Intermediate' }]]));
+  const reseeded = getPlayer('r1')!;
+  assert.equal(reseeded.elo, 400, 'the division floor, not 1050');
+  assert.equal(reseeded.seeded_from, 'Intermediate', 'and the row says where that came from');
+  assert.equal(reseeded.wins, 0, 'still unplayed again');
+
+  // Nobody in the map is still the flat rating - a server on flat seeding, or a
+  // player wearing no division role at all.
+  db.prepare("update player set elo = 900 where discord_id = 'r1'").run();
+  resetRatings('gr', 'r1', new Map());
+  assert.equal(getPlayer('r1')!.elo, 1050, 'unplaced falls back to flat');
+  assert.equal(getPlayer('r1')!.seeded_from, null);
 }
 
 // A panel counts the channel it sits in, not the whole server - the same

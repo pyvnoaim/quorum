@@ -13,6 +13,7 @@ import {
   MAIN_CATEGORIES,
   PANEL_FORMATS,
   SEED_MODES,
+  VOLTAIC_SEED,
   guildAllowed,
   isMain,
   type Format,
@@ -562,6 +563,16 @@ async function syncRankChannelsToDiscord(
     if (unranked) {
       if ('parentId' in unranked && unranked.parentId !== category.id) {
         await unranked.edit({ parent: category.id }).catch(() => {});
+      }
+      // Directly under #results, rather than wherever Discord happened to put
+      // it. A channel created later is appended to the END of its category, so
+      // the one queue that is open to everybody sat below every queue that is
+      // not - reading as the afterthought instead of the way in. Re-checked
+      // each sync but only written when it is actually wrong, so this is one
+      // request when the channel is new and none ever after.
+      if (results && 'position' in results && 'setPosition' in unranked) {
+        const want = results.position + 1;
+        if (unranked.position !== want) await unranked.setPosition(want).catch(() => {});
       }
       await applyOwnedPerms(unranked, openChannelPerms(), owned);
       // Only when it is new. A repost every save would bin the panel people are
@@ -1365,7 +1376,37 @@ export function startWeb(client: Client, hooks: Hooks) {
         // touches people who have played HERE, and nowhere else.
         const named = (await readJson(req)).player;
         const only = typeof named === 'string' ? named : undefined;
-        const { reset, shared } = resetRatings(guildId, only);
+        // Where each of them should land, worked out BEFORE the reset: it reads
+        // Discord roles, and the transaction that writes the ratings cannot
+        // await anything. A superset of who actually gets reset is fine, since
+        // the extras are simply never looked up.
+        const mode = getSeedMode(guildId);
+        const ladder = getRanks(guildId);
+        const roster = playersInGuild(guildId);
+        if (mode === 'staff') {
+          // Same reason the players pane does this: a member Discord has not
+          // handed over yet has no roles to read, and reading none would reset
+          // them to the flat rating rather than to their division.
+          await Promise.all(
+            roster
+              .filter((p) => !guild.members.cache.has(p.discord_id))
+              .slice(0, 60)
+              .map((p) => guild.members.fetch(p.discord_id).catch(() => null)),
+          );
+        }
+        const seeds = new Map<string, { elo: number; from: string }>();
+        for (const p of roster) {
+          if (mode === 'staff') {
+            const held = guild.members.cache.get(p.discord_id)?.roles.cache.map((r) => r.id) ?? [];
+            const band = rankForRoles(ladder, held);
+            if (band) seeds.set(p.discord_id, { elo: band.min_elo, from: band.name });
+          } else if (mode === 'voltaic') {
+            const s5 = readVoltaic(p.voltaic);
+            const elo = s5 ? VOLTAIC_SEED[s5.rank as string] : undefined;
+            if (s5 && elo != null) seeds.set(p.discord_id, { elo, from: `Voltaic ${s5.rank}` });
+          }
+        }
+        const { reset, shared } = resetRatings(guildId, only, seeds);
         // Auto mode: everyone is back at the starting rating, so their rank
         // roles have to follow or the ladder says one thing and Discord another.
         // In manual mode this call knows to do nothing.

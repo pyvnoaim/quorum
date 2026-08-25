@@ -1454,9 +1454,9 @@ async function renderGuild(guild) {
 
     <div class="cat danger" style="margin-top:32px">
       <div class="cat-top"><strong>Reset ratings</strong></div>
-      <p class="muted" style="margin:0 0 12px">Everyone back to the starting rating and unplayed again, so
-      starting ranks can be set afresh. Matches stay in History. Anyone who also plays Quorum in another server
-      is left alone.</p>
+      <p class="muted" style="margin:0 0 12px">Everyone unplayed again, each back to where their division
+      role starts them. Matches stay in History. Anyone who also plays Quorum in another server is left
+      alone.</p>
       <div class="bar">
         <span class="status" id="resetstatus" style="margin-left:auto"></span>
         <button class="btn bad" id="resetbtn">Reset ratings</button>
@@ -2179,7 +2179,7 @@ async function renderGuild(guild) {
   scope.querySelectorAll('[data-reset]').forEach((el) => (el.onclick = async () => {
     const ok = await confirmDanger({
       title: \`Reset \${el.dataset.name}'s rating?\`,
-      body: 'They go back to the starting rating with no wins or losses, and can be given a starting rank again. Matches they have played stay in History.',
+      body: 'They go back to where their division role starts them, with no wins or losses. Matches they have played stay in History.',
       name: el.dataset.name,
       confirm: 'Reset rating',
     });
@@ -2214,7 +2214,7 @@ async function renderGuild(guild) {
     const el = document.getElementById('resetstatus');
     const ok = await confirmDanger({
       title: \`Reset every rating in \${guild.name}?\`,
-      body: 'Every player who plays here and nowhere else goes back to the starting rating with no wins or losses, and can be given a starting rank again. Matches already played stay in History.',
+      body: 'Every player who plays here and nowhere else goes back to where their division role starts them, with no wins or losses. Matches already played stay in History.',
       name: guild.name,
       confirm: 'Reset ratings',
     });

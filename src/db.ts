@@ -770,6 +770,17 @@ export function listOpenMatches(guildId: string) {
 export function resetRatings(
   guildId: string,
   only?: string,
+  /** Where each player should land, by id - the same answer seeding would give
+   *  if they were arriving for the first time. Anyone missing from it falls
+   *  back to BASE_ELO.
+   *
+   *  Passed in rather than worked out here because the answer lives in Discord:
+   *  with staff-owned brackets a player's starting rating is the floor of the
+   *  division role they are wearing, and this file cannot see a role. Without
+   *  it a reset put everyone on BASE_ELO and left them there - seedFor only
+   *  ever seeds a player it has never seen, so the row surviving the reset
+   *  meant nothing re-seeded them, ever. */
+  seeds?: Map<string, { elo: number; from: string }>,
 ): { reset: string[]; shared: number } {
   // A rating is GLOBAL - one row per player, whatever server they earned it in.
   // So this resets only the people who play here and nowhere else: one server's
@@ -797,10 +808,17 @@ export function resetRatings(
     : playersInGuild(guildId);
 
   const stmt = db.prepare(
-    'update player set elo = ?, wins = 0, losses = 0, draws = 0, seeded_from = null where discord_id = ?',
+    'update player set elo = ?, wins = 0, losses = 0, draws = 0, seeded_from = ? where discord_id = ?',
   );
   tx(() => {
-    for (const id of ids) stmt.run(BASE_ELO, id);
+    for (const id of ids) {
+      // Back to where they STARTED, which is not the same as back to the flat
+      // rating: someone wearing an Intermediate role starts at Intermediate's
+      // floor, and a reset that put them on BASE_ELO handed them a rating two
+      // divisions above the role they are still wearing.
+      const seed = seeds?.get(id);
+      stmt.run(seed ? Math.round(seed.elo) : BASE_ELO, seed?.from ?? null, id);
+    }
   });
   return { reset: ids, shared: here.length - ids.length };
 }
