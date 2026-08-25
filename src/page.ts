@@ -2373,27 +2373,54 @@ export interface Profile {
 const esc = (s: string) =>
   s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
-/** The rating curve: a filled area under a line. Stretched to the box with
- *  preserveAspectRatio and kept at one pixel by non-scaling-stroke, which is
- *  the whole reason this needs no measuring and no chart library. */
+/**
+ * The rating curve: a smoothed line, a gradient under it, a dot on where they
+ * are now. Stretched to the box with preserveAspectRatio, so nothing here has
+ * to know how wide the page is - and every stroke carries non-scaling-stroke,
+ * which is what keeps that stretch from turning 1.5px into a wedge.
+ *
+ * The smoothing is Catmull-Rom read as cubic beziers: each point's handles
+ * point along the line between its neighbours, which is one line of arithmetic
+ * per segment and the reason this needs no chart library. Handles are clamped
+ * to the box, or a sharp spike bows the curve out through the floor.
+ */
 function spark(values: number[]) {
   if (values.length < 2) return '';
   const lo = Math.min(...values);
   const hi = Math.max(...values);
   // A rating that never moved is a line down the MIDDLE. Dividing by a zero
   // span would pin it to the floor of the box, which reads as a collapse.
-  // The 4/26 inset keeps the highest and lowest points off the edges, where a
+  // The 4/28 inset keeps the highest and lowest points off the edges, where a
   // 1.5px stroke would be half clipped.
   const at = (n: number) => (hi === lo ? 0.5 : (n - lo) / (hi - lo));
-  const pts = values.map((n, i) => `${(i / (values.length - 1)) * 100},${28 - at(n) * 24}`);
-  return (
-    '<svg class="spark" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">' +
-    // The fill is the same shape closed along the floor. Drawn first, so the
-    // line sits on top of its own shading rather than under it.
-    `<polygon points="0,32 ${pts.join(' ')} 100,32" fill="currentColor" opacity="0.09" />` +
-    `<polyline points="${pts.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.5" ` +
-    'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>'
-  );
+  const pts = values.map((n, i) => [(i / (values.length - 1)) * 100, 28 - at(n) * 24]);
+  const round = (n: number) => Math.round(n * 100) / 100;
+  const box = (y: number) => Math.max(2, Math.min(30, y));
+
+  let d = `M ${round(pts[0][0])} ${round(pts[0][1])}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [p0, p1, p2, p3] = [pts[i - 1] ?? pts[i], pts[i], pts[i + 1], pts[i + 2] ?? pts[i + 1]];
+    d +=
+      ` C ${round(p1[0] + (p2[0] - p0[0]) / 6)} ${round(box(p1[1] + (p2[1] - p0[1]) / 6))}` +
+      ` ${round(p2[0] - (p3[0] - p1[0]) / 6)} ${round(box(p2[1] - (p3[1] - p1[1]) / 6))}` +
+      ` ${round(p2[0])} ${round(p2[1])}`;
+  }
+  const [x, y] = pts.at(-1)!;
+
+  return /* html */ `<svg class="spark" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">
+      <defs><linearGradient id="sparkfill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="currentColor" stop-opacity="0.24" />
+        <stop offset="1" stop-color="currentColor" stop-opacity="0" />
+      </linearGradient></defs>
+      <path d="${d} L 100 32 L 0 32 Z" fill="url(#sparkfill)" />
+      <path d="${d}" fill="none" stroke="currentColor" stroke-width="1.5"
+        stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+      <!-- Where they are now. A <circle> would come out an ellipse in a box
+           this stretched; a zero-length round-capped stroke is a real circle at
+           any aspect, because non-scaling-stroke measures it in screen pixels. -->
+      <line x1="${round(x)}" y1="${round(y)}" x2="${round(x)}" y2="${round(y)}" stroke="currentColor"
+        stroke-width="5" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+    </svg>`;
 }
 
 /**
@@ -2455,7 +2482,11 @@ export function profilePage(p: Profile): string {
 
   ${
     p.history.length > 1
-      ? `<div class="curve">
+      ? `<div class="curve"${
+          // Their bracket's colour, mixed the same way the rank label mixes it -
+          // so the curve belongs to the same ladder the dot on their name does.
+          p.rank ? ` style="--c:${esc(p.rank.color)}"` : ''
+        }>
     ${spark(p.history.map((h) => h.elo))}
     <div class="k">Rating over the last ${p.history.length} games · ${
       p.history[0].elo
@@ -2596,9 +2627,17 @@ ${TOKENS}
   /* No box round the curve: a nearly-flat line in a bordered panel is mostly
      empty panel. It sits on the page with its caption under it, the way a
      figure does. */
-  .curve { margin-top: 22px; }
+  .curve { margin-top: 22px; --c: var(--fg); }
   .curve .k { font-size: 12px; color: var(--muted); margin-top: 8px; }
-  .spark { width: 100%; height: 84px; color: var(--fg); display: block; }
+  /* The line, its gradient and its end dot all read currentColor, so tinting
+     the block tints the chart - and a bracket colour at full strength on a dark
+     ground is a highlighter, hence the mix back towards the text colour. */
+  /* overflow visible, or the dot on the last point - which sits exactly on the
+     right edge - is drawn as a half moon by the svg viewport clipping it. */
+  .spark {
+    width: 100%; height: 84px; display: block; overflow: visible;
+    color: color-mix(in srgb, var(--c) 62%, var(--fg));
+  }
   .progress { display: block; height: 3px; border-radius: 999px; background: var(--line); }
   .progress i { display: block; height: 100%; border-radius: 999px; background: var(--fg); }
   table { width: 100%; border-collapse: collapse; }
