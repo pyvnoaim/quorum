@@ -125,9 +125,11 @@ for (const stmt of [
   // Optional: where the bot says what staff changed, so players hear about a
   // new scenario pool from the server rather than from losing a match on it.
   'alter table guild_config add column announce_channel_id text',
-  // The lowest rank a scenario is offered to, as that rank's Elo threshold.
-  // 0 is the whole ladder, which is what every scenario was before this.
-  'alter table scenario add column min_elo integer not null default 0',
+  // Which ranks a scenario is offered to: a JSON array of rank ids, or null
+  // for every rank. Named ranks rather than a threshold, because "hard
+  // switching is for Challenger and Master" is not a floor - the brackets that
+  // play a thing are the brackets someone picked, and they need not be a run.
+  'alter table scenario add column rank_ids text',
   // Which of the three fixed mains a category rolls up into. A category named
   // after a main is its own main; everything else is a subcategory of one.
   'alter table scenario add column main text',
@@ -570,33 +572,57 @@ export interface PoolRow {
   category: string;
   name: string;
   main: string;
-  /** Lowest rank this is offered to, as that rank's Elo threshold. 0 = every
-   *  rank. Set per category in the dashboard; the rows carry it, same as
+  /** The ranks this is offered to, by rank id, or null for every rank. Set per
+   *  category in the dashboard; the rows carry it the same way they carry
    *  `main`, so one filter answers both. */
-  min_elo: number;
+  rank_ids: number[] | null;
 }
 
-/** The scenarios a queue at this rank draws from - everything filed at or below
- *  its threshold. A floor that leaves nothing at all falls back to the whole
- *  pool: a bracket with no scenarios must not be a bracket with no matches. */
-export function poolFor(pool: PoolRow[], floor: number): PoolRow[] {
-  const mine = pool.filter((s) => s.min_elo <= floor);
+/** The scenarios a queue in this rank draws from: the ones offered to every
+ *  rank, plus the ones this bracket was named in. A bracket that ends up with
+ *  nothing falls back to the whole pool - a bracket with no scenarios must not
+ *  be a bracket with no matches. Unknown bracket takes the unrestricted rows,
+ *  since a scenario picked for two brackets should not leak into a third. */
+export function poolFor(pool: PoolRow[], rankId?: number): PoolRow[] {
+  const mine = pool.filter(
+    (s) => !s.rank_ids?.length || (rankId != null && s.rank_ids.includes(rankId)),
+  );
   return mine.length ? mine : pool;
+}
+
+/** Junk in this column reads as "every rank", which is what every row was
+ *  before it existed - the pool is a list of scenarios, and a bad parse must
+ *  not be a match with nothing to play. */
+function parseRankIds(raw: string | null): number[] | null {
+  if (!raw) return null;
+  try {
+    const out = JSON.parse(raw);
+    return Array.isArray(out) && out.length ? out.filter((n) => typeof n === 'number') : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The scenario pool, seeded from DEFAULT_CATEGORIES then owned by the dashboard. */
 export function getScenarios(guildId: string): PoolRow[] {
-  const read = () =>
-    db
-      .prepare('select category, name, main, min_elo from scenario where guild_id = ? order by id')
-      .all(guildId) as unknown as PoolRow[];
+  const read = (): PoolRow[] =>
+    (
+      db
+        .prepare(
+          'select category, name, main, rank_ids from scenario where guild_id = ? order by id',
+        )
+        .all(guildId) as unknown as (Omit<PoolRow, 'rank_ids'> & { rank_ids: string | null })[]
+    ).map((r) => ({ ...r, rank_ids: parseRankIds(r.rank_ids) }));
   const rows = read();
   if (rows.length) return rows;
   for (const cat of DEFAULT_CATEGORIES) {
     for (const name of cat.scenarios) {
-      db.prepare(
-        'insert into scenario (guild_id, category, name, main, min_elo) values (?, ?, ?, ?, 0)',
-      ).run(guildId, cat.name, name, cat.main);
+      db.prepare('insert into scenario (guild_id, category, name, main) values (?, ?, ?, ?)').run(
+        guildId,
+        cat.name,
+        name,
+        cat.main,
+      );
     }
   }
   return read();
@@ -604,11 +630,19 @@ export function getScenarios(guildId: string): PoolRow[] {
 
 export function setScenarios(guildId: string, rows: PoolRow[]) {
   const insert = db.prepare(
-    'insert into scenario (guild_id, category, name, main, min_elo) values (?, ?, ?, ?, ?)',
+    'insert into scenario (guild_id, category, name, main, rank_ids) values (?, ?, ?, ?, ?)',
   );
   tx(() => {
     db.prepare('delete from scenario where guild_id = ?').run(guildId);
-    for (const r of rows) insert.run(guildId, r.category, r.name, r.main, r.min_elo ?? 0);
+    for (const r of rows) {
+      insert.run(
+        guildId,
+        r.category,
+        r.name,
+        r.main,
+        r.rank_ids?.length ? JSON.stringify(r.rank_ids) : null,
+      );
+    }
   });
   return getScenarios(guildId);
 }

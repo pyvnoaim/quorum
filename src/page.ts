@@ -385,6 +385,11 @@ export const PAGE = /* html */ `<!doctype html>
   .chip { display: inline-flex; align-items: center; gap: 3px; }
   .chip.add { cursor: pointer; gap: 5px; color: var(--fg); border-style: dashed; }
   .chip.add:hover { border-color: var(--fg); }
+  /* which ranks a category is offered to: picked reads as on, the rest as off */
+  .picks { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .chip.pick { cursor: pointer; color: var(--muted); }
+  .chip.pick:hover { border-color: var(--fg); }
+  .chip.pick.on { color: var(--fg); border-color: var(--fg); }
   .chip.add svg { width: 12px; height: 12px; }
   .scn { margin-top: 12px; }
   .scn-out { margin-top: 8px; font-size: 13px; display: grid; gap: 2px; }
@@ -1466,7 +1471,7 @@ async function renderGuild(guild) {
 
     <section id="pool">
     <h2>Scenario pool</h2>
-    <p class="muted">A match rolls one scenario per main - Clicking, Tracking, Switching. Add subcategories to organise a main's pool; they file under it rather than taking a round of their own. Search pulls real names off KovaaK's, so a lookup can't miss on a typo. A category can be held back to one rank and up, so a bracket only ever draws what suits it.</p>
+    <p class="muted">A match rolls one scenario per main - Clicking, Tracking, Switching. Add subcategories to organise a main's pool; they file under it rather than taking a round of their own. Search pulls real names off KovaaK's, so a lookup can't miss on a typo. A category can be offered to just the ranks that should play it - pick them under its name, or leave it open to every rank.</p>
     <div id="poolbox"></div>
     <div class="bar">
       <button class="btn" id="addcat">Add subcategory</button>
@@ -1882,29 +1887,19 @@ async function renderGuild(guild) {
   // something is put in it - the saved shape is a flat (category, name, main) list.
   const MAINS = data.mains ?? ['Clicking', 'Tracking', 'Switching'];
   let pool = data.scenarios.map((s) => ({ ...s }));
-  let cats = MAINS.map((m) => ({ name: m, main: m, min_elo: 0 }));
+  let cats = MAINS.map((m) => ({ name: m, main: m, ranks: [] }));
   for (const s of pool) {
     if (!cats.some((c) => c.name === s.category)) {
-      cats.push({
-        name: s.category,
-        main: MAINS.includes(s.main) ? s.main : MAINS[0],
-        min_elo: Number(s.min_elo) || 0,
-      });
+      cats.push({ name: s.category, main: MAINS.includes(s.main) ? s.main : MAINS[0], ranks: [] });
     }
   }
-  // A category is offered from one rank up, and its rows carry that floor the
-  // same way they carry the main. \`All ranks\` is the floor of the ladder, so
-  // the bottom rank is not offered twice.
+  // A category is offered to the ranks someone named, and its rows carry them
+  // the same way they carry the main. Empty is every rank - the answer a pool
+  // has until somebody narrows it.
   for (const c of cats) {
     const mine = pool.filter((s) => s.category === c.name);
-    if (mine.length) c.min_elo = Number(mine[0].min_elo) || 0;
+    c.ranks = mine.length && Array.isArray(mine[0].rank_ids) ? mine[0].rank_ids.slice() : [];
   }
-  const FLOORS = [{ id: '0', name: 'All ranks' }].concat(
-    data.ranks
-      .filter((r) => Number(r.min_elo) > 0)
-      .sort((a, b) => a.min_elo - b.min_elo)
-      .map((r) => ({ id: String(r.min_elo), name: r.name + ' and up' })),
-  );
   let openCat = null;
   const poolBox = document.getElementById('poolbox');
 
@@ -1921,8 +1916,12 @@ async function renderGuild(guild) {
               : \`<span class="hint">rolls into</span>\${
                   selectField('catmain-' + ci, MAINS, cat.main, \`data-ci="\${ci}"\`)}\`}
             <span class="hint">\${rows.length} scenario\${rows.length === 1 ? '' : 's'}</span>
-            <span class="hint">offered to</span>\${
-              selectField('catfloor-' + ci, FLOORS, String(cat.min_elo), \`data-fi="\${ci}"\`)}
+            <span class="hint">offered to</span>
+            <span class="picks">\${cat.ranks.length
+              ? ''
+              : '<span class="hint">every rank</span>'}\${data.ranks.map((r) => \`
+              <button type="button" class="chip pick\${cat.ranks.includes(r.id) ? ' on' : ''}"
+                data-ci="\${ci}" data-rank="\${r.id}">\${h(r.name)}</button>\`).join('')}</span>
             \${isMainCat
               ? ''
               : \`<button class="icon-btn" data-delcat="\${h(cat.name)}" title="Remove category">\${icon('x')}</button>\`}
@@ -1953,10 +1952,15 @@ async function renderGuild(guild) {
       for (const s of pool) if (s.category === cat.name) s.main = cat.main;
       drawPool();
     }));
-    poolBox.querySelectorAll('[data-fi]').forEach((el) => (el.onchange = () => {
-      const cat = cats[Number(el.dataset.fi)];
-      cat.min_elo = Number(el.dataset.value) || 0;
-      for (const s of pool) if (s.category === cat.name) s.min_elo = cat.min_elo;
+    poolBox.querySelectorAll('[data-rank]').forEach((el) => (el.onclick = () => {
+      const cat = cats[Number(el.dataset.ci)];
+      const id = Number(el.dataset.rank);
+      cat.ranks = cat.ranks.includes(id) ? cat.ranks.filter((n) => n !== id) : [...cat.ranks, id];
+      // None picked is every rank, so a category can always be opened back up
+      // by unpicking the last one.
+      for (const s of pool) {
+        if (s.category === cat.name) s.rank_ids = cat.ranks.length ? cat.ranks.slice() : null;
+      }
       drawPool();
     }));
     poolBox.querySelectorAll('[data-del]').forEach((el) => (el.onclick = () => {
@@ -1999,7 +2003,7 @@ async function renderGuild(guild) {
               category: openCat,
               name,
               main: into?.main ?? MAINS[0],
-              min_elo: into?.min_elo ?? 0,
+              rank_ids: into?.ranks?.length ? into.ranks.slice() : null,
             });
           }
           openCat = null;
@@ -2015,7 +2019,7 @@ async function renderGuild(guild) {
   document.getElementById('addcat').onclick = async () => {
     const name = (await ask('Subcategory name'))?.slice(0, 60);
     if (!name || cats.some((c) => c.name === name)) return;
-    cats.push({ name, main: MAINS[0], min_elo: 0 });
+    cats.push({ name, main: MAINS[0], ranks: [] });
     openCat = name;
     drawPool();
     poolBox.querySelector('.scn-q')?.focus();

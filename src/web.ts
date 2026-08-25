@@ -1160,6 +1160,7 @@ export function startWeb(client: Client, hooks: Hooks) {
       if (action === '/scenarios' && req.method === 'PUT') {
         const body = await readJson(req);
         const rows = Array.isArray(body.scenarios) ? body.scenarios : [];
+        const rankIds = new Set(getRanks(guildId).map((r) => r.id));
         const clean = rows
           .map((r: Record<string, unknown>) => {
             const category = String(r.category ?? '').trim().slice(0, 60);
@@ -1171,8 +1172,18 @@ export function startWeb(client: Client, hooks: Hooks) {
               : isMain(r.main)
                 ? r.main
                 : MAIN_CATEGORIES[0];
-            const min_elo = Math.max(0, Math.trunc(Number(r.min_elo)) || 0);
-            return { category, name: String(r.name ?? '').trim().slice(0, 120), main, min_elo };
+            // Only ranks this server actually has: an id from the browser that
+            // names somebody else's rank would file a scenario under a bracket
+            // this ladder cannot reach, and nothing would ever draw it.
+            const rank_ids = Array.isArray(r.rank_ids)
+              ? r.rank_ids.filter((id: unknown) => rankIds.has(id as number))
+              : null;
+            return {
+              category,
+              name: String(r.name ?? '').trim().slice(0, 120),
+              main,
+              rank_ids: rank_ids?.length ? rank_ids : null,
+            };
           })
           .filter((r: { category: string; name: string }) => r.category && r.name);
         // An empty pool would start matches with nothing to play, so it is

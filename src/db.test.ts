@@ -77,9 +77,11 @@ assert.equal(seededPool.length, 16);
 assert.ok(seededPool.every((s) => s.main === 'Switching'), 'the defaults file under one main');
 // A subcategory keeps its own name and rolls up into the main it was filed
 // under - that is the whole two-level shape.
+const top = ranks[0].id;
+const bottom = ranks[1].id;
 const pool = setScenarios(G, [
-  { category: 'Clicking', name: '1w4ts', main: 'Clicking', min_elo: 0 },
-  { category: 'Dynamic', name: 'Pasu VP', main: 'Clicking', min_elo: 1500 },
+  { category: 'Clicking', name: '1w4ts', main: 'Clicking', rank_ids: null },
+  { category: 'Dynamic', name: 'Pasu VP', main: 'Clicking', rank_ids: [top] },
 ]);
 // node:sqlite hands back null-prototype rows, so compare the fields
 assert.equal(pool.length, 2);
@@ -88,13 +90,15 @@ assert.equal(pool[0].name, '1w4ts');
 assert.equal(pool[1].category, 'Dynamic', 'the sub keeps its own name');
 assert.equal(pool[1].main, 'Clicking', 'and rolls up into its main');
 
-// A category held back to a rank is only drawn by brackets at or above it.
-assert.deepEqual(poolFor(pool, 0).map((s) => s.name), ['1w4ts'], 'the low bracket skips it');
-assert.equal(poolFor(pool, 1500).length, 2, 'the high one draws both');
-// ...and a floor that would leave a bracket with nothing to play falls back to
-// the whole pool rather than to a match with no scenarios in it.
+// A category offered to named brackets is drawn by those and nobody else.
+assert.deepEqual(pool[1].rank_ids, [top], 'the picked ranks survive the round trip');
+assert.deepEqual(poolFor(pool, bottom).map((s) => s.name), ['1w4ts'], 'a bracket not named skips it');
+assert.equal(poolFor(pool, top).length, 2, 'the one named draws both');
+assert.deepEqual(poolFor(pool).map((s) => s.name), ['1w4ts'], 'no bracket takes the open rows');
+// ...and a pool where nothing is offered to this bracket falls back to all of
+// it rather than to a match with no scenarios in it.
 assert.equal(
-  poolFor([{ category: 'Clicking', name: 'x', main: 'Clicking', min_elo: 1500 }], 0).length,
+  poolFor([{ category: 'Clicking', name: 'x', main: 'Clicking', rank_ids: [top] }], bottom).length,
   1,
   'never an empty pool',
 );

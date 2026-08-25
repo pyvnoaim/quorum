@@ -134,11 +134,14 @@ function callRank(match: Match) {
   );
 }
 
-/** The slice of the pool this match plays from. A bracket draws what is filed
- *  at or below it; with no bracket to go on, the host's rating stands in. */
+/** The slice of the pool this match plays from: what its bracket was named in,
+ *  plus everything offered to every rank. With no bracket to go on, the rank
+ *  the host's rating falls in stands in for one. */
 function matchPool(match: Match) {
-  const floor = callRank(match)?.min_elo ?? getPlayer(match.host_id)?.elo ?? 0;
-  return poolFor(getScenarios(match.guild_id), floor);
+  const ranks = getRanks(match.guild_id);
+  const host = getPlayer(match.host_id);
+  const band = callRank(match) ?? (host ? rankFor(ranks, host.elo) : undefined);
+  return poolFor(getScenarios(match.guild_id), band?.id);
 }
 
 /** One scenario per main, cycling, so a match is never three of the same
