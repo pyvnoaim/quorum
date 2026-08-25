@@ -933,7 +933,6 @@ export function startWeb(client: Client, hooks: Hooks) {
             total: ladderSize(guildId),
             matches: guildStats(guildId).played,
             meId: reader?.user.id ?? null,
-            signedIn: !!reader,
           }),
         );
         return;

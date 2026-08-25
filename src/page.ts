@@ -2571,7 +2571,10 @@ export function profilePage(p: Profile): string {
      it; without it the image above is blown up the width of the embed. -->
 <meta name="twitter:card" content="summary" />
 ${p.rank ? `<meta name="theme-color" content="${esc(p.rank.color)}" />` : ''}`,
-    footer: `Scores read off KovaaK's. <a href="/p/${esc(p.guildId)}">The ladder</a>`,
+    // The way back to the standings, at the top where a way out belongs - a
+    // link in the footer is a link at the end of seven games of scrolling.
+    nav: /* html */ `<a class="btn" href="/p/${esc(p.guildId)}">Leaderboard</a>`,
+    footer: `Scores read off KovaaK's. Ratings move only when a match ends.`,
     body,
   });
 }
@@ -2670,12 +2673,24 @@ ${TOKENS}
   tr.me td { background: var(--panel); }
   tr.me td:first-child { border-radius: 6px 0 0 6px; }
   tr.me td:last-child { border-radius: 0 6px 6px 0; }
+  /* Top right: which server this is, and the one way out of the page. */
+  .nav { display: flex; align-items: center; gap: 14px; }
   .btn {
-    border: 1px solid var(--line); background: transparent; color: var(--fg);
-    padding: 7px 14px; border-radius: 6px; font-size: 13px; text-decoration: none;
-    display: inline-block; transition: border-color .15s;
+    border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+    padding: 7px 13px; border-radius: 6px; font-size: 13px; text-decoration: none;
+    white-space: nowrap; transition: border-color .15s;
   }
   .btn:hover { border-color: var(--fg); }
+  .find {
+    width: 200px; max-width: 42vw; background: var(--panel); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 11px;
+    font: inherit; font-size: 13px; appearance: none;
+  }
+  .find:focus { outline: none; border-color: var(--fg); }
+  .find::placeholder { color: var(--muted); }
+  /* [hidden] beats tr's display: table-row on specificity in every browser that
+     matters, but saying it here means never finding out which one doesn't. */
+  tr[hidden] { display: none; }
   @media (max-width: 760px) {
     main { margin: 0; border: 0; border-radius: 0; padding: 32px 20px; }
     .stats { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
@@ -2690,7 +2705,7 @@ function shell(o: {
   guildName: string;
   /** Extra <head> tags - the link-preview block, mostly. */
   head?: string;
-  /** Sits at the top right, opposite the mark. */
+  /** Sits at the top right beside the server's name: the way off this page. */
   nav?: string;
   body: string;
   footer: string;
@@ -2710,7 +2725,10 @@ ${o.head ?? ''}
   <header>
     <h1><a href="/p/${esc(o.guildId)}"><svg class="mark" viewBox="0 0 128 128" fill="currentColor"
       aria-hidden="true">${MARK}</svg>Quorum</a></h1>
-    ${o.nav ?? `<span class="server">${esc(o.guildName)}</span>`}
+    <div class="nav">
+      <span class="server">${esc(o.guildName)}</span>
+      ${o.nav ?? ''}
+    </div>
   </header>
 ${o.body}
 
@@ -2721,6 +2739,21 @@ ${o.body}
   for (const t of document.querySelectorAll('time')) {
     t.textContent = new Date(t.dateTime).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
   }
+
+  // The ladder's search. Every row is already on the page, so this hides rows
+  // rather than asking the server anything - and the positions stay the ladder's
+  // own, because a search that renumbers 4th to 1st is a search that lies.
+  const find = document.getElementById('find');
+  find?.addEventListener('input', () => {
+    const q = find.value.trim().toLowerCase();
+    let hits = 0;
+    for (const row of document.querySelectorAll('tr[data-name]')) {
+      const hit = !q || row.dataset.name.includes(q);
+      row.hidden = !hit;
+      if (hit) hits++;
+    }
+    document.getElementById('nohits').hidden = hits > 0;
+  });
 </script>
 </body>
 </html>`;
@@ -2746,10 +2779,9 @@ export interface Ladder {
   total: number;
   /** Matches this server has finished - counted as matches, not as sides. */
   matches: number;
-  /** Whoever is reading, if they signed in - their row is marked. */
+  /** Whoever is reading, if they happen to hold a session - their row is
+   *  marked. Nothing here asks them to sign in for it. */
   meId: string | null;
-  /** Whether anyone is signed in, which decides what the button offers. */
-  signedIn: boolean;
 }
 
 /**
@@ -2789,7 +2821,9 @@ export function ladderPage(l: Ladder): string {
         ? `<table>
       ${l.players
         .map(
-          (p, at) => `<tr${p.discordId === l.meId ? ' class="me"' : ''}>
+          (p, at) => `<tr${p.discordId === l.meId ? ' class="me"' : ''} data-name="${esc(
+            p.name.toLowerCase(),
+          )}">
         <td class="pos">${at + 1}</td>
         <td style="width:100%"><a class="who-row" href="/p/${esc(l.guildId)}/${esc(p.discordId)}">
           <img class="pfp" src="${avatarUrl(p.discordId, p.avatar)}" alt="" /><span>${esc(p.name)}</span></a></td>
@@ -2804,6 +2838,7 @@ export function ladderPage(l: Ladder): string {
         )
         .join('\n      ')}
     </table>
+    <p class="empty" id="nohits" hidden>Nobody on this ladder by that name.</p>
     ${
       l.total > l.players.length
         ? `<p class="empty" style="padding:16px 0 0">Showing the top ${l.players.length} of ${l.total}.</p>`
@@ -2823,9 +2858,11 @@ export function ladderPage(l: Ladder): string {
 <meta property="og:title" content="${esc(l.guildName)} · the ladder" />
 <meta property="og:description" content="${esc(summary)}" />
 <meta property="og:url" content="${esc(l.url)}" />`,
-    nav: /* html */ `<a class="btn" href="/p/${esc(l.guildId)}/me">${
-      l.signedIn ? 'My page' : 'Sign in'
-    }</a>`,
+    // Finding yourself on a ladder is what a sign-in used to be for here, and a
+    // search box answers it without asking anyone for an account: the rows are
+    // all on the page already, so this is a filter, not a round trip.
+    nav: /* html */ `<input type="search" id="find" class="find" placeholder="Search players"
+      spellcheck="false" autocomplete="off" aria-label="Search players" />`,
     body,
     footer: `Scores read off KovaaK's. Ratings move only when a match ends.`,
   });

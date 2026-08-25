@@ -29,19 +29,17 @@ const ladder = ladderPage({
   total: 2,
   matches: 7,
   meId: '333',
-  signedIn: true,
 });
 assert.ok(ladder.includes('&lt;b&gt;top&lt;/b&gt;'), 'a name is escaped, not rendered');
-assert.ok(ladder.includes('<tr class="me">'), 'the reader\'s own row is marked');
-assert.ok(ladder.includes('>My page</a>'), 'and signed in, the button offers it');
+assert.ok(ladder.includes('<tr class="me" data-name="me">'), 'the reader\'s own row is marked');
+assert.ok(ladder.includes('id="find"'), 'and there is a way to search for a name');
 assert.ok(ladder.includes('href="/p/111/222"'), 'every row is a way into that player');
-// Signed out, the same button is the way in.
-assert.ok(
-  ladderPage({
-    guildId: '111', guildName: 'g', url: 'u', players: [], total: 0, matches: 0,
-    meId: null, signedIn: false,
-  }).includes('>Sign in</a>'),
-);
+// Every row carries the name the search filters on, lowercased and escaped.
+assert.ok(ladder.includes('data-name="&lt;b&gt;top&lt;/b&gt;"'), 'the search key is escaped too');
+// An empty ladder still renders.
+ladderPage({
+  guildId: '111', guildName: 'g', url: 'u', players: [], total: 0, matches: 0, meId: null,
+});
 
 // The profile page is built per request rather than baked into a constant, so
 // the same check has to see one actually rendered.
