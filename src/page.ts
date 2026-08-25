@@ -1704,11 +1704,11 @@ async function renderGuild(guild) {
   // Polling, because nothing here pushes; hidden tabs sit it out, and the
   // interval clears itself once the pane is gone rather than being unhooked.
   const mine = document.getElementById('matchlist');
-  const live = setInterval(async () => {
+  const livePoll = setInterval(async () => {
     // Identity, not presence: rendering another server puts a NEW matchlist on
     // the page, and a poller left over from the last one would keep writing its
     // matches into it.
-    if (document.getElementById('matchlist') !== mine) return clearInterval(live);
+    if (document.getElementById('matchlist') !== mine) return clearInterval(livePoll);
     if (document.hidden) return;
     const res = await fetch(\`/api/guild/\${guild.id}/matches\`);
     if (res.ok && document.getElementById('matchlist') === mine) drawMatches((await res.json()).matches);
