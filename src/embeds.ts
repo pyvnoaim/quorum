@@ -99,7 +99,6 @@ export function staleEmbed(match: Match) {
 /** The open call: "someone is looking for a 1v1". Fills up, then starts itself. */
 export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
   const { max } = FORMATS[match.format as Format];
-  const ranks = getRanks(match.guild_id);
 
   return new EmbedBuilder()
     .setTitle(`Looking for a ${match.format}`)
@@ -111,7 +110,8 @@ export function openEmbed(match: Match, rows: MatchPlayer[], players: Map<string
         rows
           .map((r) => {
             const p = players.get(r.discord_id)!;
-            return `<@${r.discord_id}> · **${p.elo}** ${rankName(ranks, p.elo)}`;
+            const band = rankLabel(match.guild_id, r.discord_id, p.elo);
+            return `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ''}`;
           })
           .join('\n'),
     )
@@ -344,7 +344,6 @@ export function resultsEmbed(
   const scenarios: string[] = JSON.parse(match.scenarios);
   const ordered = [...rows].sort((a, b) => (a.placing ?? 99) - (b.placing ?? 99));
   const medal = ['🥇', '🥈', '🥉'];
-  const ranks = getRanks(match.guild_id);
   // Someone with no placing in a match that WAS scored never ran anything - the
   // rest of the lobby played on without them. Said, rather than shown as a last
   // place they didn't earn.
@@ -352,6 +351,7 @@ export function resultsEmbed(
 
   const fields = ordered.map((r) => {
     const p = players.get(r.discord_id)!;
+    const band = rankLabel(match.guild_id, r.discord_id, p.elo);
     const delta = deltas.get(r.discord_id) ?? 0;
     const scores = JSON.parse(r.scores) as Record<string, number | null>;
     const pb = JSON.parse(r.pb ?? '{}') as Record<string, number | null>;
@@ -369,7 +369,7 @@ export function resultsEmbed(
     return {
       name: `${r.placing == null ? '·' : (medal[r.placing - 1] ?? `#${r.placing}`)} ${p.kovaaks_username}`,
       value:
-        `<@${r.discord_id}> · **${p.elo}** ${rankName(ranks, p.elo)} ` +
+        `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ''} ` +
         `${r.placing == null ? '· _no scores, not rated_' : `(${delta >= 0 ? '+' : ''}${delta})`}\n\`${line}\``,
     };
   });
