@@ -1491,7 +1491,7 @@ async function renderGuild(guild) {
       starting ranks can be set afresh. Matches stay in History. Anyone who also plays Quorum in another server
       is left alone.</p>
       <div class="bar">
-        <span class="status" id="resetstatus"></span>
+        <span class="status" id="resetstatus" style="margin-left:auto"></span>
         <button class="btn bad" id="resetbtn">Reset ratings</button>
       </div>
     </div>
