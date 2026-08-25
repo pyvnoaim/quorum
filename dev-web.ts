@@ -189,6 +189,16 @@ if (!db.prepare('select 1 from match').get()) {
   for (const p of ['900000000000000001', '900000000000000002'])
     db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(id, p);
 
+  // What each of the seven games did to devadmin's rating, oldest first. Every
+  // row used to carry the same 1312, which drew a profile curve that was a
+  // dead flat line - a chart of nothing. These walk forward to the 1312 the
+  // ladder ends on (they sum to +68, so the walk starts at 1244), five up and
+  // two down for the 5W-2L, and they vary the way real deltas do: beating
+  // somebody above you is worth more than beating somebody below.
+  const WALK = [22, -18, 19, 25, -14, 17, 17];
+  const ADMIN_END = 1312;
+  const adminStart = ADMIN_END - WALK.reduce((a, b) => a + b, 0);
+
   // finished history, so the overview has stats and a ladder to draw - and so
   // the history table has rows with players, placings and deltas in them.
   for (let n = 0; n < 7; n++) {
@@ -208,13 +218,19 @@ if (!db.prepare('select 1 from match').get()) {
       Date.now() - n * 36 * 60 * 60 * 1000,
     );
     const doneId = (db.prepare('select max(id) as id from match').get() as any).id;
-    // devadmin took five of the seven, which is the 5W-2L the ladder shows.
-    const adminWon = n < 5;
-    for (const [discordId, won, elo] of [
-      ['900000000000000001', adminWon, 1312],
-      ['900000000000000002', !adminWon, 1188],
+    // n counts backwards in time - n=0 is the newest - so the walk is read from
+    // the other end, and each game starts where the one before it finished.
+    const step = WALK.length - 1 - n;
+    const move = WALK[step];
+    const adminBefore = adminStart + WALK.slice(0, step).reduce((a, b) => a + b, 0);
+    const adminWon = move > 0;
+    // A 1v1 is zero-sum here: what one takes the other gives, so the two curves
+    // are mirrors and the ladder's 1188 falls out of the same arithmetic.
+    for (const [discordId, won, before] of [
+      ['900000000000000001', adminWon, adminBefore],
+      ['900000000000000002', !adminWon, 2500 - adminBefore],
     ] as const) {
-      const delta = won ? 16 : -16;
+      const delta = won ? Math.abs(move) : -Math.abs(move);
       const scores = Object.fromEntries(
         play.map((sc, i) => [sc, Math.round((won ? 900 : 820) + i * 37 + n * 5)]),
       );
@@ -227,8 +243,8 @@ if (!db.prepare('select 1 from match').get()) {
         discordId.endsWith('1') ? 0 : 1,
         JSON.stringify(scores),
         won ? 1 : 2,
-        elo - delta,
-        elo,
+        before,
+        before + delta,
       );
     }
   }
