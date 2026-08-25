@@ -322,13 +322,31 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   ).run('r1');
   db.prepare("update player set elo = 1400, wins = 9, losses = 2, seeded_from = 'Legend' where discord_id = 'r1'").run();
 
-  assert.deepEqual(resetRatings('gr'), ['r1'], 'everyone this server has played');
+  // Someone who also plays in another server keeps everything: the rating is
+  // one global row, and this server's new season is not that server's.
+  ensurePlayer('r2', 'R2');
+  db.prepare(
+    "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at) values (901,'gr','c','r2','1v1','done',7000)",
+  ).run();
+  db.prepare(
+    "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at) values (902,'elsewhere','c','r2','1v1','done',7000)",
+  ).run();
+  for (const id of [901, 902]) {
+    db.prepare(
+      'insert into match_player (match_id, discord_id, team, placing) values (?,?,0,1)',
+    ).run(id, 'r2');
+  }
+  db.prepare("update player set elo = 1300, wins = 4 where discord_id = 'r2'").run();
+
+  assert.deepEqual(resetRatings('gr'), { reset: ['r1'], shared: 1 }, 'only the ones who play here alone');
+  assert.equal(getPlayer('r2')!.elo, 1300, "another server's ladder is not this admin's to wipe");
+  assert.equal(getPlayer('r2')!.wins, 4, 'record included');
   const back = getPlayer('r1')!;
   assert.equal(back.elo, 1050, 'back to the starting rating');
   assert.equal(back.wins + back.losses, 0, 'and unplayed again');
   assert.equal(back.seeded_from, null, 'so a starting rank can be set afresh');
   assert.ok(getMatch(900), 'the match itself stays - it is the record, not the rating');
-  assert.deepEqual(resetRatings('gone'), [], 'a server with nobody resets nobody');
+  assert.deepEqual(resetRatings('gone'), { reset: [], shared: 0 }, 'a server with nobody resets nobody');
 }
 
 console.log('db ok');

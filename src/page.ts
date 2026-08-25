@@ -1486,7 +1486,8 @@ async function renderGuild(guild) {
       <div class="cat-top"><strong>Reset ratings</strong></div>
       <p class="muted" style="margin:0 0 12px">Every rating back to the start, and everyone unplayed again so
       starting ranks can be handed out afresh. Matches already played stay in History - a new season does not
-      undo what happened, it starts the standings over. This cannot be undone.</p>
+      undo what happened, it starts the standings over. A rating is one number per player across every server
+      Quorum is in, so anyone who also plays it elsewhere is left alone. This cannot be undone.</p>
       <div class="bar">
         <span class="status" id="resetstatus"></span>
         <button class="btn bad" id="resetbtn">Reset ratings</button>
@@ -2082,7 +2083,7 @@ async function renderGuild(guild) {
     const el = document.getElementById('resetstatus');
     const ok = await confirmDanger({
       title: \`Reset every rating in \${guild.name}?\`,
-      body: 'Every player goes back to the starting rating with no wins or losses, and can be given a starting rank again. Matches already played stay in History.',
+      body: 'Every player who plays here and nowhere else goes back to the starting rating with no wins or losses, and can be given a starting rank again. Matches already played stay in History.',
       name: guild.name,
       confirm: 'Reset ratings',
     });
