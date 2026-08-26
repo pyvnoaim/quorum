@@ -21,6 +21,7 @@ import {
   MAIN_CATEGORIES,
   ROUNDS,
   TICK_MS,
+  PICK_SWEEP_MS,
   BASE_ELO,
   VOLTAIC_SEED,
   type Format,
@@ -500,8 +501,13 @@ function applyPick(match: Match, index: number) {
       match.id,
     );
   }
-  db.prepare('update match set scenarios = ? where id = ?').run(
+  // The clock means "how long this side has had the table", so it restarts on
+  // every act - by a player or by the sweep. Left alone, it would still be
+  // counting the previous round and the next side would get whatever seconds
+  // were left over.
+  db.prepare('update match set scenarios = ?, created_at = ? where id = ?').run(
     JSON.stringify(next.phase),
+    Date.now(),
     match.id,
   );
   return getMatch(match.id)!;
@@ -855,7 +861,13 @@ async function expireStalePicks() {
   const stalled = picking.filter(
     (m) => m.created_at < Date.now() - getFormat(m.guild_id).pickTtlS * 1000,
   );
-  for (const match of stalled) {
+  for (const stale of stalled) {
+    // Re-read: the row was measured before the awaits below, and the side it
+    // was waiting on may well have pressed something since. Picking for
+    // somebody who just picked for themselves is exactly what this must not do.
+    const match = getMatch(stale.id);
+    if (!match || match.status !== 'banning') continue;
+    if (match.created_at >= Date.now() - getFormat(match.guild_id).pickTtlS * 1000) continue;
     const phase = pickState(match);
     // A phase this version can't read, or one with nothing left on the table,
     // can never be finished by anyone - by a player or by this sweep.
@@ -863,11 +875,7 @@ async function expireStalePicks() {
       await cancelMatch(match);
       continue;
     }
-    const next = applyPick(match, Math.floor(Math.random() * phase.pool.length));
-    // reset the clock so the next side gets its own full window
-    if (next.status === 'banning') {
-      db.prepare('update match set created_at = ? where id = ?').run(Date.now(), match.id);
-    }
+    applyPick(match, Math.floor(Math.random() * phase.pool.length));
     await editMatchMessage(getMatch(match.id)!);
   }
 }
@@ -965,7 +973,6 @@ async function tick() {
   await refreshPanels();
   await refreshLeaderboards();
   await expireStaleCalls();
-  await expireStalePicks();
   const live = db
     .prepare("select * from match where status = 'live'")
     .all() as unknown as Match[];
@@ -1060,6 +1067,11 @@ client.once('clientReady', async (c) => {
     [...c.guilds.cache.values()].map((guild) => guild.members.fetch().catch(() => {})),
   );
   setInterval(() => void tick().catch(console.error), TICK_MS).unref();
+  // Its own interval, not tick's: the pick timer is a number staff set, and
+  // checked once a minute a 90s window really runs anywhere from 90s to 150s.
+  // This one is a query and a filter on the few matches mid-ban, so running it
+  // often costs nothing - unlike the panel and leaderboard edits in tick().
+  setInterval(() => void expireStalePicks().catch(console.error), PICK_SWEEP_MS).unref();
   console.log(`ready as ${c.user.tag}`);
 });
 
@@ -1275,8 +1287,15 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       });
       return;
     }
+    // Applied BEFORE the ack, so the read above and the write below sit in one
+    // tick with no await between them. Deferring first hands the loop to the
+    // next click, which then reads the same pre-pick row and overwrites the
+    // first pick with its own - a double tap losing a ban.
+    // ponytail: atomic because this is one process on a sync sqlite; a second
+    // process would want the compare-and-swap finishMatch() uses.
+    const next = applyPick(match, Number(extra));
     await i.deferUpdate();
-    await editMatchMessage(applyPick(match, Number(extra)));
+    await editMatchMessage(next);
     return;
   }
 

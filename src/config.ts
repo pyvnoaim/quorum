@@ -165,3 +165,7 @@ export const GRACE_MS = 15 * 60 * 1000;
 export const MIN_MATCH_MS = 20 * 60 * 1000;
 /** How often a live match re-reads scores off KovaaK's on its own. */
 export const TICK_MS = 60 * 1000;
+/** How often the bot looks for a side that walked away mid-pick. Finer than the
+ *  tick because the ban timer is a number staff chose and expect to mean
+ *  something: swept once a minute, a 90s window ran up to 150s. */
+export const PICK_SWEEP_MS = 10 * 1000;
