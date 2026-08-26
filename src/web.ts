@@ -60,7 +60,14 @@ import {
   type Rank,
   type RankChannels,
 } from './db.js';
-import { changeEmbed, leaderboardMessage, messageGone, panelMessage, rankLabel } from './embeds.js';
+import {
+  changeEmbed,
+  leaderboardMessage,
+  messageGone,
+  panelMessage,
+  rankLabel,
+  rulesMessage,
+} from './embeds.js';
 import { bandsInReach, forfeits, rankForRoles, scenarioWinners } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
 import { PAGE, ladderPage, profilePage } from './page.js';
@@ -651,44 +658,56 @@ async function syncRankChannelsToDiscord(
   return { ok: true };
 }
 
-/** Puts the standing leaderboard where the dashboard says it goes - and takes
- *  it away from where it used to be.
- *
- *  One message, owned by Quorum: the tick edits it as ratings move, so it is
- *  posted once here and then left alone. Moving the board deletes the old one
- *  rather than leaving a stale ladder sitting in a channel nobody is updating
- *  any more. Returns what to tell the admin, or nothing when it went fine. */
-async function syncLeaderboardMessage(guild: Guild, was: GuildConfig) {
-  const cfg = getConfig(guild.id);
-  const moved = was.leaderboard_channel_id !== cfg.leaderboard_channel_id;
+/** The standing boards a server can have up. Each is one message Quorum owns in
+ *  a channel staff picked, edited in place by the tick - which is why they are
+ *  a list and not two copies of the same forty lines. */
+export const BOARDS = [
+  {
+    channel: 'leaderboard_channel_id',
+    msg: 'leaderboard_msg_id',
+    build: (guildId: string) => leaderboardMessage(guildId, ladderUrl(guildId)),
+  },
+  { channel: 'rules_channel_id', msg: 'rules_msg_id', build: rulesMessage },
+] as const;
 
-  if (moved && was.leaderboard_channel_id && was.leaderboard_msg_id) {
-    const old = guild.channels.cache.get(was.leaderboard_channel_id);
+/** Puts a standing board where the dashboard says it goes - and takes it away
+ *  from where it used to be.
+ *
+ *  The tick edits it as things move, so it is posted once here and then left
+ *  alone. Moving a board deletes the old one rather than leaving a stale copy
+ *  sitting in a channel nobody is updating any more. Returns what to tell the
+ *  admin, or nothing when it went fine. */
+async function syncBoardMessage(guild: Guild, was: GuildConfig, board: (typeof BOARDS)[number]) {
+  const cfg = getConfig(guild.id);
+  const moved = was[board.channel] !== cfg[board.channel];
+
+  if (moved && was[board.channel] && was[board.msg]) {
+    const old = guild.channels.cache.get(was[board.channel]!);
     if (old?.isTextBased()) {
-      const msg = await old.messages.fetch(was.leaderboard_msg_id).catch(() => null);
+      const msg = await old.messages.fetch(was[board.msg]!).catch(() => null);
       await msg?.delete().catch(() => {});
     }
-    setConfig(guild.id, { leaderboard_msg_id: null });
+    setConfig(guild.id, { [board.msg]: null } as Partial<GuildConfig>);
   }
-  if (!cfg.leaderboard_channel_id) return;
+  if (!cfg[board.channel]) return;
 
-  const channel = guild.channels.cache.get(cfg.leaderboard_channel_id);
+  const channel = guild.channels.cache.get(cfg[board.channel]!);
   if (!channel?.isSendable()) return 'Quorum cannot post in that channel';
   // Still up where it was? Leave it: reposting on every save would walk the
   // board down the channel one save at a time. And a fetch that fails for any
   // reason other than "that message is gone" is not evidence that it isn't
   // there - the tick will post one if it really has been deleted.
-  if (!moved && cfg.leaderboard_msg_id) {
+  if (!moved && cfg[board.msg]) {
     try {
-      await channel.messages.fetch(cfg.leaderboard_msg_id);
+      await channel.messages.fetch(cfg[board.msg]!);
       return;
     } catch (err) {
       if (!messageGone(err)) return;
     }
   }
 
-  const posted = await channel.send(leaderboardMessage(guild.id)).catch(() => null);
-  setConfig(guild.id, { leaderboard_msg_id: posted?.id ?? null });
+  const posted = await channel.send(board.build(guild.id)).catch(() => null);
+  setConfig(guild.id, { [board.msg]: posted?.id ?? null } as Partial<GuildConfig>);
   if (!posted) return 'Quorum cannot post in that channel';
 }
 
@@ -864,6 +883,14 @@ const pageIsPublic = (guildId: string, discordId: string) =>
 export const profileUrl = (guildId: string, discordId: string) =>
   CLIENT_ID && CLIENT_SECRET && pageIsPublic(guildId, discordId)
     ? `${BASE_URL}/p/${guildId}/${discordId}`
+    : null;
+
+/** Where the whole ladder lives, on the same terms: no dashboard, or a server
+ *  that put its category behind a role, means no link - the route refuses that
+ *  ladder too. */
+export const ladderUrl = (guildId: string) =>
+  CLIENT_ID && CLIENT_SECRET && !getConfig(guildId).visible_role_id
+    ? `${BASE_URL}/p/${guildId}`
     : null;
 
 export function startWeb(client: Client, hooks: Hooks) {
@@ -1323,7 +1350,6 @@ export function startWeb(client: Client, hooks: Hooks) {
           // cost them. Trimmed here because the page shows nothing else.
           history: matchHistory(guildId, 25).map(({ match, players }) => {
             const played: string[] = JSON.parse(match.scenarios);
-            const pool: string[] = match.ban_pool ? JSON.parse(match.ban_pool) : [];
             // The scores that COUNTED, not the raw ones. A scenario somebody
             // stopped short on scored 0 in the maths, so a history showing the
             // run they walked away from has them winning a round the result
@@ -1360,10 +1386,10 @@ export function startWeb(client: Client, hooks: Hooks) {
               // works out to a "+0" that reads as a rated game worth nothing.
               ranked: match.ranked !== 0,
               played,
-              // What is in the pool but not in the end is exactly what was
-              // banned. Empty for group and for any match that never had a
-              // ban phase to record.
-              banned: pool.filter((s) => !played.includes(s)),
+              // Only what a side struck out. Empty for group, for any match
+              // with no ban phase, and for anything that finished before bans
+              // were recorded on their own.
+              banned: match.bans ? (JSON.parse(match.bans) as string[]) : [],
               players: players.map((r) => ({
                 name: r.kovaaks_username,
                 placing: r.placing,
@@ -1423,6 +1449,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           // as a category nobody but the bot can open.
           visible_role_id: role(body.visible_role_id),
           leaderboard_channel_id: postable(body.leaderboard_channel_id),
+          rules_channel_id: postable(body.rules_channel_id),
           // 0 is off and null is "use the default", so both have to survive the
           // trip. Anything else is clamped: a one-minute window bins calls
           // before anyone sees them, and a one-year one is off with extra steps.
@@ -1454,7 +1481,10 @@ export function startWeb(client: Client, hooks: Hooks) {
               .catch(() => {});
           }
         }
-        const board = await syncLeaderboardMessage(guild, before);
+        // Both boards, in order, so one channel that refuses a post does not
+        // stop the other going up.
+        let board: string | undefined;
+        for (const b of BOARDS) board = (await syncBoardMessage(guild, before, b)) ?? board;
         // A different category means the channels move into it, so the save has
         // to reach Discord and not just the database. Awaited, so a failure is
         // reported rather than swallowed into a background promise, and so two
@@ -1855,16 +1885,16 @@ export function startWeb(client: Client, hooks: Hooks) {
           // Calls first. Cancelling one deletes its message and its thread,
           // neither of which the rank sweep below knows anything about.
           for (const open of listOpenMatches(guildId)) await hooks.cancelMatch(open);
-          // The leaderboard sits in one of the server's OWN channels, so it is
-          // not carried off by the category sweep below - and a board left
-          // behind is a ladder frozen at the moment the bot left.
-          const board = getConfig(guildId);
-          if (board.leaderboard_channel_id && board.leaderboard_msg_id) {
-            const where = guild.channels.cache.get(board.leaderboard_channel_id);
-            if (where?.isTextBased()) {
-              const msg = await where.messages.fetch(board.leaderboard_msg_id).catch(() => null);
-              await msg?.delete().catch(() => {});
-            }
+          // The standing boards sit in the server's OWN channels, so they are
+          // not carried off by the category sweep below - and one left behind
+          // is a ladder frozen at the moment the bot left.
+          const cfg = getConfig(guildId);
+          for (const b of BOARDS) {
+            if (!cfg[b.channel] || !cfg[b.msg]) continue;
+            const where = guild.channels.cache.get(cfg[b.channel]!);
+            if (!where?.isTextBased()) continue;
+            const msg = await where.messages.fetch(cfg[b.msg]!).catch(() => null);
+            await msg?.delete().catch(() => {});
           }
           const ranks = getRanks(guildId);
           await syncRankChannelsToDiscord(guild, [], ranks, true);

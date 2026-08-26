@@ -1352,6 +1352,10 @@ async function renderGuild(guild) {
       \${selectField('leaderboard', NONE.concat(data.channels), data.config.leaderboard_channel_id)}
     </div>
     <div class="field">
+      <label>Format &amp; pool <span class="hint">- one message Quorum keeps up to date, saying how this server plays and every scenario in the pool</span></label>
+      \${selectField('rules', NONE.concat(data.channels), data.config.rules_channel_id)}
+    </div>
+    <div class="field">
       <label>Announcements <span class="hint">- Quorum posts here whenever staff change the format, the pool or the ladder</span></label>
       \${selectField('announce', NONE.concat(data.channels), data.config.announce_channel_id)}
     </div>
@@ -2264,6 +2268,7 @@ async function renderGuild(guild) {
       ping_role_id: document.getElementById('ping').dataset.value || null,
       announce_channel_id: document.getElementById('announce').dataset.value || null,
       leaderboard_channel_id: document.getElementById('leaderboard').dataset.value || null,
+      rules_channel_id: document.getElementById('rules').dataset.value || null,
     };
     const res = await fetch('/api/guild/' + guild.id, {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),

@@ -208,13 +208,17 @@ if (!db.prepare('select 1 from match').get()) {
     const pool = ['poleTS', 'CircleTS', 'darkSwitch', 'domiSwitch Harder', 'FloatTS Angelic',
       'popcorn v2', 'Ground Plaza', 'Bounce 180 Tracking', 'Pasu Voltaic Easy', 'Air Angelic 4'];
     const play = ['poleTS', 'popcorn v2', 'tamTargetSwitch Control Hard'];
+    // Two bans a round, out of shortlists of five - the rest of each pool was
+    // simply never picked, which is not a ban and does not show as one.
+    const bans = ['CircleTS', 'FloatTS Angelic', 'Ground Plaza', 'Air Angelic 4'];
     db.prepare(
-      `insert into match (guild_id, channel_id, host_id, format, status, scenarios, ban_pool, created_at, ended_at)
-       values (?, '201', '900000000000000001', '1v1', 'done', ?, ?, 0, ?)`,
+      `insert into match (guild_id, channel_id, host_id, format, status, scenarios, ban_pool, bans, created_at, ended_at)
+       values (?, '201', '900000000000000001', '1v1', 'done', ?, ?, ?, 0, ?)`,
     ).run(
       GUILD_ID,
       JSON.stringify(play),
       JSON.stringify(pool),
+      JSON.stringify(bans),
       Date.now() - n * 36 * 60 * 60 * 1000,
     );
     const doneId = (db.prepare('select max(id) as id from match').get() as any).id;
@@ -258,12 +262,13 @@ if (!db.prepare('select 1 from match').get()) {
     size: 5,
   };
   db.prepare(
-    `insert into match (guild_id, channel_id, host_id, format, status, scenarios, ban_pool, created_at)
-     values (?, '201', '900000000000000001', '1v1', 'banning', ?, ?, ?)`,
+    `insert into match (guild_id, channel_id, host_id, format, status, scenarios, ban_pool, bans, created_at)
+     values (?, '201', '900000000000000001', '1v1', 'banning', ?, ?, ?, ?)`,
   ).run(
     GUILD_ID,
     JSON.stringify(phase),
     JSON.stringify(['poleTS', 'FloatTS Angelic', 'Ground Plaza', 'popcorn v2', 'Pasu Voltaic Easy']),
+    JSON.stringify(['CircleTS', 'Air Angelic 4']),
     Date.now() - 40 * 1000,
   );
   const banId = (db.prepare('select max(id) as id from match').get() as any).id;

@@ -124,6 +124,10 @@ for (const stmt of [
   // `scenarios` shrinks in place as bans land, so what was banned is gone by
   // the time the match ends. History wants both halves.
   'alter table match add column ban_pool text',
+  // ...and the bans themselves. ban_pool holds every shortlist that was ever on
+  // the table, most of which nobody struck out - a scenario simply not picked
+  // is not a banned one, and the cards were calling it that.
+  'alter table match add column bans text',
   'alter table match_player add column pb text',
   'alter table match_player add column run_counts text',
   // When the first player used every run - the moment the rest of the lobby
@@ -176,6 +180,10 @@ for (const stmt of [
   // that message so the tick can edit it rather than post a second one.
   'alter table guild_config add column leaderboard_channel_id text',
   'alter table guild_config add column leaderboard_msg_id text',
+  // Same again for the standing rules board: the format and the scenario pool,
+  // in a channel, kept current by the same tick.
+  'alter table guild_config add column rules_channel_id text',
+  'alter table guild_config add column rules_msg_id text',
 ]) {
   try {
     db.exec(stmt);
@@ -260,6 +268,10 @@ export interface Match {
    *  bot couldn't make one - the match runs regardless. */
   thread_id: string | null;
   ban_pool: string | null;
+  /** The scenarios a side actually struck out, in the order they went. Null for
+   *  a match with no ban phase, and for anything that finished before this was
+   *  recorded. */
+  bans: string | null;
   /** The division this call belongs to, in manual mode: the Discord role its
    *  opener held. Resolved once at open time, so a role change mid-lobby can't
    *  move the goalposts under people already in. Null in automatic mode. */
@@ -311,6 +323,11 @@ export interface GuildConfig {
    *  edits that message every tick and deletes it when the channel changes. */
   leaderboard_channel_id: string | null;
   leaderboard_msg_id: string | null;
+  /** Where the standing "how this server plays" board lives - the format's
+   *  numbers and the scenario pool - and the message it is. Same deal as the
+   *  leaderboard above: null means the server doesn't want one. */
+  rules_channel_id: string | null;
+  rules_msg_id: string | null;
   /** Who may see the Quorum category, and so the results channel inside it.
    *  Null = the whole server. A queue channel is private to its rank whatever
    *  this says - see syncRankChannelsToDiscord(). */
@@ -532,6 +549,8 @@ export function getConfig(guildId: string): GuildConfig {
       visible_role_id: null,
       leaderboard_channel_id: null,
       leaderboard_msg_id: null,
+      rules_channel_id: null,
+      rules_msg_id: null,
     }
   );
 }
@@ -544,8 +563,9 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
         rank_spread, split_channels, rank_mode, seed_mode, call_ttl_min,
         split_category_id, split_results_id, split_unranked_id, unranked_enabled,
         format_cfg, panel_msgs, queues_paused,
-        announce_channel_id, visible_role_id, leaderboard_channel_id, leaderboard_msg_id)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        announce_channel_id, visible_role_id, leaderboard_channel_id, leaderboard_msg_id,
+        rules_channel_id, rules_msg_id)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
@@ -565,7 +585,9 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
        announce_channel_id = excluded.announce_channel_id,
        visible_role_id = excluded.visible_role_id,
        leaderboard_channel_id = excluded.leaderboard_channel_id,
-       leaderboard_msg_id = excluded.leaderboard_msg_id`,
+       leaderboard_msg_id = excluded.leaderboard_msg_id,
+       rules_channel_id = excluded.rules_channel_id,
+       rules_msg_id = excluded.rules_msg_id`,
   ).run(
     guildId,
     next.panel_channel_id,
@@ -587,6 +609,8 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.visible_role_id,
     next.leaderboard_channel_id,
     next.leaderboard_msg_id,
+    next.rules_channel_id,
+    next.rules_msg_id,
   );
   return next;
 }

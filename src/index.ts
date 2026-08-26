@@ -49,6 +49,7 @@ import {
   seedPlayer,
   setConfig,
   setPlayerElo,
+  type GuildConfig,
   type Match,
   type MatchPlayer,
 } from './db.js';
@@ -67,7 +68,7 @@ import {
   resultsEmbed,
   staleEmbed,
 } from './embeds.js';
-import { startWeb, profileUrl } from './web.js';
+import { startWeb, profileUrl, ladderUrl, BOARDS } from './web.js';
 import { kovaaksAccountForDiscordId, scoreInWindow, voltaicS5 } from './kovaaks.js';
 import {
   advancePick,
@@ -500,6 +501,16 @@ function applyPick(match: Match, index: number) {
       JSON.stringify([...offered, ...next.phase.pool]),
       match.id,
     );
+  } else if (next.phase.pool.length < phase.pool.length) {
+    // A ban, and the only place one lands - the sweep's auto-ban comes through
+    // here too. Recorded on its own because the rest of the shortlist was never
+    // banned, it was just never picked. The length check is what tells a real
+    // ban from advancePick shrugging off an index that isn't there.
+    const bans: string[] = match.bans ? JSON.parse(match.bans) : [];
+    db.prepare('update match set bans = ? where id = ?').run(
+      JSON.stringify([...bans, phase.pool[index]]),
+      match.id,
+    );
   }
   // The clock means "how long this side has had the table", so it restarts on
   // every act - by a player or by the sweep. Left alone, it would still be
@@ -910,68 +921,75 @@ async function refreshPanels() {
   }
 }
 
-/** What each server's board last said, same trick as the panels above: the
- *  ladder only moves when a match ends, so a quiet server costs no requests. */
-const ladderText = new Map<string, string>();
-/** Ticks since boot, so one pass in ten checks the board is still there. */
-let ladderPass = 0;
+/** What each board last said, same trick as the panels above: a board only
+ *  moves when a match ends or staff change something, so a quiet server costs
+ *  no requests. Keyed by guild and board. */
+const boardText = new Map<string, string>();
+/** Ticks since boot, so one pass in ten checks the boards are still there. */
+let boardPass = 0;
 
-/** Keeps the standing leaderboard standing.
+/** Keeps the standing boards standing.
  *
  *  Reposted, not just edited, when the message is gone - someone with Manage
- *  Messages can delete it, and a leaderboard channel with no leaderboard in it
+ *  Messages can delete one, and a leaderboard channel with no leaderboard in it
  *  is the one state this feature must not settle into. */
-async function refreshLeaderboards() {
+async function refreshBoards() {
   // The memo says the TEXT has not changed, not that the message is still
   // there - so a board deleted on a server where nothing else is happening
   // would never come back. Every tenth pass looks anyway.
   // ponytail: a counter, not an event: messageDelete only fires for messages
   // discord.js happens to have cached, which a board posted last week is not.
-  const look = ladderPass++ % 10 === 0;
+  const look = boardPass++ % 10 === 0;
   for (const [guildId] of client.guilds.cache) {
     const cfg = getConfig(guildId);
-    if (!cfg.leaderboard_channel_id) continue;
-    const body = leaderboardMessage(guildId);
-    // Footer as well as body: the page count and the number of ranked players
-    // live down there, and both move without a single row changing.
-    const next = `${body.embeds[0].data.description ?? ''}|${body.embeds[0].data.footer?.text ?? ''}`;
-    const unchanged = ladderText.get(guildId) === next;
-    if (unchanged && !look) continue;
+    for (const board of BOARDS) {
+      const where = cfg[board.channel];
+      if (!where) continue;
+      const body = board.build(guildId);
+      // The whole message, not just the description: the fields on the rules
+      // board, the count in the ladder's footer and the ladder's link button
+      // all move without a line of the body changing - and a board whose only
+      // change is a button nobody may follow any more still has to be edited.
+      const next = JSON.stringify([body.embeds[0].data, body.components]);
+      const key = `${guildId}:${board.channel}`;
+      const unchanged = boardText.get(key) === next;
+      if (unchanged && !look) continue;
 
-    const channel = await client.channels.fetch(cfg.leaderboard_channel_id).catch(() => null);
-    if (!channel?.isTextBased() || !channel.isSendable()) continue;
-    let msg = null;
-    if (cfg.leaderboard_msg_id) {
-      try {
-        msg = await channel.messages.fetch(cfg.leaderboard_msg_id);
-      } catch (err) {
-        // Deleted for good is a repost. Anything else - a rate limit, a blip -
-        // leaves this guild alone until the next tick rather than risking a
-        // second board beside the first.
-        if (!messageGone(err)) continue;
+      const channel = await client.channels.fetch(where).catch(() => null);
+      if (!channel?.isTextBased() || !channel.isSendable()) continue;
+      let msg = null;
+      if (cfg[board.msg]) {
+        try {
+          msg = await channel.messages.fetch(cfg[board.msg]!);
+        } catch (err) {
+          // Deleted for good is a repost. Anything else - a rate limit, a blip -
+          // leaves this board alone until the next tick rather than risking a
+          // second one beside the first.
+          if (!messageGone(err)) continue;
+        }
       }
+      if (msg) {
+        // Still up and still saying the right thing: this pass only came here to
+        // check it had not been deleted, so it costs one fetch and no edit.
+        if (unchanged) continue;
+        // Remembered as posted only if it actually went through: a channel that
+        // refuses one edit - permissions changed under us, Discord having a
+        // moment - should be tried again next tick, not written off as current.
+        const edited = await msg.edit(body).then(() => true, () => false);
+        if (!edited) continue;
+      } else {
+        const posted = await channel.send(body).catch(() => null);
+        setConfig(guildId, { [board.msg]: posted?.id ?? null } as Partial<GuildConfig>);
+        if (!posted) continue;
+      }
+      boardText.set(key, next);
     }
-    if (msg) {
-      // Still up and still saying the right thing: this pass only came here to
-      // check it had not been deleted, so it costs one fetch and no edit.
-      if (unchanged) continue;
-      // Remembered as posted only if it actually went through: a channel that
-      // refuses one edit - permissions changed under us, Discord having a
-      // moment - should be tried again next tick, not written off as current.
-      const edited = await msg.edit(body).then(() => true, () => false);
-      if (!edited) continue;
-    } else {
-      const posted = await channel.send(body).catch(() => null);
-      setConfig(guildId, { leaderboard_msg_id: posted?.id ?? null });
-      if (!posted) continue;
-    }
-    ladderText.set(guildId, next);
   }
 }
 
 async function tick() {
   await refreshPanels();
-  await refreshLeaderboards();
+  await refreshBoards();
   await expireStaleCalls();
   const live = db
     .prepare("select * from match where status = 'live'")
@@ -1095,7 +1113,7 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
   if (sub === 'leaderboard') {
     // this server's ladder, not every server's - the rank names inside come
     // from this guild's ranks, so the rows must too.
-    await i.reply(leaderboardMessage(i.guildId!));
+    await i.reply(leaderboardMessage(i.guildId!, ladderUrl(i.guildId!)));
     return;
   }
 
@@ -1223,20 +1241,6 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
   if (fresh.status === 'live') await editMatchMessage(fresh);
 }
 
-/** Page two of a leaderboard nobody else asked for.
- *
- *  Pressing Next on the board in the channel does NOT turn that message over -
- *  it is one message the whole server is looking at, and a page that moves
- *  under everyone whenever anyone reads it is a page nobody can read. The press
- *  answers privately instead, and from there Back and Next edit that private
- *  copy, which is yours to move. The board in the channel stays on the page it
- *  exists to show. */
-async function onLeaderboardPage(i: import('discord.js').ButtonInteraction, page: number) {
-  const body = leaderboardMessage(i.guildId!, Number.isFinite(page) ? page : 0);
-  if (i.message.flags.has(MessageFlags.Ephemeral)) await i.update(body);
-  else await i.reply({ ...body, flags: MessageFlags.Ephemeral });
-}
-
 async function onButton(i: import('discord.js').ButtonInteraction) {
   const [, action, arg, extra] = i.customId.split(':');
 
@@ -1246,9 +1250,6 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
   // rating games nobody meant to play for.
   if (action === 'open') return onOpen(i, arg as Format, extra !== 'casual');
   if (action === 'notify') return onNotify(i);
-  // Not a match id, so it has to answer before the lookup below turns it into
-  // "That match is gone."
-  if (action === 'lb') return onLeaderboardPage(i, Number(arg));
 
   const match = getMatch(Number(arg));
   if (!match) {

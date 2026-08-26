@@ -12,9 +12,18 @@ const match = {
   guild_id: 'g',
   format: '1v1',
   scenarios: JSON.stringify(scenarios),
-  // everything ever offered: what is in here and not played was banned, and
-  // what was played without being offered was rolled.
-  ban_pool: JSON.stringify([scenarios[0], 'Ground Plaza Small', 'popcorn Voltaic', scenarios[1]]),
+  // everything ever offered - a scenario in here that was neither banned nor
+  // played was simply not picked, and what was played without being offered at
+  // all was rolled.
+  ban_pool: JSON.stringify([
+    scenarios[0],
+    'Ground Plaza Small',
+    'popcorn Voltaic',
+    'Bounce 180 Tracking',
+    scenarios[1],
+  ]),
+  // ...and the two somebody actually struck out.
+  bans: JSON.stringify(['Ground Plaza Small', 'popcorn Voltaic']),
 } as unknown as Parameters<typeof resultsEmbed>[0];
 
 const rows = [
@@ -71,6 +80,10 @@ assert.ok(!table[0].includes('*'), 'the header is not a result');
 
 // The draft: what was struck out, and the round nobody chose.
 assert.ok(description!.includes('**Banned** Ground Plaza Small, popcorn Voltaic'));
+assert.ok(
+  !description!.includes('Bounce 180 Tracking'),
+  'a scenario that was offered and never picked was not banned',
+);
 assert.ok(description!.includes('**Rolled** pasu small reload'), 'the rolled round says so');
 
 assert.equal(fields!.length, 2);
@@ -145,6 +158,66 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
   const n = resultsEmbed(match, neither, players, new Map([['a', 15], ['b', -15]]));
   assert.equal(n.data.title, 'ness beats Jay 2–1 · 1v1', 'per-scenario forfeits, one each');
   assert.ok(n.data.fields!.every((f) => !f.value.includes('forfeited the match')));
+}
+
+// The standing board: the format's numbers and every scenario in the pool, on
+// one message players can read without Manage Server.
+{
+  const { rulesMessage } = await import('./embeds.js');
+  const { getFormat, getScenarios, setFormat } = await import('./db.js');
+  const fmt = setFormat('g2', { rounds: 3, runs: 3, pickPool: 5 });
+  const [board] = rulesMessage('g2').embeds;
+  const text = board.data.description!;
+  assert.ok(text.includes('**3**') && text.includes('**5**'), `rounds and pool, got ${text}`);
+  // Three offered minus the two bans, not the five that were rolled - the
+  // number a player is actually choosing from.
+  assert.ok(text.includes('**3** left of **5**'), `what the picker sees, got ${text}`);
+  assert.equal(fmt.pickPool, 5);
+
+  const pool = getScenarios('g2');
+  const cats = new Set(pool.map((s) => s.category));
+  assert.equal(board.data.fields!.length, cats.size, 'a field per category');
+  assert.ok(
+    board.data.fields!.every((f) => f.value.length <= 1024),
+    'no field is over what Discord takes',
+  );
+  const first = pool[0];
+  assert.ok(
+    board.data.fields!.some((f) => f.name.startsWith(first.category) && f.value.includes(first.name)),
+    'and a scenario is listed under its own category',
+  );
+
+  // One scenario, no picking: the ban-and-pick sentence would be a lie.
+  setFormat('g2', { rounds: 1 });
+  assert.ok(rulesMessage('g2').embeds[0].data.description!.startsWith('**One** scenario'));
+  setFormat('g2', { rounds: getFormat('g').rounds });
+
+  // A pool edited past what Discord takes. Over any of its limits the message
+  // is REJECTED, so the board would vanish rather than come out short - which
+  // is the one way this feature fails silently.
+  const { setScenarios } = await import('./db.js');
+  setScenarios(
+    'g2',
+    Array.from({ length: 40 }, (_, c) =>
+      Array.from({ length: 30 }, (_, n) => ({
+        category: `Category number ${c}`,
+        name: `a scenario with a fairly long name ${c}-${n}`,
+        main: 'Clicking',
+        rank_ids: null,
+      })),
+    ).flat(),
+  );
+  const big = rulesMessage('g2').embeds[0].data;
+  const size =
+    big.description!.length +
+    big.fields!.reduce((n, f) => n + f.name.length + f.value.length, 0);
+  assert.ok(big.fields!.length <= 25, `got ${big.fields!.length} fields`);
+  assert.ok(size < 6000, `the whole embed fits, got ${size}`);
+  assert.ok(
+    big.fields!.every((f) => f.name.length <= 256 && f.value.length <= 1024),
+    'and every field does too',
+  );
+  assert.ok(big.fields!.at(-1)!.name.includes('more categories'), 'what was cut says so');
 }
 
 console.log('embeds ok');

@@ -19,6 +19,7 @@ import {
   getPlayer,
   getRankMode,
   getRanks,
+  getScenarios,
   guildStats,
   ladderSize,
   leaderboard,
@@ -350,24 +351,23 @@ export const messageGone = (err: unknown) =>
   err !== null &&
   (err as { code?: number }).code === 10008;
 
-/** Ten to a page: a phone shows about that many lines of a Discord embed before
- *  it starts scrolling, and a leaderboard you have to scroll is one nobody
- *  reads past third place. */
-export const LADDER_PAGE = 10;
+/** Ten rows: a phone shows about that many lines of a Discord embed before it
+ *  starts scrolling, and a leaderboard you have to scroll is one nobody reads
+ *  past third place. */
+const LADDER_PAGE = 10;
 
-/** The ladder, one page of it, with the buttons that turn the page.
+/** The top of the ladder, and a link to the rest of it.
  *
- *  Drawn from the database on every call rather than from a stored page, so a
- *  board someone left open overnight and a board posted this second say the
- *  same thing. The page number rides in the button's id - there is nowhere else
- *  to keep it that survives a restart, and it is the only state a page has. */
-export function leaderboardMessage(guildId: string, page = 0) {
+ *  Drawn from the database on every call, so a board someone left open
+ *  overnight and a board posted this second say the same thing.
+ *
+ *  Ten rows and no further: paging a Discord embed meant a private copy per
+ *  reader and a page number smuggled through a button id, all to show eleventh
+ *  place. The web ladder shows a hundred, sorts and searches, and is one click
+ *  away - `url` null only where there is no dashboard to click through to. */
+export function leaderboardMessage(guildId: string, url: string | null = null) {
   const total = ladderSize(guildId);
-  const pages = Math.max(1, Math.ceil(total / LADDER_PAGE));
-  // Clamped, not trusted: the id comes back off a button that may be older than
-  // the last three players to leave the ladder.
-  const at = Math.min(Math.max(page, 0), pages - 1);
-  const rows = leaderboard(guildId, LADDER_PAGE, at * LADDER_PAGE);
+  const rows = leaderboard(guildId, LADDER_PAGE);
 
   const line = (p: Player, n: number) => {
     // Draws are games. Left out of the total they would put the rate over what
@@ -390,37 +390,106 @@ export function leaderboardMessage(guildId: string, page = 0) {
     .setTitle("Ladder")
     .setColor(BLURPLE)
     .setDescription(
-      rows.length
-        ? rows.map((p, n) => line(p, at * LADDER_PAGE + n)).join("\n")
-        : "_no games played yet_",
+      rows.length ? rows.map(line).join("\n") : "_no games played yet_",
     )
     .setFooter({
-      text: total
-        ? `Page ${at + 1} of ${pages} · ${total} ranked · powered by kova`
-        : footer().text,
+      text: total ? `${total} ranked · powered by kova` : footer().text,
     });
 
-  // A one-page ladder gets no buttons at all: two dead controls under it say
-  // there is more to see when there isn't.
+  // Nothing to click through to on a ladder that fits, and nowhere to click
+  // through to without a dashboard.
   const components =
-    pages > 1
+    url && total > rows.length
       ? [
           new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
-              .setCustomId(`pug:lb:${at - 1}`)
-              .setLabel("Back")
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(at === 0),
-            new ButtonBuilder()
-              .setCustomId(`pug:lb:${at + 1}`)
-              .setLabel("Next")
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(at >= pages - 1),
+              .setLabel("Full ladder")
+              .setStyle(ButtonStyle.Link)
+              .setURL(url),
           ),
         ]
       : [];
 
   return { embeds: [embed], components };
+}
+
+/** How this server plays, standing in a channel: the format's numbers and the
+ *  whole scenario pool.
+ *
+ *  Everything here is already true somewhere - the dashboard's format box, the
+ *  pool editor, the ban phase's own buttons - and nowhere a player without
+ *  Manage Server can look. Kept current by the same tick as the ladder, so it
+ *  can never be the stale copy people quote at each other.
+ *
+ *  A rank-restricted category says which brackets get it rather than being
+ *  hidden: the board is one message the whole server reads, and "why did I
+ *  never see that scenario" is exactly what it exists to answer. */
+export function rulesMessage(guildId: string) {
+  const fmt = getFormat(guildId);
+  const ranks = new Map(getRanks(guildId).map((r) => [r.id, r.name]));
+  const picks = Math.max(0, fmt.rounds - 1);
+  // The bans are what the pool leaves room for: two on a full shortlist, none
+  // at all on a shortlist of two, where the first ban would leave the picker no
+  // choice. Same sum pickTurn() makes.
+  const bans = Math.max(0, Math.min(2, fmt.pickPool - 1));
+
+  const embed = new EmbedBuilder()
+    .setTitle("Format & pool")
+    .setColor(BLURPLE)
+    .setDescription(
+      (picks
+        ? `**${fmt.rounds}** scenarios, one per main. The side with the pick bans ` +
+          // Two bans is the pick banning first and the other side banning back;
+          // one is the picker's alone. Both come out of pickTurn().
+          `${bans === 1 ? "one" : "first, the other bans back"}, then it picks from the ` +
+          `**${Math.max(1, fmt.pickPool - bans)}** left of **${fmt.pickPool}**. ` +
+          `The pick alternates and scenario **${fmt.rounds}** is rolled at random.`
+        : "**One** scenario, rolled at random.") +
+        `\nBest of **${fmt.runs}** run${fmt.runs === 1 ? "" : "s"} each - a later one does not count.` +
+        `\n**${fmt.pickTtlS}s** to ban or pick, **${fmt.matchTtlMin}m** to play, ` +
+        `**${fmt.graceMin}m** grace once the first player finishes` +
+        `${fmt.minMatchMin ? `, **${fmt.minMatchMin}m** minimum` : ""}.`,
+    );
+
+  const cats = new Map<string, { names: string[]; ranks: string }>();
+  for (const s of getScenarios(guildId)) {
+    const named = s.rank_ids?.map((id) => ranks.get(id)).filter(Boolean) ?? [];
+    const cat = cats.get(s.category) ?? {
+      names: [],
+      ranks: named.length ? ` · ${named.join(", ")} only` : "",
+    };
+    cat.names.push(s.name);
+    cats.set(s.category, cat);
+  }
+
+  // One field per category, in pool order, up to what Discord takes: 25 fields,
+  // 256 and 1024 characters a side, and 6000 across the whole embed. The last
+  // of those is the one a real pool hits, and hitting any of them is a message
+  // REJECTED, not a message that comes out short - so the budget is counted
+  // here and what did not fit says so.
+  // ponytail: truncation, not a second page. A pool past this is a dashboard
+  // job; add paging if a server ever really runs 24 categories.
+  let budget = 5500 - (embed.data.description?.length ?? 0);
+  let shown = 0;
+  for (const [name, cat] of cats) {
+    const list = cat.names.join(", ");
+    // An empty value is itself a rejection, and a scenario can be named "".
+    const value = list.length > 1024 ? `${list.slice(0, 1000)}… (+more)` : list || "_empty_";
+    const head = `${name}${cat.ranks}`.slice(0, 200);
+    if (shown >= 24 || head.length + value.length > budget) break;
+    budget -= head.length + value.length;
+    shown++;
+    embed.addFields({ name: head, value, inline: false });
+  }
+  if (cats.size > shown) {
+    embed.addFields({
+      name: `+${cats.size - shown} more categories`,
+      value: "_too many to list - see the dashboard_",
+      inline: false,
+    });
+  }
+
+  return { embeds: [embed.setFooter(footer())], components: [] };
 }
 
 export function liveEmbed(
@@ -763,13 +832,12 @@ export function resultsEmbed(
     };
   });
 
-  // What was on the table and never played. Everything offered is in ban_pool,
-  // so what is in there and not in the match was struck out - and a scenario in
-  // the match that was never offered is the last round, which is rolled rather
-  // than picked. Worth saying: the card has always shown all three as if they
-  // were chosen the same way.
+  // How the match got its scenarios. Only what a side actually struck out is a
+  // ban - the rest of a shortlist went unpicked, which is not the same thing -
+  // and a scenario that was never offered at all is the last round, rolled
+  // rather than picked.
   const offered: string[] = match.ban_pool ? JSON.parse(match.ban_pool) : [];
-  const banned = [...new Set(offered.filter((s) => !scenarios.includes(s)))];
+  const banned: string[] = match.bans ? JSON.parse(match.bans) : [];
   const rolled = offered.length
     ? scenarios.filter((s) => !offered.includes(s))
     : [];
