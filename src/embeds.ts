@@ -8,6 +8,7 @@ import {
 } from "discord.js";
 import {
   FORMATS,
+  MAIN_CATEGORIES,
   PANEL_FORMATS,
   ROUNDS,
   RUNS_PER_SCENARIO,
@@ -426,7 +427,11 @@ export function leaderboardMessage(guildId: string, url: string | null = null) {
  *  never see that scenario" is exactly what it exists to answer. */
 export function rulesMessage(guildId: string) {
   const fmt = getFormat(guildId);
-  const ranks = new Map(getRanks(guildId).map((r) => [r.id, r.name]));
+  // Highest bracket first, which is the order getRanks gives - so a pair of
+  // categories offered to the same two ranks stop reading as "Elite, Advanced"
+  // on one and "Advanced, Elite" on the next.
+  const ranks = getRanks(guildId);
+  const rankAt = new Map(ranks.map((r, i) => [r.id, i]));
   const picks = Math.max(0, fmt.rounds - 1);
   // The bans are what the pool leaves room for: two on a full shortlist, none
   // at all on a shortlist of two, where the first ban would leave the picker no
@@ -446,23 +451,46 @@ export function rulesMessage(guildId: string) {
           `The pick alternates and scenario **${fmt.rounds}** is rolled at random.`
         : "**One** scenario, rolled at random.") +
         `\nBest of **${fmt.runs}** run${fmt.runs === 1 ? "" : "s"} each - a later one does not count.` +
-        `\n**${fmt.pickTtlS}s** to ban or pick, **${fmt.matchTtlMin}m** to play, ` +
+        // Its own paragraph: the clocks are the half of this nobody needs until
+        // they are already in a match, and they were reading as a fourth line
+        // of the format itself.
+        `\n\n**${fmt.pickTtlS}s** to ban or pick, **${fmt.matchTtlMin}m** to play, ` +
         `**${fmt.graceMin}m** grace once the first player finishes` +
         `${fmt.minMatchMin ? `, **${fmt.minMatchMin}m** minimum` : ""}.`,
     );
 
-  const cats = new Map<string, { names: string[]; ranks: string }>();
+  const cats = new Map<string, { main: string; names: string[]; head: string }>();
   for (const s of getScenarios(guildId)) {
-    const named = s.rank_ids?.map((id) => ranks.get(id)).filter(Boolean) ?? [];
-    const cat = cats.get(s.category) ?? {
-      names: [],
-      ranks: named.length ? ` · ${named.join(", ")} only` : "",
-    };
+    let cat = cats.get(s.category);
+    if (!cat) {
+      const named = [...(s.rank_ids ?? [])]
+        .sort((a, b) => (rankAt.get(a) ?? ranks.length) - (rankAt.get(b) ?? ranks.length))
+        .map((id) => ranks[rankAt.get(id) ?? -1]?.name)
+        .filter(Boolean);
+      cat = {
+        main: s.main,
+        names: [],
+        // Which main it rolls for, since "one per main" is the whole format and
+        // the board was leaving a reader to guess which of the three a category
+        // counted as. A category named after its own main says it once.
+        head:
+          (s.main === s.category ? s.category : `${s.main} · ${s.category}`) +
+          (named.length ? ` · ${named.join(", ")} only` : ""),
+      };
+      cats.set(s.category, cat);
+    }
     cat.names.push(s.name);
-    cats.set(s.category, cat);
   }
+  // ...and grouped by that main, so the three a match draws from are three
+  // blocks rather than eleven headings in whatever order the pool was typed in.
+  // Stable, so within a main the pool's own order survives.
+  const at = (main: string) => {
+    const i = (MAIN_CATEGORIES as readonly string[]).indexOf(main);
+    return i < 0 ? MAIN_CATEGORIES.length : i;
+  };
+  const ordered = [...cats.values()].sort((a, b) => at(a.main) - at(b.main));
 
-  // One field per category, in pool order, up to what Discord takes: 25 fields,
+  // One field per category, up to what Discord takes: 25 fields,
   // 256 and 1024 characters a side, and 6000 across the whole embed. The last
   // of those is the one a real pool hits, and hitting any of them is a message
   // REJECTED, not a message that comes out short - so the budget is counted
@@ -471,19 +499,19 @@ export function rulesMessage(guildId: string) {
   // job; add paging if a server ever really runs 24 categories.
   let budget = 5500 - (embed.data.description?.length ?? 0);
   let shown = 0;
-  for (const [name, cat] of cats) {
+  for (const cat of ordered) {
     const list = cat.names.join(", ");
     // An empty value is itself a rejection, and a scenario can be named "".
     const value = list.length > 1024 ? `${list.slice(0, 1000)}… (+more)` : list || "_empty_";
-    const head = `${name}${cat.ranks}`.slice(0, 200);
+    const head = cat.head.slice(0, 200);
     if (shown >= 24 || head.length + value.length > budget) break;
     budget -= head.length + value.length;
     shown++;
     embed.addFields({ name: head, value, inline: false });
   }
-  if (cats.size > shown) {
+  if (ordered.length > shown) {
     embed.addFields({
-      name: `+${cats.size - shown} more categories`,
+      name: `+${ordered.length - shown} more categories`,
       value: "_too many to list - see the dashboard_",
       inline: false,
     });

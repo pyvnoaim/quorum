@@ -164,6 +164,7 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
 // one message players can read without Manage Server.
 {
   const { rulesMessage } = await import('./embeds.js');
+  const MAINS = [...(await import('./config.js')).MAIN_CATEGORIES] as string[];
   const { getFormat, getScenarios, setFormat } = await import('./db.js');
   const fmt = setFormat('g2', { rounds: 3, runs: 3, pickPool: 5 });
   const [board] = rulesMessage('g2').embeds;
@@ -182,10 +183,17 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
     'no field is over what Discord takes',
   );
   const first = pool[0];
+  const its = board.data.fields!.find((f) => f.value.includes(first.name))!;
+  assert.ok(its, 'every scenario is listed');
+  // The main it rolls for, then the category: "one per main" is the format, so
+  // a heading that names only the category leaves a reader guessing.
   assert.ok(
-    board.data.fields!.some((f) => f.name.startsWith(first.category) && f.value.includes(first.name)),
-    'and a scenario is listed under its own category',
+    its.name.startsWith(`${first.main} · ${first.category}`),
+    `a scenario sits under its main and its category, got ${its.name}`,
   );
+  const mains = board.data.fields!.map((f) => f.name.split(' · ')[0]);
+  assert.deepEqual(mains, [...mains].sort((a, b) => MAINS.indexOf(a) - MAINS.indexOf(b)),
+    'and the categories are grouped by main, not left in pool order');
 
   // One scenario, no picking: the ban-and-pick sentence would be a lie.
   setFormat('g2', { rounds: 1 });
