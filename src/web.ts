@@ -7,6 +7,7 @@ import {
   type Guild,
   type GuildBasedChannel,
   type PermissionOverwriteOptions,
+  type SendableChannels,
 } from 'discord.js';
 import {
   FORMATS,
@@ -66,7 +67,7 @@ import {
   messageGone,
   panelMessage,
   rankLabel,
-  rulesMessage,
+  rulesMessages,
 } from './embeds.js';
 import { bandsInReach, forfeits, rankForRoles, scenarioWinners } from './rating.js';
 import { searchScenarios, voltaicS5 } from './kovaaks.js';
@@ -658,17 +659,118 @@ async function syncRankChannelsToDiscord(
   return { ok: true };
 }
 
-/** The standing boards a server can have up. Each is one message Quorum owns in
- *  a channel staff picked, edited in place by the tick - which is why they are
- *  a list and not two copies of the same forty lines. */
+/** The standing boards a server can have up. Each is messages Quorum owns in a
+ *  channel staff picked, edited in place by the tick - which is why they are a
+ *  list and not two copies of the same forty lines.
+ *
+ *  Messages, plural, because the pool board is one per difficulty: a build
+ *  returns however many that server needs, and the leaderboard's one is the
+ *  same shape with a length of one. */
 export const BOARDS = [
   {
     channel: 'leaderboard_channel_id',
     msg: 'leaderboard_msg_id',
-    build: (guildId: string) => leaderboardMessage(guildId, ladderUrl(guildId)),
+    build: (guildId: string) => [leaderboardMessage(guildId, ladderUrl(guildId))],
   },
-  { channel: 'rules_channel_id', msg: 'rules_msg_id', build: rulesMessage },
+  { channel: 'rules_channel_id', msg: 'rules_msg_id', build: rulesMessages },
 ] as const;
+
+type Board = (typeof BOARDS)[number];
+type BoardBody = ReturnType<Board['build']>[number];
+
+/** The ids of a board's messages, top to bottom. The column held a single id
+ *  before a board could be more than one message, so a value that isn't JSON is
+ *  read as the one message it names: an upgrade edits the board already up
+ *  rather than posting a second one under it. */
+export function boardIds(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const out = JSON.parse(raw);
+    if (Array.isArray(out)) return out.filter((id) => typeof id === 'string');
+  } catch {
+    /* the bare id this column used to hold */
+  }
+  return [raw];
+}
+const packIds = (ids: string[]) => (ids.length ? JSON.stringify(ids) : null);
+
+/** Puts a board in a channel and keeps it there: what is already up is edited,
+ *  what has been deleted is posted again, and a board that has shrunk - a
+ *  difficulty that stopped existing - takes the surplus message down with it.
+ *
+ *  Editing rather than reposting is the whole point. A board that reposted
+ *  every pass would walk down its channel a message at a time, which is why the
+ *  ids are stored at all.
+ *
+ *  `edit` is off for a pass that only came to check the board had not been
+ *  deleted: same fetches, no edit for text that has not moved. Returns false
+ *  when Discord refused something, so a caller memoising the text knows not to
+ *  record this pass as current. */
+export async function placeBoard(
+  guildId: string,
+  board: Board,
+  channel: SendableChannels,
+  bodies: readonly BoardBody[],
+  edit = true,
+) {
+  const was = getConfig(guildId)[board.msg];
+  const had = boardIds(was);
+  // Started from what is already up, and written by position: an id is WHICH
+  // board it holds, so a slot that could not be filled this pass has to keep
+  // the id it had rather than let the one below it slide up into its place -
+  // that would rewrite a message with somebody else's difficulty on it.
+  const now = [...had];
+  let ok = true;
+
+  for (const [i, body] of bodies.entries()) {
+    let msg = null;
+    if (had[i]) {
+      try {
+        msg = await channel.messages.fetch(had[i]);
+      } catch (err) {
+        // Deleted for good is a repost. Anything else - a rate limit, a blip -
+        // is not evidence the message is gone, so it keeps its slot and the
+        // rest of the board waits for the next pass rather than risking a
+        // second copy beside the first.
+        if (!messageGone(err)) {
+          ok = false;
+          break;
+        }
+      }
+    }
+    if (msg) {
+      // Kept as current only if the edit actually went through: a channel that
+      // refuses one - permissions changed under us, Discord having a moment -
+      // should be tried again next pass, not written off as up to date.
+      if (edit && !(await msg.edit(body).then(() => true, () => false))) ok = false;
+      continue;
+    }
+    const posted = await channel.send(body).catch(() => null);
+    // Nothing below this can be posted in the right order once one send has
+    // failed, so the board stops here with its slots still lined up.
+    if (!posted) {
+      ok = false;
+      break;
+    }
+    now[i] = posted.id;
+  }
+
+  // Fewer messages than last time - a difficulty that stopped existing - so the
+  // tail is a board nothing updates any more. Only once the rest went through:
+  // a pass that gave up halfway has not established that anything is surplus.
+  if (ok) {
+    for (const id of now.splice(bodies.length)) {
+      const stale = await channel.messages.fetch(id).catch(() => null);
+      await stale?.delete().catch(() => {});
+    }
+  }
+
+  // Only when they actually moved. This runs on every pass that checks the
+  // board is still there, and setConfig rewrites the whole row.
+  const packed = packIds(now);
+  if (packed !== was) setConfig(guildId, { [board.msg]: packed } as Partial<GuildConfig>);
+  return ok;
+}
 
 /** Puts a standing board where the dashboard says it goes - and takes it away
  *  from where it used to be.
@@ -677,15 +779,17 @@ export const BOARDS = [
  *  alone. Moving a board deletes the old one rather than leaving a stale copy
  *  sitting in a channel nobody is updating any more. Returns what to tell the
  *  admin, or nothing when it went fine. */
-async function syncBoardMessage(guild: Guild, was: GuildConfig, board: (typeof BOARDS)[number]) {
+async function syncBoardMessage(guild: Guild, was: GuildConfig, board: Board) {
   const cfg = getConfig(guild.id);
   const moved = was[board.channel] !== cfg[board.channel];
 
-  if (moved && was[board.channel] && was[board.msg]) {
+  if (moved && was[board.channel]) {
     const old = guild.channels.cache.get(was[board.channel]!);
     if (old?.isTextBased()) {
-      const msg = await old.messages.fetch(was[board.msg]!).catch(() => null);
-      await msg?.delete().catch(() => {});
+      for (const id of boardIds(was[board.msg])) {
+        const msg = await old.messages.fetch(id).catch(() => null);
+        await msg?.delete().catch(() => {});
+      }
     }
     setConfig(guild.id, { [board.msg]: null } as Partial<GuildConfig>);
   }
@@ -693,22 +797,11 @@ async function syncBoardMessage(guild: Guild, was: GuildConfig, board: (typeof B
 
   const channel = guild.channels.cache.get(cfg[board.channel]!);
   if (!channel?.isSendable()) return 'Quorum cannot post in that channel';
-  // Still up where it was? Leave it: reposting on every save would walk the
-  // board down the channel one save at a time. And a fetch that fails for any
-  // reason other than "that message is gone" is not evidence that it isn't
-  // there - the tick will post one if it really has been deleted.
-  if (!moved && cfg[board.msg]) {
-    try {
-      await channel.messages.fetch(cfg[board.msg]!);
-      return;
-    } catch (err) {
-      if (!messageGone(err)) return;
-    }
-  }
-
-  const posted = await channel.send(board.build(guild.id)).catch(() => null);
-  setConfig(guild.id, { [board.msg]: posted?.id ?? null } as Partial<GuildConfig>);
-  if (!posted) return 'Quorum cannot post in that channel';
+  // Edited where it is already up rather than reposted - a save that moved
+  // nothing must not walk the board down its channel - and the save is what
+  // changed the pool, so it is also the moment the board is out of date.
+  if (!(await placeBoard(guild.id, board, channel, board.build(guild.id))))
+    return 'Quorum cannot post in that channel';
 }
 
 /** Puts a panel at the bottom of a channel, taking any older one with it.
@@ -1890,11 +1983,13 @@ export function startWeb(client: Client, hooks: Hooks) {
           // is a ladder frozen at the moment the bot left.
           const cfg = getConfig(guildId);
           for (const b of BOARDS) {
-            if (!cfg[b.channel] || !cfg[b.msg]) continue;
+            if (!cfg[b.channel]) continue;
             const where = guild.channels.cache.get(cfg[b.channel]!);
             if (!where?.isTextBased()) continue;
-            const msg = await where.messages.fetch(cfg[b.msg]!).catch(() => null);
-            await msg?.delete().catch(() => {});
+            for (const id of boardIds(cfg[b.msg])) {
+              const msg = await where.messages.fetch(id).catch(() => null);
+              await msg?.delete().catch(() => {});
+            }
           }
           const ranks = getRanks(guildId);
           await syncRankChannelsToDiscord(guild, [], ranks, true);

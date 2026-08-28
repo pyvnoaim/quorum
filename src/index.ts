@@ -47,9 +47,7 @@ import {
   matchPlayers,
   recentMatches,
   seedPlayer,
-  setConfig,
   setPlayerElo,
-  type GuildConfig,
   type Match,
   type MatchPlayer,
 } from './db.js';
@@ -58,7 +56,6 @@ import {
   rankLabel,
   useClient,
   liveEmbed,
-  messageGone,
   noContestEmbed,
   openEmbed,
   panelMessage,
@@ -68,7 +65,7 @@ import {
   resultsEmbed,
   staleEmbed,
 } from './embeds.js';
-import { startWeb, profileUrl, ladderUrl, BOARDS } from './web.js';
+import { startWeb, profileUrl, ladderUrl, BOARDS, placeBoard } from './web.js';
 import { kovaaksAccountForDiscordId, scoreInWindow, voltaicS5 } from './kovaaks.js';
 import {
   advancePick,
@@ -945,44 +942,24 @@ async function refreshBoards() {
     for (const board of BOARDS) {
       const where = cfg[board.channel];
       if (!where) continue;
-      const body = board.build(guildId);
-      // The whole message, not just the description: the fields on the rules
-      // board, the count in the ladder's footer and the ladder's link button
+      const bodies = board.build(guildId);
+      // The whole board, not just the descriptions: the fields on the pool
+      // boards, the count in the ladder's footer and the ladder's link button
       // all move without a line of the body changing - and a board whose only
       // change is a button nobody may follow any more still has to be edited.
-      const next = JSON.stringify([body.embeds[0].data, body.components]);
+      // How MANY messages counts too: a new difficulty is a message that is not
+      // there yet, and every board under it saying the wrong thing.
+      const next = JSON.stringify(bodies.map((b) => [b.embeds[0].data, b.components]));
       const key = `${guildId}:${board.channel}`;
       const unchanged = boardText.get(key) === next;
       if (unchanged && !look) continue;
 
       const channel = await client.channels.fetch(where).catch(() => null);
       if (!channel?.isTextBased() || !channel.isSendable()) continue;
-      let msg = null;
-      if (cfg[board.msg]) {
-        try {
-          msg = await channel.messages.fetch(cfg[board.msg]!);
-        } catch (err) {
-          // Deleted for good is a repost. Anything else - a rate limit, a blip -
-          // leaves this board alone until the next tick rather than risking a
-          // second one beside the first.
-          if (!messageGone(err)) continue;
-        }
-      }
-      if (msg) {
-        // Still up and still saying the right thing: this pass only came here to
-        // check it had not been deleted, so it costs one fetch and no edit.
-        if (unchanged) continue;
-        // Remembered as posted only if it actually went through: a channel that
-        // refuses one edit - permissions changed under us, Discord having a
-        // moment - should be tried again next tick, not written off as current.
-        const edited = await msg.edit(body).then(() => true, () => false);
-        if (!edited) continue;
-      } else {
-        const posted = await channel.send(body).catch(() => null);
-        setConfig(guildId, { [board.msg]: posted?.id ?? null } as Partial<GuildConfig>);
-        if (!posted) continue;
-      }
-      boardText.set(key, next);
+      // Unchanged means this pass only came to check the board had not been
+      // deleted: it costs the fetches and no edits.
+      if (await placeBoard(guildId, board, channel, bodies, !unchanged))
+        boardText.set(key, next);
     }
   }
 }

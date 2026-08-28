@@ -24,9 +24,12 @@ import {
   guildStats,
   ladderSize,
   leaderboard,
+  poolFor,
   type Match,
   type MatchPlayer,
   type Player,
+  type PoolRow,
+  type Rank,
 } from "./db.js";
 import {
   allRunsUsed,
@@ -414,31 +417,110 @@ export function leaderboardMessage(guildId: string, url: string | null = null) {
   return { embeds: [embed], components };
 }
 
-/** How this server plays, standing in a channel: the format's numbers and the
- *  whole scenario pool.
+/** The pool as one entry per category, grouped by the main that category rolls
+ *  up into - so the three a match draws from are three blocks rather than
+ *  eleven headings in whatever order the pool was typed in. Stable, so within a
+ *  main the pool's own order survives.
+ *
+ *  `ranks` names the brackets a restricted category is offered to. Pass null on
+ *  a board that is already one bracket's own: there the heading says it once
+ *  and every line under it would otherwise repeat it. */
+function poolCategories(rows: PoolRow[], ranks: Rank[] | null) {
+  const rankAt = new Map((ranks ?? []).map((r, i) => [r.id, i]));
+  const cats = new Map<string, { main: string; head: string; names: string[] }>();
+  for (const s of rows) {
+    let cat = cats.get(s.category);
+    if (!cat) {
+      const named = ranks
+        ? [...(s.rank_ids ?? [])]
+            .sort((a, b) => (rankAt.get(a) ?? ranks.length) - (rankAt.get(b) ?? ranks.length))
+            .map((id) => ranks[rankAt.get(id) ?? -1]?.name)
+            .filter(Boolean)
+        : [];
+      cat = {
+        main: s.main,
+        names: [],
+        // Which main it rolls for, since "one per main" is the whole format and
+        // the board was leaving a reader to guess which of the three a category
+        // counted as. A category named after its own main says it once.
+        head:
+          (s.main === s.category ? s.category : `${s.main} · ${s.category}`) +
+          (named.length ? ` · ${named.join(", ")} only` : ""),
+      };
+      cats.set(s.category, cat);
+    }
+    cat.names.push(s.name);
+  }
+  const at = (main: string) => {
+    const i = (MAIN_CATEGORIES as readonly string[]).indexOf(main);
+    return i < 0 ? MAIN_CATEGORIES.length : i;
+  };
+  return [...cats.values()].sort((a, b) => at(a.main) - at(b.main));
+}
+
+/** One field per category, up to what Discord takes: 25 fields, 256 and 1024
+ *  characters a side, and 6000 across the whole embed. The last of those is the
+ *  one a real pool hits, and hitting any of them is a message REJECTED, not a
+ *  message that comes out short - so the budget is counted here, against what
+ *  the embed is already carrying, and what did not fit says so.
+ *  ponytail: truncation, not a second page. Splitting the board per difficulty
+ *  bought most of a pool back; a slice past this is a dashboard job. */
+function fillPool(embed: EmbedBuilder, cats: ReturnType<typeof poolCategories>) {
+  let budget = 5500 - (embed.data.description?.length ?? 0) - (embed.data.title?.length ?? 0);
+  let shown = 0;
+  for (const cat of cats) {
+    const list = cat.names.join(", ");
+    // An empty value is itself a rejection, and a scenario can be named "".
+    const value = list.length > 1024 ? `${list.slice(0, 1000)}… (+more)` : list || "_empty_";
+    const head = cat.head.slice(0, 200);
+    if (shown >= 24 || head.length + value.length > budget) break;
+    budget -= head.length + value.length;
+    shown++;
+    embed.addFields({ name: head, value, inline: false });
+  }
+  if (cats.length > shown) {
+    embed.addFields({
+      name: `+${cats.length - shown} more categories`,
+      value: "_too many to list - see the dashboard_",
+      inline: false,
+    });
+  }
+  return embed;
+}
+
+/** How this server plays, standing in a channel: the format's numbers, then the
+ *  scenario pool a message at a time.
  *
  *  Everything here is already true somewhere - the dashboard's format box, the
  *  pool editor, the ban phase's own buttons - and nowhere a player without
  *  Manage Server can look. Kept current by the same tick as the ladder, so it
  *  can never be the stale copy people quote at each other.
  *
- *  A rank-restricted category says which brackets get it rather than being
- *  hidden: the board is one message the whole server reads, and "why did I
- *  never see that scenario" is exactly what it exists to answer. */
-export function rulesMessage(guildId: string) {
+ *  Split by the pool a bracket draws from, not by bracket: two brackets offered
+ *  the same scenarios read one board between them, which is how a ladder that
+ *  runs a hard set and an easy set gets two messages rather than four. Each is
+ *  the WHOLE pool for the brackets it names - the categories everyone plays are
+ *  repeated into every one of them - so a player reads the one with their
+ *  bracket on it and is done, instead of that plus a header for the rest. A
+ *  server with nothing rank-restricted has one pool, so it stays one message.
+ *
+ *  Which also buys the pool room: ten categories of eight was already close
+ *  enough to Discord's 6000 characters to be truncating, and a board that
+ *  answers "why did I never see that scenario" must not be the one cut short. */
+export function rulesMessages(guildId: string) {
   const fmt = getFormat(guildId);
   // Highest bracket first, which is the order getRanks gives - so a pair of
-  // categories offered to the same two ranks stop reading as "Elite, Advanced"
-  // on one and "Advanced, Elite" on the next.
+  // brackets sharing a pool stop reading as "Elite, Advanced" on one board and
+  // "Advanced, Elite" on the next.
   const ranks = getRanks(guildId);
-  const rankAt = new Map(ranks.map((r, i) => [r.id, i]));
+  const pool = getScenarios(guildId);
   const picks = Math.max(0, fmt.rounds - 1);
   // The bans are what the pool leaves room for: two on a full shortlist, none
   // at all on a shortlist of two, where the first ban would leave the picker no
   // choice. Same sum pickTurn() makes.
   const bans = Math.max(0, Math.min(2, fmt.pickPool - 1));
 
-  const embed = new EmbedBuilder()
+  const header = new EmbedBuilder()
     .setTitle("Format & pool")
     .setColor(BLURPLE)
     .setDescription(
@@ -459,65 +541,48 @@ export function rulesMessage(guildId: string) {
         `${fmt.minMatchMin ? `, **${fmt.minMatchMin}m** minimum` : ""}.`,
     );
 
-  const cats = new Map<string, { main: string; names: string[]; head: string }>();
-  for (const s of getScenarios(guildId)) {
-    let cat = cats.get(s.category);
-    if (!cat) {
-      const named = [...(s.rank_ids ?? [])]
-        .sort((a, b) => (rankAt.get(a) ?? ranks.length) - (rankAt.get(b) ?? ranks.length))
-        .map((id) => ranks[rankAt.get(id) ?? -1]?.name)
-        .filter(Boolean);
-      cat = {
-        main: s.main,
-        names: [],
-        // Which main it rolls for, since "one per main" is the whole format and
-        // the board was leaving a reader to guess which of the three a category
-        // counted as. A category named after its own main says it once.
-        head:
-          (s.main === s.category ? s.category : `${s.main} · ${s.category}`) +
-          (named.length ? ` · ${named.join(", ")} only` : ""),
-      };
-      cats.set(s.category, cat);
-    }
-    cat.names.push(s.name);
-  }
-  // ...and grouped by that main, so the three a match draws from are three
-  // blocks rather than eleven headings in whatever order the pool was typed in.
-  // Stable, so within a main the pool's own order survives.
-  const at = (main: string) => {
-    const i = (MAIN_CATEGORIES as readonly string[]).indexOf(main);
-    return i < 0 ? MAIN_CATEGORIES.length : i;
-  };
-  const ordered = [...cats.values()].sort((a, b) => at(a.main) - at(b.main));
-
-  // One field per category, up to what Discord takes: 25 fields,
-  // 256 and 1024 characters a side, and 6000 across the whole embed. The last
-  // of those is the one a real pool hits, and hitting any of them is a message
-  // REJECTED, not a message that comes out short - so the budget is counted
-  // here and what did not fit says so.
-  // ponytail: truncation, not a second page. A pool past this is a dashboard
-  // job; add paging if a server ever really runs 24 categories.
-  let budget = 5500 - (embed.data.description?.length ?? 0);
-  let shown = 0;
-  for (const cat of ordered) {
-    const list = cat.names.join(", ");
-    // An empty value is itself a rejection, and a scenario can be named "".
-    const value = list.length > 1024 ? `${list.slice(0, 1000)}… (+more)` : list || "_empty_";
-    const head = cat.head.slice(0, 200);
-    if (shown >= 24 || head.length + value.length > budget) break;
-    budget -= head.length + value.length;
-    shown++;
-    embed.addFields({ name: head, value, inline: false });
-  }
-  if (ordered.length > shown) {
-    embed.addFields({
-      name: `+${ordered.length - shown} more categories`,
-      value: "_too many to list - see the dashboard_",
-      inline: false,
-    });
+  // poolFor() is the question the roll itself asks, so a board built on its
+  // answer cannot describe a pool the match won't use - down to its "a bracket
+  // left with nothing falls back to everything" rule. Two brackets whose
+  // answers match are one board, keyed on the answer.
+  const groups = new Map<string, { named: string[]; rows: PoolRow[] }>();
+  for (const rank of ranks) {
+    const rows = poolFor(pool, rank.id);
+    // Which rows survived, as a bitmask over the pool. Joining the names would
+    // need a separator no scenario name can hold, and there isn't one.
+    const mine = new Set(rows);
+    const key = pool.map((s) => (mine.has(s) ? "1" : "0")).join("");
+    const group = groups.get(key);
+    if (group) group.named.push(rank.name);
+    else groups.set(key, { named: [rank.name], rows });
   }
 
-  return { embeds: [embed.setFooter(footer())], components: [] };
+  // Nothing to split on - no ladder, or a pool no category is restricted in.
+  // The header carries the whole thing itself: a board that is everyone's and
+  // one bracket's alike has nothing to put in a second message.
+  if (groups.size <= 1) {
+    fillPool(header, poolCategories(pool, ranks));
+    return [{ embeds: [header.setFooter(footer())], components: [] }];
+  }
+
+  return [
+    { embeds: [header.setFooter(footer())], components: [] },
+    ...[...groups.values()].map((group) => ({
+      embeds: [
+        fillPool(
+          // Rank names are staff's own words and this heading is however many
+          // of them share a pool, so it is cut to what Discord takes: a title
+          // over 256 is a message REJECTED, and the board that vanished would
+          // be the one nobody could explain.
+          new EmbedBuilder()
+            .setTitle(`Pool · ${group.named.join(", ")}`.slice(0, 256))
+            .setColor(BLURPLE),
+          poolCategories(group.rows, null),
+        ).setFooter(footer()),
+      ],
+      components: [],
+    })),
+  ];
 }
 
 export function liveEmbed(

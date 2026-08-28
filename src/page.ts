@@ -1352,7 +1352,7 @@ async function renderGuild(guild) {
       \${selectField('leaderboard', NONE.concat(data.channels), data.config.leaderboard_channel_id)}
     </div>
     <div class="field">
-      <label>Format &amp; pool <span class="hint">- one message Quorum keeps up to date, saying how this server plays and every scenario in the pool</span></label>
+      <label>Format &amp; pool <span class="hint">- how this server plays, then the pool a message per difficulty, all kept up to date</span></label>
       \${selectField('rules', NONE.concat(data.channels), data.config.rules_channel_id)}
     </div>
     <div class="field">

@@ -160,14 +160,20 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
   assert.ok(n.data.fields!.every((f) => !f.value.includes('forfeited the match')));
 }
 
-// The standing board: the format's numbers and every scenario in the pool, on
-// one message players can read without Manage Server.
+// The standing board: the format's numbers, then the scenario pool - a message
+// per difficulty, all of them readable without Manage Server.
 {
-  const { rulesMessage } = await import('./embeds.js');
+  const { rulesMessages } = await import('./embeds.js');
   const MAINS = [...(await import('./config.js')).MAIN_CATEGORIES] as string[];
-  const { getFormat, getScenarios, setFormat } = await import('./db.js');
+  const { getFormat, getRanks, getScenarios, setFormat, setRanks, setScenarios } =
+    await import('./db.js');
   const fmt = setFormat('g2', { rounds: 3, runs: 3, pickPool: 5 });
-  const [board] = rulesMessage('g2').embeds;
+  // Nothing in the seeded pool is rank-restricted, so every bracket draws from
+  // the same scenarios - one pool, one message. A server with no difficulties
+  // must not be split into a header and a board saying the same thing twice.
+  const plain = rulesMessages('g2');
+  assert.equal(plain.length, 1, `one pool is one message, got ${plain.length}`);
+  const [board] = plain[0].embeds;
   const text = board.data.description!;
   assert.ok(text.includes('**3**') && text.includes('**5**'), `rounds and pool, got ${text}`);
   // Three offered minus the two bans, not the five that were rolled - the
@@ -197,13 +203,12 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
 
   // One scenario, no picking: the ban-and-pick sentence would be a lie.
   setFormat('g2', { rounds: 1 });
-  assert.ok(rulesMessage('g2').embeds[0].data.description!.startsWith('**One** scenario'));
+  assert.ok(rulesMessages('g2')[0].embeds[0].data.description!.startsWith('**One** scenario'));
   setFormat('g2', { rounds: getFormat('g').rounds });
 
   // A pool edited past what Discord takes. Over any of its limits the message
   // is REJECTED, so the board would vanish rather than come out short - which
   // is the one way this feature fails silently.
-  const { setScenarios } = await import('./db.js');
   setScenarios(
     'g2',
     Array.from({ length: 40 }, (_, c) =>
@@ -215,7 +220,7 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
       })),
     ).flat(),
   );
-  const big = rulesMessage('g2').embeds[0].data;
+  const big = rulesMessages('g2')[0].embeds[0].data;
   const size =
     big.description!.length +
     big.fields!.reduce((n, f) => n + f.name.length + f.value.length, 0);
@@ -226,6 +231,75 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
     'and every field does too',
   );
   assert.ok(big.fields!.at(-1)!.name.includes('more categories'), 'what was cut says so');
+
+  // A ladder that runs a hard set and an easy set, plus a category everybody
+  // plays - which is the shape the split exists for.
+  setRanks('g2', [
+    { name: 'Elite', min_elo: 1200, color: '#ffd230' },
+    { name: 'Advanced', min_elo: 1100, color: '#67e8f9' },
+    { name: 'Novice', min_elo: 0, color: '#71717a' },
+  ]);
+  const [elite, advanced, novice] = getRanks('g2');
+  setScenarios('g2', [
+    { category: 'Static', main: 'Clicking', name: '1w4ts Voltaic', rank_ids: null },
+    { category: 'Dynamic', main: 'Clicking', name: 'Pasu VP', rank_ids: [elite.id, advanced.id] },
+    { category: 'Dynamic Easy', main: 'Clicking', name: 'Pasu VP Easy', rank_ids: [novice.id] },
+  ]);
+  const split = rulesMessages('g2');
+  // Two boards, not three: Elite and Advanced are offered the same scenarios,
+  // so they read one between them.
+  assert.equal(split.length, 3, `a header and a board per difficulty, got ${split.length}`);
+  assert.equal(split[0].embeds[0].data.fields, undefined, 'the header is the format alone');
+  assert.deepEqual(
+    split.slice(1).map((m) => m.embeds[0].data.title),
+    ['Pool · Elite, Advanced', 'Pool · Novice'],
+    'brackets sharing a pool share a board, highest first',
+  );
+  for (const message of split.slice(1)) {
+    const heads = message.embeds[0].data.fields!.map((f) => f.name);
+    // What everyone plays is repeated onto every board: a player reads the one
+    // with their bracket on it and has their whole pool, not most of it.
+    assert.ok(
+      heads.some((h) => h.includes('Static')),
+      `the shared categories are on every board, got ${heads}`,
+    );
+    // ...and the title says which brackets, so no line under it has to.
+    assert.ok(heads.every((h) => !h.includes('only')), `the heading says who, got ${heads}`);
+  }
+  const hard = split[1].embeds[0].data.fields!;
+  const easy = split[2].embeds[0].data.fields!;
+  assert.ok(hard.some((f) => f.value === 'Pasu VP'), 'the hard set is on the hard board');
+  assert.ok(easy.some((f) => f.value === 'Pasu VP Easy'), 'and the easy set on the easy one');
+  assert.ok(
+    !easy.some((f) => f.value === 'Pasu VP'),
+    'a scenario a bracket cannot be given is not on its board',
+  );
+}
+
+
+// Which messages a board is, read back off the config row. The board is one
+// message per difficulty now, so the column holds a list - and the upgrade path
+// is the part that has to be right: misread the single id a server already has
+// stored and the bot posts a second board under the first and never touches the
+// old one again.
+{
+  const { boardIds } = await import('./web.js');
+  assert.deepEqual(boardIds(null), [], 'no board yet is no ids');
+  assert.deepEqual(boardIds(''), [], 'and neither is an empty column');
+  assert.deepEqual(
+    boardIds('1416284659999999999'),
+    ['1416284659999999999'],
+    'the bare id this column held before boards could be more than one message',
+  );
+  assert.deepEqual(
+    boardIds('["1416284659999999999","1416284660000000000"]'),
+    ['1416284659999999999', '1416284660000000000'],
+    'a list, in the order the messages are in the channel',
+  );
+  // Junk cannot be allowed to read as "there is no board": that posts a second
+  // one and orphans whatever is up.
+  assert.deepEqual(boardIds('{"msg":"1"}'), ['{"msg":"1"}'], 'a non-list parse is not a list');
+  assert.deepEqual(boardIds('["1", 2, null]'), ['1'], 'and a list keeps only the ids in it');
 }
 
 console.log('embeds ok');
