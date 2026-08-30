@@ -224,6 +224,7 @@ export function panelMessage(
   // Paused: the panel has to say so where the button is, not only refuse the
   // press. A greyed button with no reason next to it reads as a broken bot.
   const paused = !!(guildId && getConfig(guildId).queues_paused);
+  const watched = !!(guildId && getConfig(guildId).spectate);
   // What is up right now, and only the halves of it that are true. A call
   // nobody has taken is never folded into the match count: it is not a match,
   // and it is the one thing on this panel a reader can act on - so an open call
@@ -272,7 +273,12 @@ export function panelMessage(
                 "recorded - but every score is read and kept the same way, so this is " +
                 "also where staff can see what you actually shoot before placing you.\n\n") +
             `Press ${buttons}. Your call goes up here, and the first person to take it plays you.\n\n` +
-            `You get a private thread to yourselves. Ban and pick **${rounds} scenarios** in it, ` +
+            // ...which is not private once the server turned watching on, so
+            // the panel stops promising that it is.
+            (watched
+              ? "You get a thread of your own in the results channel, for anyone to follow. "
+              : "You get a private thread to yourselves. ") +
+            `Ban and pick **${rounds} scenarios** in it, ` +
             `**${runs} runs each**.\n\n` +
             `Scores are read straight off KovaaK's. Nothing to submit, nothing to screenshot, ` +
             `nothing to argue about.` +

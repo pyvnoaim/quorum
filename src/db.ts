@@ -202,6 +202,12 @@ for (const stmt of [
   }
 }
 
+// After the ALTER, not with the others above: thread_id is one of the added
+// columns, so on a fresh database it does not exist yet up there. Every message
+// posted in any thread in any server asks this one question - see
+// matchInThread() - so it is the one lookup that must not read the table.
+db.exec('create index if not exists idx_match_thread on match (thread_id)');
+
 // Backfill, not part of the ALTER above: the ALTER throws once the column is
 // there, which would skip this on every boot but the first. Idempotent, and it
 // only ever touches rows written before the column existed.
@@ -994,6 +1000,14 @@ export function ensurePlayer(
 
 export function getMatch(id: number) {
   return db.prepare('select * from match where id = ?').get(id) as Match | undefined;
+}
+
+/** The match being played in a thread, if one still is. Only a live match
+ *  counts: once it is scored the thread is a room like any other. */
+export function matchInThread(threadId: string) {
+  return db
+    .prepare("select * from match where thread_id = ? and status in ('banning', 'live')")
+    .get(threadId) as Match | undefined;
 }
 
 export function matchPlayers(matchId: number) {

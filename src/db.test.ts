@@ -9,6 +9,7 @@ const {
   getMatch,
   getPlayer,
   matchPlayers,
+  matchInThread,
   getRanks,
   getScenarios,
   getRankMode,
@@ -283,6 +284,20 @@ assert.deepEqual(getRankSpread('gc'), { '1v1': 1 }, 'only live formats come back
   assert.equal(getConfig('gspec').spectate, 1, 'an unrelated save leaves it alone');
   setConfig('gspec', { spectate: null });
   assert.equal(getConfig('gspec').spectate, null);
+}
+
+// Every match thread hangs off the one results channel now, so a channel-wide
+// voice is a voice in the match next door - and the only thing that can tell
+// them apart is which match owns the thread a message landed in. Live ones
+// only: a scored match's thread is nobody's room to police.
+{
+  db.prepare(
+    `insert into match (id, guild_id, channel_id, host_id, format, status, thread_id)
+     values (94,'gT','c','h','1v1','live','t94'), (95,'gT','c','h','1v1','done','t95')`,
+  ).run();
+  assert.equal(matchInThread('t94')?.id, 94, 'a live match owns its thread');
+  assert.equal(matchInThread('t95'), undefined, 'a finished one does not');
+  assert.equal(matchInThread('nope'), undefined, 'and a thread with no match is just a thread');
 }
 
 // The claim behind startMatch and finishMatch. Force-finish, the last Done and

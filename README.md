@@ -123,7 +123,11 @@ without the bot link straight to the invite; the rest open a settings page:
   one queue channel per rank. Pick an existing one or let it make a `Quorum`
 - **Who can see it** - everyone, or one role and nobody else. This is the
   category and the `#results` inside it; a queue channel stays private to its
-  rank either way (below)
+  rank either way (below). Every rank role can always see `#results`, whatever
+  this says - matches are played in threads there, and a player has to be able
+  to open their own
+- **Spectating** - whether a match plays in a public thread the server can watch
+  or a private one only its players can see (below)
 - **Leaderboard** - a channel to keep the standing ladder and division boards in, kept
   current as ratings move
 - **Auto-cancel** - how long an untaken call stays up, or off entirely
@@ -135,8 +139,7 @@ without the bot link straight to the invite; the rest open a settings page:
   them, each holding scenarios picked from a live KovaaK's search, so a name can
   never be a typo
 - **Queues** - how many rank bands apart a queue lets people be, per format.
-  This also decides who can *see* each rank channel (below). The switch for
-  letting the rest of the server watch a match is here too
+  This also decides who can *see* each rank channel (below)
 - **Players** - Elo, rank, Voltaic S5 standing, and the starting rank of
   anyone who hasn't played yet
 - **Overview** - the server's numbers and what is still unconfigured
@@ -153,7 +156,8 @@ there are no configuration commands.
 Add `WEB_URL/callback` to the OAuth redirects on your Discord application. The
 dashboard's invite link already asks for everything the bot needs - Manage
 Channels and Manage Roles for the ladder, Create Private Threads / Send Messages
-in Threads / Manage Threads for a match's own room, and View Channel, Send
+in Threads / Manage Threads for a match's own room, Manage Messages to keep a
+match thread to the people playing in it, and View Channel, Send
 Messages, Embed Links and Read Message History held in its own right, because a
 locked rank category is the moment @everyone stops supplying them. **Never give
 it Administrator.**
@@ -266,7 +270,9 @@ rank channel forever. Then:
    ping is what makes it findable without anyone watching the channel.
 2. Someone else hits **Join** on it. That's the whole matchmaking.
 3. The moment it fills it starts itself: teams drawn, and a **thread** made off
-   the queue channel holding exactly the players. The call in the channel is
+   `#results` holding exactly the players - not the queue channel it was called
+   in, which is private to its rank and would hide the match from half the
+   people in it. The call in the channel is
    deleted - it filled, so it has nothing left to offer - and everything from
    here happens in the thread. Private unless the server turned spectating on
    (below).
@@ -341,30 +347,28 @@ unfinished scenarios included, so it is not the merciful option - and *cancel*
 bins it with no rating change. Reach for cancel when somebody's game died.
 Without either, a broken match just sits until the match clock catches it.
 
-**Letting the server watch.** Off out of the box, and a switch in the queues
-pane. On, a match plays out in a **public** thread: anyone who can see the queue
-channel can open it and follow the scoreboard live. Watching only - the queue
-channels stop letting anyone post in a thread, and the players in a live match
+**Letting the server watch.** Off out of the box, and a switch in the setup
+pane. On, a match plays out in a **public** thread: anyone who can see
+`#results` can open it and follow the scoreboard live. Watching only - the
+channel stops letting anyone post in a thread, and the players in a live match
 are handed that back for as long as their match runs, so the room has an
 audience and not a peanut gallery.
 
-That is done with member overwrites on the queue channel, because Discord has no
+That is done with member overwrites on `#results`, because Discord has no
 per-thread permissions at all: a thread simply *is* its parent channel's
-permissions. Which leaves one seam worth knowing about - two matches running in
-the same rank channel at once means both sets of players hold the same
-overwrite, so they can talk in each other's threads. Everyone else is still
-reading only, which is what the switch promises.
+permissions. So the grant is channel-wide, and while two matches are running
+each set of players can post in the other's thread as far as Discord is
+concerned. The bot has the last word: anything said in a live match's thread by
+someone who is not playing in it is deleted, staff excepted.
 
-Who can watch is who can see the channel, so the rank spread decides it: at "one
-rank either side", a Champion match in `#champion` is open to Champion, Diamond
-and Platinum and nobody below. Turning it on or off changes matches from the
-next one; one already running stays the room it started in.
+Who can watch is who can see `#results`, which is "Who can see it" in the setup
+pane - the whole server, or one role. Turning spectating on or off changes
+matches from the next one; one already running stays the room it started in.
 
 **Why a thread and not a voice channel.** A bot can only move someone who is
 already sitting in voice, so half a lobby would be left staring at a link. A
-thread takes members by id: everyone is in it the moment it exists, it needs
-nothing configured, and in a split server it lands in the right rank's channel
-on its own.
+thread takes members by id: everyone is in it the moment it exists, and it needs
+nothing configured.
 
 ## Where a rating starts
 

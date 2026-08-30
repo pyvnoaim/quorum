@@ -46,11 +46,21 @@ const channel = (id: string, name: string, type: number, parentId: string | null
   // thing keeps its own; without this the standing leaderboard has nothing to
   // edit in dev and reposts itself every save.
   const posted = new Collection<string, any>();
+  const overwrites = new Collection<string, any>();
   return {
   id,
   name,
   type,
   parentId,
+  // Getters, because both are built further down: clearPanels reaches back
+  // through the channel to ask which messages are the bot's own, and postPanel
+  // asks which guild it is posting in.
+  get client() {
+    return client;
+  },
+  get guild() {
+    return guild;
+  },
   isSendable: () => true,
   isTextBased: () => type === 0 || type === 5,
   messages: {
@@ -90,10 +100,18 @@ const channel = (id: string, name: string, type: number, parentId: string | null
     return null;
   },
   // the real thing on every guild channel; the sync writes the category's
-  // "who can see this" through it.
+  // "who can see this" through it, and everything it owns on a channel through
+  // set() - which reads the cache first to keep what is not ours, so the cache
+  // has to be here and has to be what set() last wrote.
   permissionOverwrites: {
+    cache: overwrites,
     edit: async (target: string, bits: any) =>
       console.log(`  perms ${name} ${target} -> ${JSON.stringify(bits)}`),
+    set: async (all: any[]) => {
+      overwrites.clear();
+      for (const o of all) overwrites.set(o.id, o);
+      console.log(`  perms ${name} <- ${all.map((o) => o.id).join(', ')}`);
+    },
     delete: async (target: string) => console.log(`  perms ${name} ${target} dropped`),
   },
   delete: async () => {
@@ -166,6 +184,9 @@ const guild: any = {
   },
 };
 const client: any = {
+  // the same id the fake channels sign their messages with, so the bot can pick
+  // its own panel out of a channel and repost it
+  user: { id: '999000000000000001' },
   guilds: { cache: new Collection(process.env.DEV_EMPTY ? [] : [[GUILD_ID, guild]]) },
   // no avatar hashes, so the page falls back to Discord's default avatars.
   users: { cache: new Collection<string, any>([

@@ -8,6 +8,7 @@ import {
   GatewayIntentBits,
   InteractionContextType,
   MessageFlags,
+  Options,
   PermissionFlagsBits,
   SlashCommandBuilder,
   type Guild,
@@ -44,6 +45,7 @@ import {
   getScenarios,
   categoryRecord,
   headToHead,
+  matchInThread,
   matchPlayers,
   recentMatches,
   seedPlayer,
@@ -89,13 +91,32 @@ const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_BOT_TOKEN is not set');
 
 const client = new Client({
-  // A match talks in its own private thread, so nothing here reads a voice
-  // state. GuildMembers is the one addition and manual mode is why: staff hand
-  // out the division roles there, so the role IS the rank, and naming somebody's
+  // A match talks in its own thread, so nothing here reads a voice state.
+  // GuildMembers is the first addition and manual mode is why: staff hand out
+  // the division roles there, so the role IS the rank, and naming somebody's
   // rank means reading their roles. Without it the bot only knows the roles of
   // people it has happened to see press a button - so a rank vanished from every
   // embed on restart and came back one player at a time.
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  //
+  // GuildMessages is the second: a public match thread has to be readable by
+  // the server and writable by its two players only, and Discord can only say
+  // the first half - see the messageCreate handler. Not MessageContent, which
+  // is privileged and would be for reading what people wrote; this needs to
+  // know who wrote, and nothing else.
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+  ],
+  // ...and with that intent every message in the server would otherwise be kept,
+  // 200 per channel, forever, to answer a question this bot never asks: it reads
+  // who wrote in a thread and drops the message on the floor. The handful it
+  // does come back to - a card to edit, a call to delete - are fetched by id,
+  // which is an API call either way once the cache misses.
+  makeCache: Options.cacheWithLimits({
+    ...Options.DefaultMakeCacheSettings,
+    MessageManager: 0,
+  }),
 });
 
 const NO_LINK =
@@ -329,18 +350,37 @@ async function seedFor(
 /** Whether this server's matches are played where the rest of it can watch. */
 const spectating = (guildId: string) => getConfig(guildId).spectate === 1;
 
+/** Where a match's thread hangs, and where its result is posted: the one
+ *  results channel split mode builds, or the channel the call was made in when
+ *  there is none.
+ *
+ *  Not the queue channel it was called in. A rank queue is private to its rank,
+ *  and a thread is only as visible as its parent - so a match between two ranks
+ *  was a thread half the players could not open, and a public one nobody
+ *  outside the bracket could watch. The results channel is the one thing in the
+ *  category the whole server can read.
+ *
+ *  A results channel that has since been deleted in Discord falls back to the
+ *  call's own channel rather than nowhere: an id on file that no longer exists
+ *  would otherwise be a server whose matches quietly stopped getting threads
+ *  and whose results quietly stopped being posted. */
+const threadHome = (match: Match) => {
+  const results = getConfig(match.guild_id).split_results_id;
+  return results && client.channels.cache.has(results) ? results : match.channel_id;
+};
+
 /** A thread per match, holding exactly its players, deleted when the match
  *  ends. Public where the server lets people watch - see spectating() - and
  *  private everywhere else.
  *
- *  It hangs off the channel the call was made in, so there is nothing to
- *  configure and a split server's threads land in the right rank's channel on
- *  their own. Everyone in the match is added by id - unlike a voice channel,
- *  nobody has to already be somewhere for that to work. That is worth doing on
- *  a public thread too: being added is what puts it in somebody's sidebar, so
- *  the players still find their own match without going looking for it. */
+ *  It hangs off the results channel - see threadHome() for why not the queue.
+ *  Everyone in the match is added by id - unlike a voice channel, nobody has to
+ *  already be somewhere for that to work. That is worth doing on a public
+ *  thread too: being added is what puts it in somebody's sidebar, so the
+ *  players still find their own match without going looking for it. */
 async function openThread(guild: Guild, match: Match, rows: MatchPlayer[]) {
-  const channel = guild.channels.cache.get(match.channel_id);
+  const home = threadHome(match);
+  const channel = guild.channels.cache.get(home);
   if (channel?.type !== ChannelType.GuildText) return null;
   const watchable = spectating(match.guild_id);
   const thread = await channel.threads
@@ -353,7 +393,7 @@ async function openThread(guild: Guild, match: Match, rows: MatchPlayer[]) {
       autoArchiveDuration: 1440,
     })
     .catch((err: Error) => {
-      console.error(`match ${match.id}: no thread in ${match.channel_id}:`, err.message);
+      console.error(`match ${match.id}: no thread in ${home}:`, err.message);
       return null;
     });
   if (!thread) return null;
@@ -369,22 +409,22 @@ async function openThread(guild: Guild, match: Match, rows: MatchPlayer[]) {
  *  Discord has no per-thread permission overwrites: a thread IS its parent
  *  channel's permissions. So a public thread anybody may read is a public
  *  thread anybody may post in, unless Send Messages in Threads is denied on the
- *  queue channel - which syncRankChannels does whenever spectating is on - and
- *  handed back per member, which is here. A member overwrite beats the role
+ *  results channel - which syncRankChannels does whenever spectating is on -
+ *  and handed back per member, which is here. A member overwrite beats the role
  *  deny, so a player granted one can talk in their match and a spectator
  *  cannot.
  *
- *  The grant is per CHANNEL, which is as fine-grained as Discord goes. Two
- *  matches running in the same queue channel at once can therefore talk in each
- *  other's threads - both sets of players hold the same overwrite. Everyone
- *  else is still reading only, which is what the setting promises; a player in
- *  a live match of their own is not the spectator it is there to quieten.
+ *  The grant is per CHANNEL, which is as fine-grained as Discord goes, and
+ *  every live match now shares one. So the players of one can talk in another's
+ *  thread while both are running. Everyone else is still reading only, which is
+ *  what the setting promises; a player in a live match of their own is not the
+ *  spectator it is there to quieten.
  *
  *  Nothing is written over an overwrite that is already there: one on this
  *  member is the server's own, and staff who took somebody's voice away in a
  *  channel did not do it so a match could hand it back. */
 async function grantThreadVoice(guild: Guild, match: Match, rows: MatchPlayer[]) {
-  const channel = guild.channels.cache.get(match.channel_id);
+  const channel = guild.channels.cache.get(threadHome(match));
   if (!channel || !('permissionOverwrites' in channel)) return;
   for (const row of rows) {
     if (channel.permissionOverwrites.cache.has(row.discord_id)) continue;
@@ -395,22 +435,29 @@ async function grantThreadVoice(guild: Guild, match: Match, rows: MatchPlayer[])
 }
 
 /** The other half: the match is over, so the voice goes with it. Left alone, a
- *  season of matches would silt the queue channel up with an overwrite per
- *  player who ever played there, and every one of them would be a standing
- *  permission to talk in strangers' threads.
+ *  season of matches would silt the channel up with an overwrite per player who
+ *  ever played there, and every one of them would be a standing permission to
+ *  talk in strangers' threads.
+ *
+ *  Both channels, because a match that started before threads moved holds its
+ *  grant on the queue channel it was called in, and nothing else would ever go
+ *  looking for it.
  *
  *  Only ever the overwrite this bot made - exactly that one allow and nothing
  *  denied. Anything else on the member is the server's, and deleting it would
  *  quietly undo a decision staff made by hand. */
 async function dropThreadVoice(match: Match) {
-  const channel = await client.channels.fetch(match.channel_id).catch(() => null);
-  if (!channel || !('permissionOverwrites' in channel)) return;
-  for (const row of matchPlayers(match.id)) {
-    const have = channel.permissionOverwrites.cache.get(row.discord_id);
-    if (!have) continue;
-    if (have.allow.bitfield !== PermissionFlagsBits.SendMessagesInThreads) continue;
-    if (have.deny.bitfield !== 0n) continue;
-    await have.delete().catch(() => {});
+  const rows = matchPlayers(match.id);
+  for (const id of new Set([threadHome(match), match.channel_id])) {
+    const channel = await client.channels.fetch(id).catch(() => null);
+    if (!channel || !('permissionOverwrites' in channel)) continue;
+    for (const row of rows) {
+      const have = channel.permissionOverwrites.cache.get(row.discord_id);
+      if (!have) continue;
+      if (have.allow.bitfield !== PermissionFlagsBits.SendMessagesInThreads) continue;
+      if (have.deny.bitfield !== 0n) continue;
+      await have.delete().catch(() => {});
+    }
   }
 }
 
@@ -907,14 +954,9 @@ async function concludeMatch(match: Match) {
   const players = new Map(rows.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
   const embed = voided ? noContestEmbed(done, rows) : resultsEmbed(done, rows, players, deltas);
 
-  // One channel for every result, whatever the queues are split into. Split
-  // mode makes its own inside the Quorum category and uses that; the server's
-  // own choice is left alone so it comes back when the mode goes off. Falling
-  // back to the call's channel means a result is never lost to a deleted or
-  // misconfigured target.
-  const cfg = getConfig(done.guild_id);
-  const channelId = cfg.split_results_id ?? done.channel_id;
-  const channel = await client.channels.fetch(channelId).catch(() => null);
+  // Beside the thread it was played in - one channel for every result, whatever
+  // the queues are split into.
+  const channel = await client.channels.fetch(threadHome(done)).catch(() => null);
   const message = { embeds: [embed], components: [rematchRow(done)] };
   const posted = channel?.isSendable() ? await channel.send(message).catch(() => null) : null;
 
@@ -1117,6 +1159,25 @@ async function leaveIfNotAllowed(guild: Guild) {
 }
 
 client.on('guildCreate', (guild) => void leaveIfNotAllowed(guild).catch(console.error));
+
+/** A public match thread is a room the whole server may read and only its own
+ *  players may talk in. Discord says the first half and cannot say the second:
+ *  a thread has no permissions of its own, it is its parent channel's - so the
+ *  voice a player is granted in #results is a voice in every match thread
+ *  hanging off it, the one next door included. See grantThreadVoice().
+ *
+ *  So the last word is here: in a match that is still being played, anything
+ *  said by somebody who is not in it goes. Staff are left alone - a bot that
+ *  deletes a moderator's message in their own server is worse than the thing it
+ *  is stopping. */
+client.on('messageCreate', async (msg) => {
+  if (!msg.inGuild() || msg.author.bot || !msg.channel.isThread()) return;
+  const match = matchInThread(msg.channelId);
+  if (!match) return;
+  if (msg.member?.permissions.has(PermissionFlagsBits.ManageMessages)) return;
+  if (matchPlayers(match.id).some((r) => r.discord_id === msg.author.id)) return;
+  await msg.delete().catch(() => {});
+});
 
 /** Staff moved somebody's division, so their rating moves with it.
  *

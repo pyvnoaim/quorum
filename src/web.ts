@@ -98,10 +98,13 @@ const NEEDED_PERMISSIONS: { flag: bigint; name: string; builds?: boolean }[] = [
   { flag: PermissionFlagsBits.SendMessages, name: 'Send Messages' },
   { flag: PermissionFlagsBits.EmbedLinks, name: 'Embed Links' },
   { flag: PermissionFlagsBits.ReadMessageHistory, name: 'Read Message History' },
-  // A match runs in its own private thread: make it, talk in it, delete it.
+  // A match runs in its own thread: make it, talk in it, delete it.
   { flag: PermissionFlagsBits.CreatePrivateThreads, name: 'Create Private Threads' },
   { flag: PermissionFlagsBits.SendMessagesInThreads, name: 'Send Messages in Threads' },
   { flag: PermissionFlagsBits.ManageThreads, name: 'Manage Threads' },
+  // Manage Threads is not the one that deletes somebody else's message, and
+  // keeping a match thread to its own players means deleting exactly that.
+  { flag: PermissionFlagsBits.ManageMessages, name: 'Manage Messages' },
 ];
 const INVITE_PERMISSIONS = NEEDED_PERMISSIONS.reduce((all, p) => all | p.flag, 0n).toString();
 const inviteUrl = (guildId: string) =>
@@ -443,29 +446,33 @@ async function syncRankChannelsToDiscord(
   //
   // But threads stay open, which is the one flag that has to be said out loud:
   // Send Messages and Send Messages in Threads are separate permissions, and
-  // locking the channel must not lock the matches inside it. The match thread
-  // is private and the bot adds exactly its players, so "anyone who can post in
-  // a thread here" already means "the two people in that match".
+  // locking a channel must not lock the matches inside it. The match thread is
+  // private and the bot adds exactly its players, so "anyone who can post in a
+  // thread here" already means "the two people in that match".
   //
   // Unless the server lets people watch, and then it is the opposite: the
   // thread is public, so "anyone who can post in a thread here" means the whole
   // channel. Discord has no per-thread overwrites - a thread is its parent's
-  // permissions, full stop - so the only place to say "watch, don't talk" is
-  // here, and the players get their voice back one member overwrite at a time
-  // for as long as their match runs. See grantThreadVoice() in index.ts.
+  // permissions, full stop - so the only place to say "watch, don't talk" is on
+  // the parent, and the players get their voice back one member overwrite at a
+  // time for as long as their match runs. See grantThreadVoice() in index.ts.
+  //
+  // That parent is #results, not the queue channels - see threadHome() - so
+  // these ride along on both: a bracket channel holds no threads any more, and
+  // saying it there costs nothing and keeps a stray one quiet.
   //
   // A deny on the ROLE is deliberate rather than a deny on nobody: a member
   // overwrite beats a role overwrite in Discord, so an admin can still hand one
   // person a voice in one channel, and now it survives the next save - and it
   // is the same rule the players' own grants ride on.
-  const readOnly = {
-    SendMessages: false,
-    // nobody starts a thread off the panel - the bot opens the only ones that
-    // belong here, one per match
+  const threadRules = {
+    // nobody starts a thread by hand - the bot opens the only ones that belong
+    // here, one per match
     CreatePublicThreads: false,
     CreatePrivateThreads: false,
     SendMessagesInThreads: cfg.spectate !== 1,
   };
+  const readOnly = { SendMessages: false, ...threadRules };
   const meFull: OwnedPerm[] = me
     ? [
         {
@@ -474,9 +481,17 @@ async function syncRankChannelsToDiscord(
             ViewChannel: true,
             SendMessages: true,
             ManageChannels: true,
+            // Both kinds, and the public one is not decoration: the deny above
+            // is on @everyone, which the bot is also in, so denying it without
+            // allowing it here is a bot that cannot open the very thread the
+            // spectate setting asks for.
+            CreatePublicThreads: true,
             CreatePrivateThreads: true,
             SendMessagesInThreads: true,
             ManageThreads: true,
+            // so a server that invited the bot before this existed still gets
+            // strangers cleared out of its match threads
+            ManageMessages: true,
           },
         },
       ]
@@ -561,6 +576,33 @@ async function syncRankChannelsToDiscord(
       .catch(() => null));
   if (results && 'parentId' in results && results.parentId !== category.id) {
     await results.edit({ parent: category.id, lockPermissions: true }).catch(() => {});
+  }
+  // Every match thread hangs here now, so this is where the watch-don't-talk
+  // rule has to be written.
+  //
+  // ViewChannel is left unsaid for @everyone so this channel answers to "Who
+  // can see it" like the rest of the category - but every rank role is allowed
+  // in by name, the same as its own queue channel. A player is the one person
+  // who must be able to open their own match, and a server that hides Quorum
+  // behind a members role would otherwise hide half its own matches from the
+  // people playing them.
+  //
+  // Send Messages is left alone on purpose: #results is the one room in the
+  // category people may actually chat in, and this sync is not the place to
+  // decide otherwise.
+  if (results) {
+    await applyOwnedPerms(
+      results,
+      [
+        { id: guild.roles.everyone.id, options: { ViewChannel: null, ...threadRules } },
+        ...ranks
+          .map((r) => r.discord_role_id)
+          .filter((id): id is string => !!id)
+          .map((id) => ({ id, options: { ViewChannel: true } })),
+        ...meFull,
+      ],
+      owned,
+    );
   }
   // The unranked queue, beside the results channel and open to whoever can see
   // the category. It cannot live in a bracket channel: those are private to
@@ -1563,7 +1605,18 @@ export function startWeb(client: Client, hooks: Hooks) {
           // trip. Anything else is clamped: a one-minute window bins calls
           // before anyone sees them, and a one-year one is off with extra steps.
           call_ttl_min: ttl(body.call_ttl_min),
+          // Who may watch a match, which is who may see the results channel the
+          // threads hang in - the same room this pane is already about. The
+          // sync below writes it onto that channel.
+          spectate: body.spectate === true ? 1 : null,
         });
+        if (before.spectate !== getConfig(guildId).spectate) {
+          await announce(guild, session.user.id, [
+            getConfig(guildId).spectate === 1
+              ? 'Matches are now played in **public** threads - anyone who can see the results channel can watch, and only the players can talk'
+              : 'Matches are back in **private** threads - only the players can see one',
+          ]);
+        }
         // Said in the new channel itself, so whoever set it can see it works -
         // and the room knows it is now the place changes get posted.
         if (
@@ -1829,20 +1882,7 @@ export function startWeb(client: Client, hooks: Hooks) {
         // it has to reach Discord and not only the database.
         const wasOpen = getConfig(guildId).unranked_enabled === 1;
         const nowOpen = body.unranked === true;
-        // Spectating rides along for the same reason the unranked queue does:
-        // it is who may talk in a queue channel's threads, which is an
-        // overwrite on a real Discord channel and not a row nobody reads.
-        const wasWatched = getConfig(guildId).spectate === 1;
-        const nowWatched = body.spectate === true;
         let built: { ok: boolean; error?: string } = { ok: true };
-        if (wasWatched !== nowWatched) {
-          setConfig(guildId, { spectate: nowWatched ? 1 : null });
-          await announce(guild, session.user.id, [
-            nowWatched
-              ? 'Matches are now played in **public** threads - anyone who can see the queue can watch, and only the players can talk'
-              : 'Matches are back in **private** threads - only the players can see one',
-          ]);
-        }
         if (wasOpen !== nowOpen) {
           setConfig(guildId, { unranked_enabled: nowOpen ? 1 : null });
           await announce(guild, session.user.id, [
@@ -1851,11 +1891,10 @@ export function startWeb(client: Client, hooks: Hooks) {
               : 'Unranked queue is **off**',
           ]);
         }
-        // One sync for both, and awaited, so a failure is reported rather than
-        // swallowed - a toggle that says Saved while the channel it promised is
-        // missing, or while the channel it locked is still open, is worse than
-        // one that says why not.
-        if (wasOpen !== nowOpen || wasWatched !== nowWatched) {
+        // Awaited, so a failure is reported rather than swallowed - a toggle
+        // that says Saved while the channel it promised is missing is worse
+        // than one that says why not.
+        if (wasOpen !== nowOpen) {
           built = await syncRankChannelsToDiscord(guild, getRanks(guildId), []);
           // ...and the sync has its own quiet way out: it builds nothing at all
           // until the ladder exists, so on a fresh server this would report ok
@@ -1867,7 +1906,6 @@ export function startWeb(client: Client, hooks: Hooks) {
         json(res, 200, {
           spread: nowSpread,
           unranked: nowOpen,
-          spectate: nowWatched,
           error: built.error,
         });
         return;

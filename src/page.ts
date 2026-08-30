@@ -1338,9 +1338,20 @@ async function renderGuild(guild) {
                      data.config.split_category_id)}
     </div>
     <div class="field">
-      <label>Who can see it <span class="hint">- the category and the results in it. A queue channel is private to its rank either way</span></label>
+      <label>Who can see it <span class="hint">- the category and the results in it. A queue channel is private to
+      its rank either way, and every rank can always see the results channel - matches are played in threads there</span></label>
       \${selectField('visible', [{ id: '', name: 'Everyone' }].concat(data.roles),
                      data.config.visible_role_id)}
+    </div>
+    <div class="field">
+      <label>Spectating <span class="hint">- a match plays in a public thread in the results channel instead of a
+      private one, so anyone who can see that channel can follow it. Only its own players can talk in it either way</span></label>
+      <div class="opt boxed">
+        <label class="opt-hit">
+          <input type="checkbox" id="spectateon"\${data.spectate ? ' checked' : ''} />
+          <span>Let the server watch a match</span>
+        </label>
+      </div>
     </div>
     <div class="field">
       <label>Ping role <span class="hint">- set one and it is the only thing pinged for a new queue, with a Notify me
@@ -1429,17 +1440,6 @@ async function renderGuild(guild) {
       win or loss is recorded, but every score is read and kept the same way - so it is
       also where you can see what somebody shoots before placing them. Turning it off
       deletes the channel.</p>
-    </div>
-
-    <div class="cat" style="margin-top:12px">
-      <label class="opt-hit"><input type="checkbox" id="spectateon" />
-        <span><strong>Let the server watch a match</strong></span></label>
-      <p class="muted" style="margin:8px 0 0">A match plays out in a <b>public</b>
-      thread instead of a private one, so anyone who can see the queue channel can open it
-      and follow the scoreboard. <b>Watching only</b> - the queue channels stop letting
-      anyone post in a thread, and the players in a live match are handed that back for as
-      long as their match runs. Turning it on or off changes matches from the next one:
-      one already running stays the room it started in.</p>
     </div>
 
     <div class="bar">
@@ -1629,8 +1629,6 @@ async function renderGuild(guild) {
 
   const unrankedOn = document.getElementById('unrankedon');
   unrankedOn.checked = !!data.unranked;
-  const spectateOn = document.getElementById('spectateon');
-  spectateOn.checked = !!data.spectate;
 
   document.getElementById('savequeues').onclick = async () => {
     const el = document.getElementById('queuestatus');
@@ -1647,12 +1645,11 @@ async function renderGuild(guild) {
     el.textContent = 'Saving…';
     const res = await fetch(\`/api/guild/\${guild.id}/queues\`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ spread, unranked: unrankedOn.checked, spectate: spectateOn.checked }),
+      body: JSON.stringify({ spread, unranked: unrankedOn.checked }),
     });
     const out = await res.json().catch(() => ({}));
     if (!res.ok) { el.textContent = 'Save failed'; return; }
     data.unranked = out.unranked;
-    data.spectate = out.spectate;
     el.textContent = out.error ?? 'Saved';
   };
 
@@ -2284,11 +2281,14 @@ async function renderGuild(guild) {
       announce_channel_id: document.getElementById('announce').dataset.value || null,
       leaderboard_channel_id: document.getElementById('leaderboard').dataset.value || null,
       rules_channel_id: document.getElementById('rules').dataset.value || null,
+      spectate: document.getElementById('spectateon').checked,
     };
     const res = await fetch('/api/guild/' + guild.id, {
       method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     });
-    status(res.ok ? 'Saved' : 'Save failed');
+    const out = await res.json().catch(() => ({}));
+    if (res.ok) data.spectate = out.spectate === 1;
+    status(res.ok ? (out.error ?? 'Saved') : 'Save failed');
   };
 
   document.getElementById('leavebtn').onclick = async () => {
