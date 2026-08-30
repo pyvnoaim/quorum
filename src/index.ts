@@ -52,6 +52,7 @@ import {
   type MatchPlayer,
 } from './db.js';
 import {
+  divisionsMessage,
   leaderboardMessage,
   rankLabel,
   useClient,
@@ -275,6 +276,12 @@ function render(match: Match) {
                 .setCustomId(`pug:done:${match.id}`)
                 .setLabel('Done')
                 .setStyle(ButtonStyle.Success),
+              // Last, and grey: it is the one button here that changes nothing
+              // about the match.
+              new ButtonBuilder()
+                .setCustomId(`pug:copy:${match.id}`)
+                .setLabel('Copy scenarios')
+                .setStyle(ButtonStyle.Secondary),
             ),
           ]
         : [],
@@ -319,22 +326,30 @@ async function seedFor(
   return s5 && seed ? { elo: seed, from: `Voltaic ${s5.rank}` } : { elo: BASE_ELO, from: 'flat' };
 }
 
-/** A private thread per match, holding exactly its players, deleted when the
- *  match ends.
+/** Whether this server's matches are played where the rest of it can watch. */
+const spectating = (guildId: string) => getConfig(guildId).spectate === 1;
+
+/** A thread per match, holding exactly its players, deleted when the match
+ *  ends. Public where the server lets people watch - see spectating() - and
+ *  private everywhere else.
  *
  *  It hangs off the channel the call was made in, so there is nothing to
  *  configure and a split server's threads land in the right rank's channel on
  *  their own. Everyone in the match is added by id - unlike a voice channel,
- *  nobody has to already be somewhere for that to work. */
+ *  nobody has to already be somewhere for that to work. That is worth doing on
+ *  a public thread too: being added is what puts it in somebody's sidebar, so
+ *  the players still find their own match without going looking for it. */
 async function openThread(guild: Guild, match: Match, rows: MatchPlayer[]) {
   const channel = guild.channels.cache.get(match.channel_id);
   if (channel?.type !== ChannelType.GuildText) return null;
+  const watchable = spectating(match.guild_id);
   const thread = await channel.threads
     .create({
       name: `${match.format} #${match.id}`,
-      type: ChannelType.PrivateThread,
-      // nobody drags a friend into someone else's match
-      invitable: false,
+      type: watchable ? ChannelType.PublicThread : ChannelType.PrivateThread,
+      // nobody drags a friend into someone else's match. Meaningless on a
+      // public thread, where there is nobody left to drag in.
+      ...(watchable ? {} : { invitable: false }),
       autoArchiveDuration: 1440,
     })
     .catch((err: Error) => {
@@ -344,13 +359,69 @@ async function openThread(guild: Guild, match: Match, rows: MatchPlayer[]) {
   if (!thread) return null;
 
   await Promise.all(rows.map((r) => thread.members.add(r.discord_id).catch(() => {})));
+  if (watchable) await grantThreadVoice(guild, match, rows);
   return thread.id;
+}
+
+/** Hands the players the only voice in a public match thread, and takes it back
+ *  when the match ends.
+ *
+ *  Discord has no per-thread permission overwrites: a thread IS its parent
+ *  channel's permissions. So a public thread anybody may read is a public
+ *  thread anybody may post in, unless Send Messages in Threads is denied on the
+ *  queue channel - which syncRankChannels does whenever spectating is on - and
+ *  handed back per member, which is here. A member overwrite beats the role
+ *  deny, so a player granted one can talk in their match and a spectator
+ *  cannot.
+ *
+ *  The grant is per CHANNEL, which is as fine-grained as Discord goes. Two
+ *  matches running in the same queue channel at once can therefore talk in each
+ *  other's threads - both sets of players hold the same overwrite. Everyone
+ *  else is still reading only, which is what the setting promises; a player in
+ *  a live match of their own is not the spectator it is there to quieten.
+ *
+ *  Nothing is written over an overwrite that is already there: one on this
+ *  member is the server's own, and staff who took somebody's voice away in a
+ *  channel did not do it so a match could hand it back. */
+async function grantThreadVoice(guild: Guild, match: Match, rows: MatchPlayer[]) {
+  const channel = guild.channels.cache.get(match.channel_id);
+  if (!channel || !('permissionOverwrites' in channel)) return;
+  for (const row of rows) {
+    if (channel.permissionOverwrites.cache.has(row.discord_id)) continue;
+    await channel.permissionOverwrites
+      .create(row.discord_id, { SendMessagesInThreads: true })
+      .catch(() => {});
+  }
+}
+
+/** The other half: the match is over, so the voice goes with it. Left alone, a
+ *  season of matches would silt the queue channel up with an overwrite per
+ *  player who ever played there, and every one of them would be a standing
+ *  permission to talk in strangers' threads.
+ *
+ *  Only ever the overwrite this bot made - exactly that one allow and nothing
+ *  denied. Anything else on the member is the server's, and deleting it would
+ *  quietly undo a decision staff made by hand. */
+async function dropThreadVoice(match: Match) {
+  const channel = await client.channels.fetch(match.channel_id).catch(() => null);
+  if (!channel || !('permissionOverwrites' in channel)) return;
+  for (const row of matchPlayers(match.id)) {
+    const have = channel.permissionOverwrites.cache.get(row.discord_id);
+    if (!have) continue;
+    if (have.allow.bitfield !== PermissionFlagsBits.SendMessagesInThreads) continue;
+    if (have.deny.bitfield !== 0n) continue;
+    await have.delete().catch(() => {});
+  }
 }
 
 /** Threads are deleted rather than archived: an archived one still sits in the
  *  channel's list, and a season of those is a channel nobody can find anything
  *  in. The result embed is the record, and it lives in the results channel. */
 async function closeThread(match: Match) {
+  // Before the early return, and not conditional on the setting: a match that
+  // started while spectating was on has grants to clear whether or not it is
+  // still on now, and whether or not the thread survived to be deleted.
+  await dropThreadVoice(match);
   if (!match.thread_id) return;
   const thread = await client.channels.fetch(match.thread_id).catch(() => null);
   if (thread?.isThread()) await thread.delete().catch(() => {});
@@ -587,6 +658,56 @@ function nothingLeftToPlay(match: Match) {
  *  sweep reaps it rather than leaving it live forever. */
 function deadlineFor(match: Match) {
   return matchDeadline(match.started_at ?? 0, match.grace_from, getFormat(match.guild_id));
+}
+
+/** Says in the thread that the clock is nearly out, once.
+ *
+ *  A mention and not an embed, because the whole job is the notification: the
+ *  person this has to reach is alt-tabbed into KovaaK's with Discord on another
+ *  monitor, and an embed edited quietly into a message they are not looking at
+ *  reaches nobody. Only the players who have not called it a night are named -
+ *  pinging somebody who pressed Done to tell them their match is ending is a
+ *  notification with nothing in it for them.
+ *
+ *  Stamped in the row before the send, so a send that throws does not leave the
+ *  match to be pinged again on every tick of the last five minutes. Once is the
+ *  point; a countdown is what the deadline in the board already is.
+ *
+ *  The deadline can move IN after this has gone out - the grace window opens
+ *  when the first player finishes - so a warning can end up further from the
+ *  end than it promised. It is not sent twice for that: two "nearly up" pings
+ *  in one match is the thing people mute a bot over, and the board's own clock
+ *  is the live answer. */
+async function warnTimeLow(match: Match) {
+  const { warnMin } = getFormat(match.guild_id);
+  if (!warnMin || match.warned_at || !match.thread_id) return;
+  const deadline = deadlineFor(match);
+  if (Date.now() < deadline - warnMin * 60_000) return;
+
+  const still = matchPlayers(match.id).filter((r) => !r.done);
+  if (!still.length) return;
+  // Claimed the same way every other one-shot transition here is: two ticks
+  // overlapping on a slow Discord would otherwise both find warned_at null.
+  const claimed = db
+    .prepare('update match set warned_at = ? where id = ? and warned_at is null')
+    .run(Date.now(), match.id);
+  if (!claimed.changes) return;
+
+  const thread = await client.channels.fetch(match.thread_id).catch(() => null);
+  if (!thread?.isTextBased() || !thread.isSendable()) return;
+  await thread
+    .send({
+      content:
+        `⏰ ${still.map((r) => `<@${r.discord_id}>`).join(' ')} - time is nearly up. ` +
+        `This match scores itself <t:${Math.floor(deadline / 1000)}:R> on whatever ` +
+        `KovaaK's has by then, and a scenario you have not run out scores **0**.`,
+      // Named explicitly rather than left to Discord's parser. The content is
+      // ours end to end, so nothing else could be in it - but a ping is the one
+      // thing here that reaches people who are not reading, and "these ids and
+      // nothing else" is a promise worth writing down rather than deriving.
+      allowedMentions: { users: still.map((r) => r.discord_id) },
+    })
+    .catch(() => {});
 }
 
 /** Opens the grace window the first time any one player has used every run.
@@ -977,7 +1098,12 @@ async function tick() {
       continue;
     }
     const fresh = await refreshMatch(match);
-    if (fresh.status === 'live') await editMatchMessage(fresh);
+    if (fresh.status !== 'live') continue;
+    // After the refresh, not before: the grace window opens in there, and a
+    // warning sent on the old deadline would name a time that had already
+    // moved by the time anyone read it.
+    await warnTimeLow(fresh);
+    await editMatchMessage(fresh);
   }
 }
 
@@ -1090,7 +1216,15 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
   if (sub === 'leaderboard') {
     // this server's ladder, not every server's - the rank names inside come
     // from this guild's ranks, so the rows must too.
-    await i.reply(leaderboardMessage(i.guildId!, ladderUrl(i.guildId!)));
+    const board = leaderboardMessage(i.guildId!, ladderUrl(i.guildId!));
+    // Both boards in one reply. In the leaderboard channel they are two
+    // messages because they are read at two different times; asked for on
+    // purpose, they are one answer, and a second command to see the divisions
+    // is a command nobody would know to run.
+    await i.reply({
+      ...board,
+      embeds: [...board.embeds, ...divisionsMessage(i.guildId!).embeds],
+    });
     return;
   }
 
@@ -1406,6 +1540,42 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
     }
     await i.deferUpdate();
     await i.message.delete().catch(() => {});
+    return;
+  }
+
+  // The three names, one code block each, privately. Discord puts its own copy
+  // button on a code block, so a block holding exactly one scenario and nothing
+  // else is a scenario you can press once and paste into KovaaK's search - the
+  // nearest thing Discord has to clicking a name and having it on the
+  // clipboard. The scoreboard's table cannot do that job: its copy button hands
+  // you the whole table, scores and all.
+  //
+  // Ephemeral, so pressing it does not put three blocks in the thread for
+  // everyone else to scroll past every time somebody wants a name. Open to
+  // whoever can see the match rather than to its players: a spectator looking
+  // up what is being played is exactly who else wants these.
+  if (action === 'copy') {
+    if (match.status !== 'live') {
+      await i.reply({ content: 'That match is over.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const scenarios: string[] = JSON.parse(match.scenarios);
+    await i.reply({
+      content:
+        "One press each, then paste into KovaaK's search:\n" +
+        // A backtick in the name would close the fence and spill the rest of
+        // the message into it. Names come out of a live KovaaK's search so it
+        // has never happened, but a name is not ours to trust.
+        scenarios
+          .map((s) => `\`\`\`\n${s.replace(/`/g, '')}\n\`\`\``)
+          .join(''),
+      flags: MessageFlags.Ephemeral,
+      // A scenario name is staff-supplied. Inside a code block Discord would
+      // not ping one anyway, and this reply is only ever shown to whoever
+      // pressed the button - but nothing here needs to mention anybody, so
+      // nothing here is allowed to.
+      allowedMentions: { parse: [] },
+    });
     return;
   }
 

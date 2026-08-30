@@ -302,4 +302,71 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
   assert.deepEqual(boardIds('["1", 2, null]'), ['1'], 'and a list keeps only the ids in it');
 }
 
+// The division board: the same ladder cut by rank, five rows a division. It is
+// bucketed by the rank NAME rather than by threshold, so this is the check that
+// a player lands under the heading the rest of the bot would name for them.
+{
+  const { divisionsMessage } = await import('./embeds.js');
+  const { db, ensurePlayer, getRanks } = await import('./db.js');
+  const G = 'gdiv';
+  getRanks(G); // seeds the shipped ladder, Champion first
+  // Six Champions and two Golds, so the cap and an untouched division are both
+  // in one fixture.
+  let next = 7000;
+  const at = (elo: number, n: number) => {
+    const id = `dv${elo}_${n}`;
+    ensurePlayer(id, id, null, { elo, from: 'flat' });
+    const match = next++;
+    db.prepare(
+      "insert into match (id, guild_id, channel_id, host_id, format, status) values (?,?,'c',?,'1v1','done')",
+    ).run(match, G, id);
+    db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(match, id);
+    db.prepare('update player set wins = 1 where discord_id = ?').run(id);
+    return id;
+  };
+  const champs = [1500, 1490, 1480, 1470, 1460, 1450].map((elo, n) => at(elo, n));
+  at(1100, 0);
+  at(1090, 1);
+
+  const [board] = divisionsMessage(G).embeds;
+  const fields = board.data.fields!;
+  assert.deepEqual(
+    fields.map((f) => f.name),
+    ['Champion', 'Gold'],
+    'highest division first, and a division nobody is in is left out entirely',
+  );
+  const rows = fields[0].value.split('\n');
+  assert.equal(rows.length, 5, 'five rows a division, however deep it is');
+  assert.ok(rows[0].includes(champs[0]), 'highest rated of the division on top');
+  assert.ok(!fields[0].value.includes(champs[5]), 'and the sixth is not on it');
+  // The heading is the division, so the rows must not repeat it - that was five
+  // "Champion"s under a field called Champion.
+  assert.ok(!rows[0].includes('Champion'), 'a row does not name its own division');
+  assert.ok(rows[0].includes('1W 0L'), 'the record reads the same as the ladder above');
+
+  // Nothing stops a server naming two ranks the same thing, and the board looks
+  // its divisions up BY name - so without a guard the shared bucket would print
+  // the same players under two identical headings.
+  {
+    const { setRanks } = await import('./db.js');
+    const D = 'gdupe';
+    setRanks(D, [
+      { name: 'Gold', min_elo: 1200, color: '#ffd700' },
+      { name: 'Gold', min_elo: 1000, color: '#ffd700' },
+    ]);
+    at(1250, 0);
+    at(1050, 1);
+    db.prepare("update match set guild_id = ? where guild_id = ? and id >= ?").run(D, G, next - 2);
+    const dupes = divisionsMessage(D).embeds[0].data.fields ?? [];
+    assert.equal(dupes.length, 1, 'one heading between two ranks of the same name');
+    assert.equal(dupes[0].value.split('\n').length, 2, 'and both players under it, once each');
+  }
+
+  // A server nobody has played on says so rather than rendering as a title with
+  // nothing under it.
+  const quiet = divisionsMessage('gquiet').embeds[0].data;
+  assert.deepEqual(quiet.fields ?? [], [], 'no divisions, no fields');
+  assert.ok(quiet.description!.includes('no games played yet'));
+}
+
 console.log('embeds ok');

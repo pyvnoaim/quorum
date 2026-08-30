@@ -1431,6 +1431,17 @@ async function renderGuild(guild) {
       deletes the channel.</p>
     </div>
 
+    <div class="cat" style="margin-top:12px">
+      <label class="opt-hit"><input type="checkbox" id="spectateon" />
+        <span><strong>Let the server watch a match</strong></span></label>
+      <p class="muted" style="margin:8px 0 0">A match plays out in a <b>public</b>
+      thread instead of a private one, so anyone who can see the queue channel can open it
+      and follow the scoreboard. <b>Watching only</b> - the queue channels stop letting
+      anyone post in a thread, and the players in a live match are handed that back for as
+      long as their match runs. Turning it on or off changes matches from the next one:
+      one already running stays the room it started in.</p>
+    </div>
+
     <div class="bar">
       <button class="btn solid" id="savequeues">Save queues</button>
       <span class="status" id="queuestatus"></span>
@@ -1542,6 +1553,7 @@ async function renderGuild(guild) {
     ['matchTtlMin', 'Match time limit', 5, 240, 'minutes before a live match scores on whatever KovaaK has'],
     ['graceMin', 'Grace after the first finisher', 1, 240, 'minutes the rest get once one player has used every run - long enough to play the format out'],
     ['minMatchMin', 'Minimum match length', 0, 240, 'minutes a match always runs for, so a fast finisher cannot cut short someone still loading in'],
+    ['warnMin', 'Time-nearly-up warning', 0, 60, 'minutes before the deadline that the thread is pinged - 0 for no warning'],
   ];
   const drawFormat = () => {
     const bans = Math.max(0, Math.min(2, fmt.pickPool - 1));
@@ -1617,6 +1629,8 @@ async function renderGuild(guild) {
 
   const unrankedOn = document.getElementById('unrankedon');
   unrankedOn.checked = !!data.unranked;
+  const spectateOn = document.getElementById('spectateon');
+  spectateOn.checked = !!data.spectate;
 
   document.getElementById('savequeues').onclick = async () => {
     const el = document.getElementById('queuestatus');
@@ -1633,11 +1647,12 @@ async function renderGuild(guild) {
     el.textContent = 'Saving…';
     const res = await fetch(\`/api/guild/\${guild.id}/queues\`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ spread, unranked: unrankedOn.checked }),
+      body: JSON.stringify({ spread, unranked: unrankedOn.checked, spectate: spectateOn.checked }),
     });
     const out = await res.json().catch(() => ({}));
     if (!res.ok) { el.textContent = 'Save failed'; return; }
     data.unranked = out.unranked;
+    data.spectate = out.spectate;
     el.textContent = out.error ?? 'Saved';
   };
 

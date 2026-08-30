@@ -63,6 +63,7 @@ import {
 } from './db.js';
 import {
   changeEmbed,
+  divisionsMessage,
   leaderboardMessage,
   messageGone,
   panelMessage,
@@ -446,16 +447,24 @@ async function syncRankChannelsToDiscord(
   // is private and the bot adds exactly its players, so "anyone who can post in
   // a thread here" already means "the two people in that match".
   //
+  // Unless the server lets people watch, and then it is the opposite: the
+  // thread is public, so "anyone who can post in a thread here" means the whole
+  // channel. Discord has no per-thread overwrites - a thread is its parent's
+  // permissions, full stop - so the only place to say "watch, don't talk" is
+  // here, and the players get their voice back one member overwrite at a time
+  // for as long as their match runs. See grantThreadVoice() in index.ts.
+  //
   // A deny on the ROLE is deliberate rather than a deny on nobody: a member
   // overwrite beats a role overwrite in Discord, so an admin can still hand one
-  // person a voice in one channel, and now it survives the next save.
+  // person a voice in one channel, and now it survives the next save - and it
+  // is the same rule the players' own grants ride on.
   const readOnly = {
     SendMessages: false,
     // nobody starts a thread off the panel - the bot opens the only ones that
     // belong here, one per match
     CreatePublicThreads: false,
     CreatePrivateThreads: false,
-    SendMessagesInThreads: true,
+    SendMessagesInThreads: cfg.spectate !== 1,
   };
   const meFull: OwnedPerm[] = me
     ? [
@@ -670,7 +679,13 @@ export const BOARDS = [
   {
     channel: 'leaderboard_channel_id',
     msg: 'leaderboard_msg_id',
-    build: (guildId: string) => [leaderboardMessage(guildId, ladderUrl(guildId))],
+    // Two messages, not one embed with the divisions bolted under the ladder:
+    // they answer different questions and a reader wants one of them, so they
+    // are two things to scroll between rather than one to scroll through.
+    build: (guildId: string) => [
+      leaderboardMessage(guildId, ladderUrl(guildId)),
+      divisionsMessage(guildId),
+    ],
   },
   { channel: 'rules_channel_id', msg: 'rules_msg_id', build: rulesMessages },
 ] as const;
@@ -1420,6 +1435,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           mains: MAIN_CATEGORIES,
           spread: getRankSpread(guildId),
           unranked: getConfig(guildId).unranked_enabled === 1,
+          spectate: getConfig(guildId).spectate === 1,
           categories: guild.channels.cache
             .filter((c) => c.type === ChannelType.GuildCategory)
             .map((c) => ({ id: c.id, name: c.name })),
@@ -1773,6 +1789,7 @@ export function startWeb(client: Client, hooks: Hooks) {
           matchTtlMin: 'Match time limit (minutes)',
           graceMin: 'Grace after the first finisher (minutes)',
           minMatchMin: 'Minimum match length (minutes)',
+          warnMin: 'Time-nearly-up warning (minutes)',
         };
         await announce(
           guild,
@@ -1812,7 +1829,20 @@ export function startWeb(client: Client, hooks: Hooks) {
         // it has to reach Discord and not only the database.
         const wasOpen = getConfig(guildId).unranked_enabled === 1;
         const nowOpen = body.unranked === true;
+        // Spectating rides along for the same reason the unranked queue does:
+        // it is who may talk in a queue channel's threads, which is an
+        // overwrite on a real Discord channel and not a row nobody reads.
+        const wasWatched = getConfig(guildId).spectate === 1;
+        const nowWatched = body.spectate === true;
         let built: { ok: boolean; error?: string } = { ok: true };
+        if (wasWatched !== nowWatched) {
+          setConfig(guildId, { spectate: nowWatched ? 1 : null });
+          await announce(guild, session.user.id, [
+            nowWatched
+              ? 'Matches are now played in **public** threads - anyone who can see the queue can watch, and only the players can talk'
+              : 'Matches are back in **private** threads - only the players can see one',
+          ]);
+        }
         if (wasOpen !== nowOpen) {
           setConfig(guildId, { unranked_enabled: nowOpen ? 1 : null });
           await announce(guild, session.user.id, [
@@ -1820,9 +1850,12 @@ export function startWeb(client: Client, hooks: Hooks) {
               ? 'Unranked queue is **on** - anyone can play, nothing is rated'
               : 'Unranked queue is **off**',
           ]);
-          // Awaited, so a failure is reported rather than swallowed - a toggle
-          // that says Saved while the channel it promised is missing is worse
-          // than one that says why not.
+        }
+        // One sync for both, and awaited, so a failure is reported rather than
+        // swallowed - a toggle that says Saved while the channel it promised is
+        // missing, or while the channel it locked is still open, is worse than
+        // one that says why not.
+        if (wasOpen !== nowOpen || wasWatched !== nowWatched) {
           built = await syncRankChannelsToDiscord(guild, getRanks(guildId), []);
           // ...and the sync has its own quiet way out: it builds nothing at all
           // until the ladder exists, so on a fresh server this would report ok
@@ -1831,7 +1864,12 @@ export function startWeb(client: Client, hooks: Hooks) {
             built = { ok: false, error: 'set up the rank ladder first - the channels are built with it' };
           }
         }
-        json(res, 200, { spread: nowSpread, unranked: nowOpen, error: built.error });
+        json(res, 200, {
+          spread: nowSpread,
+          unranked: nowOpen,
+          spectate: nowWatched,
+          error: built.error,
+        });
         return;
       }
 

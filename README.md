@@ -124,7 +124,7 @@ without the bot link straight to the invite; the rest open a settings page:
 - **Who can see it** - everyone, or one role and nobody else. This is the
   category and the `#results` inside it; a queue channel stays private to its
   rank either way (below)
-- **Leaderboard** - a channel to keep one standing ladder message in, kept
+- **Leaderboard** - a channel to keep the standing ladder and division boards in, kept
   current as ratings move
 - **Auto-cancel** - how long an untaken call stays up, or off entirely
 - **Extra ping role** - for people who want notifying about every call. The
@@ -135,7 +135,8 @@ without the bot link straight to the invite; the rest open a settings page:
   them, each holding scenarios picked from a live KovaaK's search, so a name can
   never be a typo
 - **Queues** - how many rank bands apart a queue lets people be, per format.
-  This also decides who can *see* each rank channel (below)
+  This also decides who can *see* each rank channel (below). The switch for
+  letting the rest of the server watch a match is here too
 - **Players** - Elo, rank, Voltaic S5 standing, and the starting rank of
   anyone who hasn't played yet
 - **Overview** - the server's numbers and what is still unconfigured
@@ -232,18 +233,28 @@ together.
 
 ## The leaderboard
 
-Point setup's **Leaderboard** at a channel and Quorum keeps one message in it:
-the top ten with their rating, rank and record, edited in place as matches
-finish rather than reposted every time someone wins.
+Point setup's **Leaderboard** at a channel and Quorum keeps two messages in it,
+edited in place as matches finish rather than reposted every time someone wins.
 
-**Back** and **Next** under it hand you the rest of the ladder privately. The
-message in the channel does not turn over - it is one message the whole server
-is looking at, and a page that moves under everyone whenever anyone reads it is
-a page nobody can read. `/scrim leaderboard` answers with the same board.
+The first is the ladder: the top ten with their rating, rank and record. The
+second is **By division** - the top five of each rank, highest first. They
+answer different questions. The ladder says who is best in the server, which for
+most people is a list of names they will never be drawn against; the division
+board says who is best in the bracket they actually queue in, which is the one
+they can do something about. A division nobody has played in is left off rather
+than printed empty, so a young ladder is two headings and not seven.
 
-Delete the message by hand and the next tick puts it back; move the channel and
-the old one is taken down with it; remove Quorum and it goes. A ladder short
-enough to fit on one page gets no buttons at all.
+**Full ladder** under it opens the rest on the dashboard. Neither message turns
+over - they are messages the whole server is looking at, and a page that moves
+under everyone whenever anyone reads it is a page nobody can read, which is why
+the eleventh place lives on the web and not behind a button here. `/scrim
+leaderboard` answers with both boards at once - asked for on purpose they are
+one answer, and a second command to see the divisions is a command nobody would
+know to run.
+
+Delete either message by hand and the next tick puts it back; move the channel
+and the old ones are taken down with it; remove Quorum and they go. A ladder
+short enough to fit on one page gets no buttons at all.
 
 ## How a match runs
 
@@ -254,16 +265,21 @@ rank channel forever. Then:
    a 1v1_, and pings the rank roles that queue would admit - not everyone. The
    ping is what makes it findable without anyone watching the channel.
 2. Someone else hits **Join** on it. That's the whole matchmaking.
-3. The moment it fills it starts itself: teams drawn, and a **private thread**
-   made off the queue channel holding exactly the players. The call in the
-   channel is deleted - it filled, so it has nothing left to offer - and
-   everything from here happens in the thread, where nobody else can see it.
+3. The moment it fills it starts itself: teams drawn, and a **thread** made off
+   the queue channel holding exactly the players. The call in the channel is
+   deleted - it filled, so it has nothing left to offer - and everything from
+   here happens in the thread. Private unless the server turned spectating on
+   (below).
 4. **Pick/ban.** 7 candidates go up in the thread and the two sides
    alternate bans until 3 are left. Nobody banning within 90 seconds and the
    bot bans at random, so one person can't hold the lobby. Group format skips
    this - there are no two sides to alternate between.
 5. That same message becomes the live scoreboard, re-reading KovaaK's every
-   minute on its own. **Refresh scores** forces it early.
+   minute on its own. **Refresh scores** forces it early, and **Copy scenarios**
+   hands you the three names privately, one code block each - Discord puts its
+   own copy button on a code block, so that is a name on the clipboard in one
+   press and a paste into KovaaK's search. The scoreboard's own block cannot do
+   that job: copying it hands you the whole table, scores and all.
 6. Everyone hits **Done**. Once they all have - or the clock runs out, whichever
    comes first - placings and Elo changes go to the results channel and the
    thread is deleted. The result embed is the record; an archived thread per
@@ -289,6 +305,14 @@ and spending the whole clock fishing the other two takes it 2-1. All or nothing
 is what makes "three runs each" a rule instead of a suggestion. Where *nobody*
 played it out there is nobody to have forfeited to, so it falls back to
 per-scenario and two half-played sides are scored on what they ran.
+
+**Time is nearly up** gets said out loud. Five minutes before a match's
+deadline - the format pane sets it, or turns it off with 0 - the thread pings
+whoever has not pressed Done yet. A mention rather than a line edited into the
+scoreboard, because the whole job is the notification: the person it has to
+reach is alt-tabbed into KovaaK's, and a message they are not looking at reaches
+nobody. Once per match, not once a minute for the last five - the deadline on
+the board is the countdown.
 
 **Finishing starts a clock.** Once the first player has used every run, everyone
 else gets fifteen minutes and then the match scores itself. Without it, playing
@@ -316,6 +340,25 @@ Other commands: `/scrim score`, `/scrim stats`, `/scrim leaderboard`, and
 unfinished scenarios included, so it is not the merciful option - and *cancel*
 bins it with no rating change. Reach for cancel when somebody's game died.
 Without either, a broken match just sits until the match clock catches it.
+
+**Letting the server watch.** Off out of the box, and a switch in the queues
+pane. On, a match plays out in a **public** thread: anyone who can see the queue
+channel can open it and follow the scoreboard live. Watching only - the queue
+channels stop letting anyone post in a thread, and the players in a live match
+are handed that back for as long as their match runs, so the room has an
+audience and not a peanut gallery.
+
+That is done with member overwrites on the queue channel, because Discord has no
+per-thread permissions at all: a thread simply *is* its parent channel's
+permissions. Which leaves one seam worth knowing about - two matches running in
+the same rank channel at once means both sets of players hold the same
+overwrite, so they can talk in each other's threads. Everyone else is still
+reading only, which is what the switch promises.
+
+Who can watch is who can see the channel, so the rank spread decides it: at "one
+rank either side", a Champion match in `#champion` is open to Champion, Diamond
+and Platinum and nobody below. Turning it on or off changes matches from the
+next one; one already running stays the room it started in.
 
 **Why a thread and not a voice channel.** A bot can only move someone who is
 already sitting in voice, so half a lobby would be left staring at a link. A

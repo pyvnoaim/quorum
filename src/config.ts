@@ -163,6 +163,12 @@ export const GRACE_MS = 15 * 60 * 1000;
  *  it: nine deliberately awful runs inside four minutes would start a countdown
  *  on an opponent who is still loading in. */
 export const MIN_MATCH_MS = 20 * 60 * 1000;
+/** How long before a match's deadline the bot says so in the thread. A mention,
+ *  so it arrives as a notification rather than as another line nobody is
+ *  looking at: the whole point is reaching somebody who has alt-tabbed into the
+ *  game. 0 turns it off. Coarser than it looks - the tick is a minute wide, so
+ *  the ping lands inside the minute, not on the second. */
+export const WARN_MS = 5 * 60 * 1000;
 /** How often a live match re-reads scores off KovaaK's on its own. */
 export const TICK_MS = 60 * 1000;
 /** How often the bot looks for a side that walked away mid-pick. Finer than the

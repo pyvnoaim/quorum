@@ -314,20 +314,33 @@ export function panelMessage(
  *
  *  The guild argument is only an override for a caller that already holds one -
  *  everything else goes through the client below, because a rank the caller had
- *  to remember to make resolvable is one three call sites out of four forgot. */
+ *  to remember to make resolvable is one three call sites out of four forgot.
+ *
+ *  Handed back as a function with the ladder already read, because the callers
+ *  that matter name a rank per ROW: the ladder does it ten times and the
+ *  division board up to five hundred, and reading the rank table and the mode
+ *  off disk inside each of those was two queries a player for an answer that
+ *  cannot change between them. rankLabel() below is the one-off. */
+export function bandNamer(guildId: string, guild?: Guild | null) {
+  const ranks = getRanks(guildId);
+  const manual = getRankMode(guildId) === "manual";
+  const where = guild ?? client?.guilds.cache.get(guildId) ?? null;
+  return (discordId: string, elo: number) => {
+    if (!manual) return rankName(ranks, elo);
+    const held = where?.members.cache.get(discordId)?.roles.cache;
+    return held
+      ? (rankForRoles(ranks, held.map((r) => r.id) as string[])?.name ?? "")
+      : "";
+  };
+}
+
 export function rankLabel(
   guildId: string,
   discordId: string,
   elo: number,
   guild?: Guild | null,
 ) {
-  const ranks = getRanks(guildId);
-  if (getRankMode(guildId) !== "manual") return rankName(ranks, elo);
-  const where = guild ?? client?.guilds.cache.get(guildId) ?? null;
-  const held = where?.members.cache.get(discordId)?.roles.cache;
-  return held
-    ? (rankForRoles(ranks, held.map((r) => r.id) as string[])?.name ?? "")
-    : "";
+  return bandNamer(guildId, guild)(discordId, elo);
 }
 
 /** The client, handed over once at boot.
@@ -360,6 +373,17 @@ export const messageGone = (err: unknown) =>
  *  past third place. */
 const LADDER_PAGE = 10;
 
+/** A player's record as the boards say it. Draws are games: left out of the
+ *  total they would put the win rate over what was actually played, and counted
+ *  as wins they would flatter it. The D only shows on a record that has one -
+ *  most never will, and a column of "0D" down a board is noise for a thing that
+ *  rarely happens. */
+function record(p: Player) {
+  const games = p.wins + p.losses + p.draws;
+  const rate = games ? ` (${Math.round((p.wins / games) * 100)}%)` : "";
+  return `${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ""}${rate}`;
+}
+
 /** The top of the ladder, and a link to the rest of it.
  *
  *  Drawn from the database on every call, so a board someone left open
@@ -372,21 +396,15 @@ const LADDER_PAGE = 10;
 export function leaderboardMessage(guildId: string, url: string | null = null) {
   const total = ladderSize(guildId);
   const rows = leaderboard(guildId, LADDER_PAGE);
+  const band = bandNamer(guildId);
 
   const line = (p: Player, n: number) => {
-    // Draws are games. Left out of the total they would put the rate over what
-    // was actually played; counted as wins they would flatter it.
-    const games = p.wins + p.losses + p.draws;
-    const rate = games ? ` (${Math.round((p.wins / games) * 100)}%)` : "";
     // The top three are the only rows worth a marker - a medal beside eleventh
     // place is decoration, and it pushes the name out of line with the rest.
     const place = ["🥇", "🥈", "🥉"][n] ?? `**${n + 1}.**`;
-    const band = rankLabel(guildId, p.discord_id, p.elo);
+    const name = band(p.discord_id, p.elo);
     return (
-      `${place} <@${p.discord_id}> - **${p.elo}**${band ? ` ${band}` : ""} · ` +
-      // The D only shows on a record that has one - most never will, and a
-      // column of "0D" down the board is noise for a thing that rarely happens.
-      `${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ""}${rate}`
+      `${place} <@${p.discord_id}> - **${p.elo}**${name ? ` ${name}` : ""} · ` + record(p)
     );
   };
 
@@ -415,6 +433,90 @@ export function leaderboardMessage(guildId: string, url: string | null = null) {
       : [];
 
   return { embeds: [embed], components };
+}
+
+/** How many of a division are named on the division board. Five, not ten: the
+ *  point of the board is who is at the top of the room you actually queue in,
+ *  and a division deep enough to want a sixth row is a division whose players
+ *  are on the ladder above anyway. */
+const DIVISION_TOP = 5;
+/** How far down the ladder the division board reads to find them. Every
+ *  division's five sit somewhere in one Elo-sorted list, and there is no
+ *  knowing how far without reading: a hundred Champions push Diamond's first
+ *  row to a hundred and first. Capped rather than unbounded because this runs
+ *  on the tick, and a board is not worth an unbounded scan - a ladder longer
+ *  than this loses the bottom division's rows, which are the ones its own
+ *  players can already see on the web ladder.
+ *
+ *  ponytail: one query and a bucket loop. A GROUP BY per band would want the
+ *  thresholds in SQL, and in manual mode the band is a Discord role, not a
+ *  number - so there would be two answers to keep in step instead of one. */
+const DIVISION_SCAN = 500;
+
+/** The same ladder cut by division: the top five of each, highest division
+ *  first.
+ *
+ *  It answers a different question from the board above it. The ladder says who
+ *  is best in the server, which for most people is a list of names they will
+ *  never queue against; this says who is best in the bracket they are actually
+ *  in, which is the one they can do something about.
+ *
+ *  Bucketed by rankLabel(), not by threshold, so it says the same thing as
+ *  every other place a rank is named - including manual mode, where the band is
+ *  the Discord role staff handed out and no Elo comparison would find it.
+ *  Somebody it returns nothing for - manual mode, before staff have placed
+ *  them - is left off rather than filed under a division they are not in. */
+export function divisionsMessage(guildId: string) {
+  const band = bandNamer(guildId);
+  const held = new Map<string, Player[]>();
+  for (const p of leaderboard(guildId, DIVISION_SCAN)) {
+    const name = band(p.discord_id, p.elo);
+    if (!name) continue;
+    const rows = held.get(name) ?? [];
+    // Already sorted by Elo, so the first five past the filter ARE the top five
+    if (rows.length < DIVISION_TOP) rows.push(p);
+    held.set(name, rows);
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle("By division")
+    .setColor(BLURPLE)
+    .setDescription(
+      held.size
+        ? `The top ${DIVISION_TOP} of each division. The ladder above is the whole server at ` +
+          "once; this is who leads the bracket you queue in."
+        : "_no games played yet_",
+    )
+    .setFooter(footer());
+
+  // Discord's limits are a message REJECTED, not a message that comes out
+  // short, so the budget is counted here the way the pool board counts its own:
+  // 25 fields and 6000 characters across the embed, with room left for the
+  // description and title already on it.
+  let budget = 5500 - (embed.data.description?.length ?? 0) - (embed.data.title?.length ?? 0);
+  for (const rank of getRanks(guildId)) {
+    const rows = held.get(rank.name);
+    // Taken as it is used, so two ranks a server has given the same name print
+    // one heading between them rather than the same five players twice -
+    // nothing stops a ladder having two Golds on it.
+    held.delete(rank.name);
+    // A division nobody is in is left out rather than printed empty: a ladder
+    // with seven bands and four players would otherwise be three blank headings
+    // and one board.
+    if (!rows?.length) continue;
+    const value = rows
+      // No medal and no band. The heading is the division, so naming it on
+      // every row repeats it five times, and a medal here would read as the
+      // server's top three rather than the bracket's.
+      .map((p, n) => `**${n + 1}.** <@${p.discord_id}> - **${p.elo}** · ${record(p)}`)
+      .join("\n");
+    const name = rank.name.slice(0, 200);
+    if ((embed.data.fields?.length ?? 0) >= 25 || name.length + value.length > budget) break;
+    budget -= name.length + value.length;
+    embed.addFields({ name, value, inline: false });
+  }
+
+  return { embeds: [embed], components: [] };
 }
 
 /** The pool as one entry per category, grouped by the main that category rolls

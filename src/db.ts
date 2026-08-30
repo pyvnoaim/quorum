@@ -13,6 +13,7 @@ import {
   ROUNDS,
   RUNS_PER_SCENARIO,
   SEED_MODES,
+  WARN_MS,
   type Format,
   type SeedMode,
 } from './config.js';
@@ -184,6 +185,15 @@ for (const stmt of [
   // in a channel, kept current by the same tick.
   'alter table guild_config add column rules_channel_id text',
   'alter table guild_config add column rules_msg_id text',
+  // When the low-time warning went out, so it goes out once. A column rather
+  // than a set in memory: the tick that would have sent a second one is just as
+  // likely to be a tick after a restart, and a bot that redeploys mid-match
+  // must not ping the same match again.
+  'alter table match add column warned_at integer',
+  // 1 = match threads are public, so the rest of the server can watch one being
+  // played. Off by default and off on every server that upgrades into it: a
+  // match room is private until somebody says otherwise.
+  'alter table guild_config add column spectate integer',
 ]) {
   try {
     db.exec(stmt);
@@ -280,6 +290,10 @@ export interface Match {
    *  a rated match, but no Elo moves and no W/L is written - which is what lets
    *  a player staff have not placed yet get a game at all. */
   ranked: number;
+  /** When the "time is nearly up" ping went out, so it goes out once and not
+   *  once a minute for the last five. Null until it does, and null forever on a
+   *  server that has the warning turned off. */
+  warned_at: number | null;
 }
 
 export interface GuildConfig {
@@ -332,6 +346,10 @@ export interface GuildConfig {
    *  Null = the whole server. A queue channel is private to its rank whatever
    *  this says - see syncRankChannelsToDiscord(). */
   visible_role_id: string | null;
+  /** 1 = a match plays out in a PUBLIC thread anyone who can see the queue
+   *  channel may read. The players still hold the only voice in it - see
+   *  grantThreadVoice() - so it is a window, not a second lobby. */
+  spectate: number | null;
 }
 
 /** Who owns the division roles. 'manual' means staff do: the bot never adds or
@@ -391,6 +409,9 @@ export interface FormatConfig {
   /** Minutes a match always runs for, whatever the grace says. 0 turns the
    *  floor off and lets a fast finisher end it as early as the grace allows. */
   minMatchMin: number;
+  /** Minutes before the deadline that the thread gets pinged that time is
+   *  nearly up. 0 = no warning at all. */
+  warnMin: number;
 }
 
 /** Bounds, not taste: outside these the format stops working rather than
@@ -404,6 +425,7 @@ const FORMAT_BOUNDS: Record<keyof FormatConfig, [number, number]> = {
   matchTtlMin: [5, 240],
   graceMin: [1, 240],
   minMatchMin: [0, 240],
+  warnMin: [0, 60],
 };
 
 const FORMAT_DEFAULTS: FormatConfig = {
@@ -414,6 +436,7 @@ const FORMAT_DEFAULTS: FormatConfig = {
   matchTtlMin: Math.round(MATCH_TTL_MS / 60000),
   graceMin: Math.round(GRACE_MS / 60000),
   minMatchMin: Math.round(MIN_MATCH_MS / 60000),
+  warnMin: Math.round(WARN_MS / 60000),
 };
 
 /** The format as this server runs it, falling back to the shipped default for
@@ -551,6 +574,7 @@ export function getConfig(guildId: string): GuildConfig {
       leaderboard_msg_id: null,
       rules_channel_id: null,
       rules_msg_id: null,
+      spectate: null,
     }
   );
 }
@@ -564,8 +588,8 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
         split_category_id, split_results_id, split_unranked_id, unranked_enabled,
         format_cfg, panel_msgs, queues_paused,
         announce_channel_id, visible_role_id, leaderboard_channel_id, leaderboard_msg_id,
-        rules_channel_id, rules_msg_id)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        rules_channel_id, rules_msg_id, spectate)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(guild_id) do update set
        panel_channel_id = excluded.panel_channel_id,
        results_channel_id = excluded.results_channel_id,
@@ -587,7 +611,8 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
        leaderboard_channel_id = excluded.leaderboard_channel_id,
        leaderboard_msg_id = excluded.leaderboard_msg_id,
        rules_channel_id = excluded.rules_channel_id,
-       rules_msg_id = excluded.rules_msg_id`,
+       rules_msg_id = excluded.rules_msg_id,
+       spectate = excluded.spectate`,
   ).run(
     guildId,
     next.panel_channel_id,
@@ -611,6 +636,7 @@ export function setConfig(guildId: string, patch: Partial<Omit<GuildConfig, 'gui
     next.leaderboard_msg_id,
     next.rules_channel_id,
     next.rules_msg_id,
+    next.spectate,
   );
   return next;
 }

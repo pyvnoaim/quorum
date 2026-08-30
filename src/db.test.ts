@@ -262,6 +262,27 @@ assert.deepEqual(getRankSpread('gc'), { '1v1': 1 }, 'only live formats come back
   assert.deepEqual(Object.keys(getFormat('gf')).sort(), Object.keys(shipped).sort());
   assert.equal(getFormat('gf').pickPool, 4, 'the real key still landed');
   assert.ok(!(getConfig('gf').format_cfg ?? '').includes('nonsense'), 'nothing else is stored');
+  // The low-time warning is the one knob whose bottom of range is meaningful:
+  // 0 is not a bad value falling back to five, it is a server saying it does
+  // not want the ping at all.
+  assert.equal(shipped.warnMin, 5, 'five minutes out of the box');
+  assert.equal(setFormat('gf', { warnMin: 0 }).warnMin, 0, 'zero is off, not a default');
+  assert.equal(setFormat('gf', { warnMin: 3 }).warnMin, 3);
+  assert.equal(setFormat('gf', { warnMin: 999 }).warnMin, 5, 'and out of bounds is the default');
+}
+
+// Spectating is a real column, not something read off a channel: a match asks
+// it at the moment it opens its thread, long after the dashboard save.
+{
+  assert.equal(getConfig('gspec').spectate, null, 'private threads unless asked');
+  setConfig('gspec', { spectate: 1 });
+  assert.equal(getConfig('gspec').spectate, 1);
+  // ...and it survives a write of something else entirely, which is the whole
+  // reason setConfig re-reads the row instead of patching the columns it knows.
+  setConfig('gspec', { ping_role_id: '9' });
+  assert.equal(getConfig('gspec').spectate, 1, 'an unrelated save leaves it alone');
+  setConfig('gspec', { spectate: null });
+  assert.equal(getConfig('gspec').spectate, null);
 }
 
 // The claim behind startMatch and finishMatch. Force-finish, the last Done and
