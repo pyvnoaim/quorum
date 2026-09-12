@@ -194,6 +194,10 @@ for (const stmt of [
   // played. Off by default and off on every server that upgrades into it: a
   // match room is private until somebody says otherwise.
   'alter table guild_config add column spectate integer',
+  // When this server last had its week posted. Deliberately not part of
+  // setConfig's upsert - nothing but the recap reads or writes it, and the
+  // dashboard saving a channel must not reset the clock.
+  'alter table guild_config add column recap_at integer',
 ]) {
   try {
     db.exec(stmt);
@@ -356,6 +360,9 @@ export interface GuildConfig {
    *  channel may read. The players still hold the only voice in it - see
    *  grantThreadVoice() - so it is a window, not a second lobby. */
   spectate: number | null;
+  /** When the weekly recap last went out. Owned by claimRecap(), not by the
+   *  dashboard: setConfig never writes this column. */
+  recap_at: number | null;
 }
 
 /** Who owns the division roles. 'manual' means staff do: the bot never adds or
@@ -581,6 +588,7 @@ export function getConfig(guildId: string): GuildConfig {
       rules_channel_id: null,
       rules_msg_id: null,
       spectate: null,
+      recap_at: null,
     }
   );
 }
@@ -1157,6 +1165,104 @@ export function recentMatches(discordId: string, guildId: string, limit = 5) {
 export interface Opponent {
   id: string;
   name: string;
+}
+
+/** The run they are on: how many finished rated matches in a row ended the same
+ *  way, newest first.
+ *
+ *  A draw is its own kind and breaks both - it is read back the way deleteMatch
+ *  reads it, more than one TEAM on placing 1, because both members of a winning
+ *  2v2 are placing 1 and that is a win. Capped at 25, which is as far as a
+ *  scoreboard would ever print anyway. */
+export function streak(discordId: string, guildId: string) {
+  const rows = db
+    .prepare(
+      `select p.placing,
+              (select count(distinct o.team) from match_player o
+                where o.match_id = m.id and o.placing = 1) as firsts
+       from match_player p join match m on m.id = p.match_id
+       where p.discord_id = ? and m.guild_id = ? and m.status = 'done'
+         and m.ranked <> 0 and p.placing is not null
+       order by m.ended_at desc, m.id desc limit 25`,
+    )
+    .all(discordId, guildId) as unknown as { placing: number; firsts: number }[];
+
+  const kind = (r: { placing: number; firsts: number }) =>
+    r.placing !== 1 ? 'L' : r.firsts > 1 ? 'D' : 'W';
+  if (!rows.length) return null;
+  const now = kind(rows[0]);
+  let n = 0;
+  while (n < rows.length && kind(rows[n]) === now) n++;
+  return { kind: now, n };
+}
+
+/** The week, for the recap that gets posted about it: how much was played and
+ *  who climbed. Unranked games are left out - no rating moved in one, so there
+ *  is nothing to have climbed. */
+export function weekly(guildId: string, since: number) {
+  const players = db
+    .prepare(
+      `select p.discord_id, pl.kovaaks_username as name, count(*) as games,
+              sum(case when p.placing = 1 then 1 else 0 end) as wins,
+              sum(coalesce(p.elo_after, 0) - coalesce(p.elo_before, 0)) as delta
+       from match_player p
+       join match m on m.id = p.match_id
+       join player pl on pl.discord_id = p.discord_id
+       where m.guild_id = ? and m.status = 'done' and m.ranked <> 0
+         and p.placing is not null and m.ended_at > ?
+       group by p.discord_id
+       order by delta desc, games desc`,
+    )
+    .all(guildId, since) as unknown as {
+    discord_id: string;
+    name: string;
+    games: number;
+    wins: number;
+    delta: number;
+  }[];
+
+  const played = (
+    db
+      .prepare(
+        // Rated only, the same as the players above: counting unranked games
+        // here and not there is how a recap ends up saying three matches were
+        // played by nobody.
+        `select count(*) as n from match
+         where guild_id = ? and status = 'done' and ranked <> 0 and ended_at > ?`,
+      )
+      .get(guildId, since) as { n: number }
+  ).n;
+
+  return { played, players };
+}
+
+/** Whether this server is due its recap, and the window it covers.
+ *
+ *  Claimed, not just read: two ticks overlapping on a slow Discord would both
+ *  find the same stale stamp and post the same recap twice. The first sight of
+ *  a server only starts the clock - a bot that has just been deployed has no
+ *  week to report, and posting "0 matches" as its first act is worse than
+ *  waiting a week. Null means nothing to do. */
+export function claimRecap(guildId: string, every: number): number | null {
+  const row = db.prepare('select recap_at from guild_config where guild_id = ?').get(guildId) as
+    | { recap_at: number | null }
+    | undefined;
+  // No config row at all is a server that has never been set up. Nothing to
+  // post and nowhere to post it.
+  if (!row) return null;
+  const now = Date.now();
+  if (row.recap_at == null) {
+    db.prepare('update guild_config set recap_at = ? where guild_id = ? and recap_at is null').run(
+      now,
+      guildId,
+    );
+    return null;
+  }
+  if (now - row.recap_at < every) return null;
+  const claimed = db
+    .prepare('update guild_config set recap_at = ? where guild_id = ? and recap_at = ?')
+    .run(now, guildId, row.recap_at);
+  return claimed.changes ? row.recap_at : null;
 }
 
 /** Rounds won and lost per main category, over every rated match they finished.

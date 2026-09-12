@@ -25,6 +25,8 @@ import {
   ladderSize,
   leaderboard,
   poolFor,
+  streak,
+  weekly,
   type Match,
   type MatchPlayer,
   type Player,
@@ -43,6 +45,9 @@ import {
 
 const BLURPLE = 0x5865f2;
 const GREEN = 0x57f287;
+/** A result card with a world record on it. Nothing else in the bot is this
+ *  colour, which is the point - it happens a handful of times a year. */
+const GOLD = 0xfee75c;
 
 /** Buttons in as few rows as Discord allows - five to a row, so the panel's
  *  formats and its Notify sit side by side instead of stacking. */
@@ -898,6 +903,10 @@ export function resultsEmbed(
   rows: MatchPlayer[],
   players: Map<string, Player>,
   deltas: Map<string, number>,
+  /** Anyone here who just took the world record on one of these scenarios -
+   *  checked against KovaaK's own leaderboard, never guessed. Empty for every
+   *  match anybody will ever play; see recordsSet(). */
+  records: { id: string; scenario: string; score: number }[] = [],
 ) {
   const scenarios: string[] = JSON.parse(match.scenarios);
   // Only an explicit 0 is unranked. The column defaults to 1 and every row that
@@ -1010,6 +1019,12 @@ export function resultsEmbed(
       : [];
     // ...and why a whole row of them is a whole row. See forfeits().
     const gaveUp = playedOut.some(Boolean) && !playedOut[rows.indexOf(r)];
+    // Wins only, and only once there are two. A losing run is a real number and
+    // printing it under somebody's name on the card their whole server reads is
+    // how you get a player who stops queueing - which is the opposite of what a
+    // streak line is for. Read after the match was scored, so it counts this one.
+    const run = rated ? streak(r.discord_id, match.guild_id) : null;
+    const onARun = run && run.kind === "W" && run.n >= 2 ? run.n : 0;
     return {
       name: `${r.placing == null ? "·" : (medal[r.placing - 1] ?? `#${r.placing}`)} ${p.kovaaks_username}`,
       value:
@@ -1023,6 +1038,7 @@ export function resultsEmbed(
               ? `(${delta >= 0 ? "+" : ""}${delta})`
               : ""
         }` +
+        (onARun ? ` · 🔥 **${onARun} in a row**` : "") +
         (pbs ? `\n_${pbs} personal best${pbs === 1 ? "" : "s"}_` : "") +
         (gaveUp
           ? `\n_forfeited the match - did not play all ${scenarios.length} out_`
@@ -1054,11 +1070,23 @@ export function resultsEmbed(
     // hanging off the end of it read as one more banned scenario.
     .join("\n");
 
+  // Above the scoreboard and in its own colour, because it is bigger than the
+  // match it happened in. Name, scenario, number and nothing else: the server
+  // reading it knows what a world record is.
+  const wr = records
+    .map(
+      (r) =>
+        `🌍 **${players.get(r.id)?.kovaaks_username ?? "somebody"} just set the ` +
+        `${r.scenario} world record** - ${r.score.toFixed(0)}`,
+    )
+    .join("\n");
+
   return new EmbedBuilder()
     .setTitle(rated ? title : `${title} · unranked`)
-    .setColor(rated ? GREEN : GREY)
+    .setColor(wr ? GOLD : rated ? GREEN : GREY)
     .setDescription(
-      "```\n" +
+      (wr ? `${wr}\n\n` : "") +
+        "```\n" +
         table +
         "\n```" +
         // Said on the result, not only on the panel they queued from: the card
@@ -1069,6 +1097,59 @@ export function resultsEmbed(
     )
     .addFields(fields)
     .setFooter(footer());
+}
+
+/** The week, once a week, in the channel the results live in.
+ *
+ *  What a ladder cannot say on its own: who MOVED. A leaderboard is a standing
+ *  order that barely changes, so the player who won four games off the bottom of
+ *  it sees nothing for it - and they are exactly who a scrim server needs back
+ *  next week. So it names climbers rather than leaders, and the scores it prints
+ *  are read against the world record, which is the only number in the room
+ *  nobody has beaten.
+ *
+ *  `week` comes in already read - see weekly() - so the caller can warm the
+ *  records for the scenarios in it before this renders. */
+export function recapEmbed(
+  guildId: string,
+  week: ReturnType<typeof weekly>,
+  url: string | null = null,
+) {
+  const embed = new EmbedBuilder()
+    .setTitle(`The week · ${week.played} match${week.played === 1 ? "" : "es"}`)
+    .setColor(BLURPLE)
+    .setDescription(
+      `${week.players.length} player${week.players.length === 1 ? "" : "s"} got a game in.` +
+        (url ? ` [The ladder](${url})` : ""),
+    )
+    .setFooter(footer());
+  if (url) embed.setURL(url);
+
+  // Only players who actually gained. A "climbers" list counting down into the
+  // negatives is a public list of who had a bad week.
+  const climbers = week.players.filter((p) => p.delta > 0).slice(0, 3);
+  if (climbers.length) {
+    embed.addFields({
+      name: "Climbing",
+      value: climbers
+        .map((p) => `**+${p.delta}** <@${p.discord_id}> · ${p.wins}W of ${p.games}`)
+        .join("\n"),
+      inline: true,
+    });
+  }
+
+  const busiest = [...week.players].sort((a, b) => b.games - a.games).slice(0, 3);
+  if (busiest.length) {
+    embed.addFields({
+      name: "Playing",
+      value: busiest
+        .map((p) => `**${p.games}** game${p.games === 1 ? "" : "s"} <@${p.discord_id}>`)
+        .join("\n"),
+      inline: true,
+    });
+  }
+
+  return embed;
 }
 
 /** The result message's one button. It opens a plain call - same rank gate,

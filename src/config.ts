@@ -171,6 +171,18 @@ export const MIN_MATCH_MS = 20 * 60 * 1000;
 export const WARN_MS = 5 * 60 * 1000;
 /** How often a live match re-reads scores off KovaaK's on its own. */
 export const TICK_MS = 60 * 1000;
+/** How often a server gets its week in review posted in the results channel.
+ *  Rolling, not a fixed weekday: the first one lands a week after the bot first
+ *  sees the server, and every one after that a week from the last - which needs
+ *  no timezone from anybody. */
+export const RECAP_MS = 7 * 24 * 60 * 60 * 1000;
+/** How long a scenario's world record is trusted before it is asked for again.
+ *  A world record is a number that moves a few times a year. */
+export const RECORD_TTL_MS = 24 * 60 * 60 * 1000;
+/** ...and how long a failed lookup is left alone. Short, because it is not an
+ *  answer - but not nothing, or every match that ends while KovaaK's is down
+ *  pays the full timeout again for a line nobody was going to read. */
+export const RECORD_RETRY_MS = 5 * 60 * 1000;
 /** How often the bot looks for a side that walked away mid-pick. Finer than the
  *  tick because the ban timer is a number staff chose and expect to mean
  *  something: swept once a minute, a 90s window ran up to 150s. */

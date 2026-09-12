@@ -20,6 +20,7 @@ import {
   CALL_TTL_MS,
   FORMATS,
   MAIN_CATEGORIES,
+  RECAP_MS,
   ROUNDS,
   TICK_MS,
   PICK_SWEEP_MS,
@@ -44,14 +45,18 @@ import {
   rankChannels,
   getScenarios,
   categoryRecord,
+  claimRecap,
   headToHead,
   matchInThread,
   matchPlayers,
   recentMatches,
   seedPlayer,
   setPlayerElo,
+  streak,
+  weekly,
   type Match,
   type MatchPlayer,
+  type Player,
 } from './db.js';
 import {
   divisionsMessage,
@@ -64,12 +69,19 @@ import {
   panelMessage,
   runningEmbed,
   pickEmbed,
+  recapEmbed,
   rematchRow,
   resultsEmbed,
   staleEmbed,
 } from './embeds.js';
 import { startWeb, profileUrl, ladderUrl, BOARDS, placeBoard } from './web.js';
-import { kovaaksAccountForDiscordId, scoreInWindow, voltaicS5 } from './kovaaks.js';
+import {
+  kovaaksAccountForDiscordId,
+  scoreInWindow,
+  voltaicS5,
+  worldRecord,
+  worldRecordHolder,
+} from './kovaaks.js';
 import {
   advancePick,
   allRunsUsed,
@@ -943,6 +955,51 @@ async function cancelMatch(match: Match) {
   await closeThread(match);
 }
 
+/** Anybody in this match who just set a world record.
+ *
+ *  Two steps, because a false one is worse than a missed one. The cached top
+ *  score is only a bar: a score that does not clear it cannot be a record, and
+ *  that is the case for every match ever played, so almost nothing gets past
+ *  here. A score that DOES clear it is checked against the global leaderboard
+ *  itself - if KovaaK's says rank 1 is this player's Steam id, it is real, and
+ *  if it says anything else the cached number was simply out of date.
+ *
+ *  The raw scores, not the forfeited ones: a run that beat the world is a run
+ *  that beat the world, whatever it did to the match around it. */
+async function recordsSet(match: Match, rows: MatchPlayer[], players: Map<string, Player>) {
+  const scenarios: string[] = JSON.parse(match.scenarios);
+  const scores = new Map(
+    rows.map((r) => [r.discord_id, JSON.parse(r.scores) as Record<string, number | null>]),
+  );
+  const out: { id: string; scenario: string; score: number }[] = [];
+  for (const scenario of scenarios) {
+    const bar = await worldRecord(scenario).catch(() => null);
+    if (bar == null) continue;
+    const claims = rows
+      .map((r) => ({ id: r.discord_id, score: scores.get(r.discord_id)![scenario] }))
+      // A point under the bar, not on it: the popular list rounds its top score
+      // (155.14 comes back as 155), so a record set by a fraction would screen
+      // itself out. Letting one more score through costs a request nobody will
+      // ever make - the real check is the next line.
+      .filter((c): c is { id: string; score: number } => c.score != null && c.score >= bar - 1);
+    if (!claims.length) continue;
+
+    const holder = await worldRecordHolder(scenario).catch(() => null);
+    if (!holder) continue;
+    for (const claim of claims) {
+      // By Steam id and nothing else. Matching on the score instead would hand
+      // the record to whoever happened to tie it, and a player with no Steam id
+      // on file is one ensurePlayer has not seen since the column existed -
+      // which the match they just played has already fixed for next time.
+      const steam = players.get(claim.id)?.steam_id;
+      if (steam && holder.steamId === steam && claim.score >= holder.score) {
+        out.push({ ...claim, scenario });
+      }
+    }
+  }
+  return out;
+}
+
 /** Ends a match and cleans up after it. The Done button and the clock both
  *  route through here, so there is exactly one place that posts a result. */
 async function concludeMatch(match: Match) {
@@ -952,7 +1009,10 @@ async function concludeMatch(match: Match) {
   const { match: done, deltas, voided } = finished;
   const rows = matchPlayers(done.id);
   const players = new Map(rows.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
-  const embed = voided ? noContestEmbed(done, rows) : resultsEmbed(done, rows, players, deltas);
+  const records = voided ? [] : await recordsSet(done, rows, players);
+  const embed = voided
+    ? noContestEmbed(done, rows)
+    : resultsEmbed(done, rows, players, deltas, records);
 
   // Beside the thread it was played in - one channel for every result, whatever
   // the queues are split into.
@@ -1127,10 +1187,40 @@ async function refreshBoards() {
   }
 }
 
+/** The week in review, once a week, wherever results go.
+ *
+ *  Posted rather than edited in place: a recap is news, and news that quietly
+ *  rewrites itself in a channel nobody has scrolled back to is not news. No
+ *  ping either - a weekly mention of everybody is what gets a bot muted, and a
+ *  muted bot cannot tell anyone a queue is up.
+ *
+ *  A week nobody played is skipped: "0 matches" is a worse thing to say to a
+ *  quiet server than nothing at all. The clock still moves, so it tries again
+ *  next week rather than the moment the next match ends. */
+async function postRecaps() {
+  for (const guild of client.guilds.cache.values()) {
+    // The channel first, and the claim only once there is somewhere to post:
+    // claiming stamps the clock whether or not anything goes out, so a server
+    // with no results channel - or one Discord would not hand over just now -
+    // would otherwise spend its week's recap on nothing and never notice.
+    const home = getConfig(guild.id).split_results_id;
+    const channel = home ? await client.channels.fetch(home).catch(() => null) : null;
+    if (!channel?.isSendable()) continue;
+    const since = claimRecap(guild.id, RECAP_MS);
+    if (since == null) continue;
+    const week = weekly(guild.id, since);
+    if (!week.played) continue;
+    await channel
+      .send({ embeds: [recapEmbed(guild.id, week, ladderUrl(guild.id))] })
+      .catch(() => {});
+  }
+}
+
 async function tick() {
   await refreshPanels();
   await refreshBoards();
   await expireStaleCalls();
+  await postRecaps();
   const live = db
     .prepare("select * from match where status = 'live'")
     .all() as unknown as Match[];
@@ -1302,6 +1392,10 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
     // The title carries the link to their page - a card with a url on it is
     // one press, and the alternative is a naked link under the embed.
     const url = profileUrl(i.guildId!, target.id);
+    // Wins only, and from two up - the same rule the result card uses. A losing
+    // run is a number this can work out and nobody asked to be shown.
+    const run = streak(target.id, i.guildId!);
+    const onARun = run?.kind === 'W' && run.n >= 2 ? ` · 🔥 ${run.n} in a row` : '';
     const embed = new EmbedBuilder()
       .setTitle(p.kovaaks_username)
       .setURL(url)
@@ -1310,7 +1404,7 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
         // One player, so the bracket can come off their role where Quorum has
         // seen them - unlike the leaderboard, there is no other row to be
         // inconsistent with.
-        `**${p.elo}**${band ? ` ${band}` : ''}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ''}${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}`,
+        `**${p.elo}**${band ? ` ${band}` : ''}${games ? '' : ' · seeded ' + (p.seeded_from ?? 'flat')}\n${p.wins}W ${p.losses}L${p.draws ? ` ${p.draws}D` : ''}${games ? ` · ${Math.round((p.wins / games) * 100)}% over ${games}` : ''}${onARun}`,
       );
 
     // What to grind, which is the one thing a rating cannot say. Rounds rather

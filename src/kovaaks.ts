@@ -1,4 +1,4 @@
-import { RUNS_PER_SCENARIO } from './config.js';
+import { RECORD_RETRY_MS, RECORD_TTL_MS, RUNS_PER_SCENARIO } from './config.js';
 
 const BASE = 'https://kovaaks.com/webapp-backend';
 /** Community benchmark index. Not KovaaK's, and not required - a server that
@@ -99,8 +99,10 @@ export async function voltaicS5(steamId: string) {
 
 interface PopularRow {
   scenarioName?: string;
+  leaderboardId?: number;
   scenario?: { aimType?: string | null };
   counts?: { plays?: number };
+  topScore?: { score?: number };
 }
 
 /**
@@ -118,6 +120,78 @@ export async function searchScenarios(term: string) {
       aimType: r.scenario?.aimType ?? '',
       plays: r.counts?.plays ?? 0,
     }));
+}
+
+/** Scenario name (lowercased) -> the bar a score has to clear to be worth
+ *  checking properly, and when to stop believing it. Cached for a day BECAUSE
+ *  it is only a screen: a stale one lets through a few scores that then fail
+ *  the real check, which costs a request and nothing else. A miss is cached
+ *  too, or a scenario KovaaK's has never heard of is asked about after every
+ *  match. */
+const records = new Map<string, { until: number; score: number | null; board: number | null }>();
+
+async function topOf(scenario: string) {
+  const key = scenario.toLowerCase();
+  const hit = records.get(key);
+  if (hit && Date.now() < hit.until) return hit;
+
+  // Deep enough to find the exact name. The search is a substring match ordered
+  // by plays, so a scenario with a big family of more-popular remixes is not in
+  // the first handful of its own results.
+  const params = new URLSearchParams({ page: '0', max: '50', scenarioNameSearch: scenario });
+  const res = await get<{ data?: PopularRow[] }>(`/scenario/popular?${params}`);
+  // Whatever was known, kept, and not asked for again for a few minutes: an
+  // outage must not cost every match that ends during it the full timeout.
+  const row = res.ok
+    ? (res.data.data ?? []).find((r) => r.scenarioName?.toLowerCase() === key)
+    : null;
+  const fresh = res.ok
+    ? {
+        until: Date.now() + RECORD_TTL_MS,
+        score: row?.topScore?.score ?? null,
+        board: row?.leaderboardId ?? null,
+      }
+    : {
+        until: Date.now() + RECORD_RETRY_MS,
+        score: hit?.score ?? null,
+        board: hit?.board ?? null,
+      };
+  records.set(key, fresh);
+  return fresh;
+}
+
+/**
+ * The bar: the best score anyone on earth has on this scenario, as far as the
+ * popular list knows. Null when KovaaK's has no record for it or has never
+ * heard of the name.
+ *
+ * Good enough to ask "could that have been a world record?" and not good enough
+ * to answer it - the list is cached at both ends, ours and theirs. Anything that
+ * clears it goes to worldRecordHolder().
+ */
+export async function worldRecord(scenario: string) {
+  return (await topOf(scenario))?.score ?? null;
+}
+
+/**
+ * Who actually holds the scenario, off the global leaderboard itself: the one
+ * row that is rank 1 right now.
+ *
+ * This is the check that gets announced, so it is the authoritative one. A score
+ * that merely beats the cached number proves nothing - the cache can be a day
+ * behind, and "X set a world record" is not something to be wrong about in
+ * front of a server. Two requests, and only ever for a score that has already
+ * cleared the bar, which is a handful of times a year.
+ */
+export async function worldRecordHolder(scenario: string) {
+  const top = await topOf(scenario);
+  if (!top?.board) return null;
+  const params = new URLSearchParams({ leaderboardId: String(top.board), page: '0', max: '1' });
+  const res = await get<{ data?: { score?: number; steamId?: string }[] }>(
+    `/leaderboard/scores/global?${params}`,
+  );
+  const row = res.ok ? res.data.data?.[0] : null;
+  return row?.score == null ? null : { score: row.score, steamId: row.steamId ?? null };
 }
 
 interface RunRow {

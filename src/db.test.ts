@@ -36,6 +36,9 @@ const {
   setScenarios,
   seedPlayer,
   setPlayerElo,
+  streak,
+  weekly,
+  claimRecap,
   db,
 } = await import('./db.js');
 const { rankFor } = await import('./rating.js');
@@ -543,6 +546,80 @@ assert.equal(claim(), 0, 'the second has nothing to score');
   assert.equal(guildStats('gs', 'novice').played, 2, 'novice two of them');
   assert.equal(guildStats('gs', 'elite').played, 1, 'and elite the other');
   assert.equal(guildStats('gs', 'nowhere').week, 0, 'a channel with none says none');
+}
+
+// The run a player is on: same-result matches back from the newest, and a draw
+// is neither a win nor a loss - both sides of one are placing 1.
+{
+  ensurePlayer('sw', 'streaker');
+  ensurePlayer('so', 'other');
+  // [id, placing, otherPlacing] newest last, so the stamps go up with the ids.
+  const played: [number, number, number][] = [
+    [600, 2, 1], // a loss, furthest back
+    [601, 1, 1], // a draw
+    [602, 1, 2],
+    [603, 1, 2],
+  ];
+  for (const [id, mine, theirs] of played) {
+    db.prepare(
+      "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at) values (?,'gk','c','sw','1v1','done',?)",
+    ).run(id, id);
+    db.prepare(
+      'insert into match_player (match_id, discord_id, team, placing) values (?,?,0,?), (?,?,1,?)',
+    ).run(id, 'sw', mine, id, 'so', theirs);
+  }
+  assert.deepEqual(streak('sw', 'gk'), { kind: 'W', n: 2 }, 'two wins, and the draw stops it');
+  assert.deepEqual(streak('so', 'gk'), { kind: 'L', n: 2 }, 'the other side is on the reverse');
+  assert.equal(streak('sw', 'elsewhere'), null, 'a server they have not played in has no run');
+
+  // An unranked game is not on anyone's record, so it cannot make or break one.
+  db.prepare(
+    "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at, ranked) values (604,'gk','c','sw','1v1','done',404,0)",
+  ).run();
+  db.prepare(
+    "insert into match_player (match_id, discord_id, team, placing) values (604,'sw',0,2)",
+  ).run();
+  assert.deepEqual(streak('sw', 'gk'), { kind: 'W', n: 2 }, 'an unranked loss is not a loss');
+}
+
+// The week the recap reports, and the claim that stops two ticks posting it
+// twice.
+{
+  db.prepare(
+    "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at) values (610,'gw','c','sw','1v1','done',?)",
+  ).run(Date.now() - 1000);
+  db.prepare(
+    `insert into match_player (match_id, discord_id, team, placing, elo_before, elo_after, scores)
+     values (610,'sw',0,1,1000,1020,'{"1w6ts":168,"popcorn":null}'),
+            (610,'so',1,2,1000,980,'{"1w6ts":140}')`,
+  ).run();
+
+  const week = weekly('gw', Date.now() - 7 * 24 * 60 * 60 * 1000);
+  assert.equal(week.played, 1);
+  assert.equal(week.players[0].discord_id, 'sw', 'the climber leads');
+  assert.equal(week.players[0].delta, 20);
+  assert.equal(week.players[1].delta, -20);
+  assert.equal(weekly('gw', Date.now()).played, 0, 'and the window is a window');
+
+  // An unranked game is not in either half of the recap. Counted in one and not
+  // the other, a week of them reads as matches played by nobody.
+  db.prepare(
+    "insert into match (id, guild_id, channel_id, host_id, format, status, ended_at, ranked) values (611,'gw','c','sw','1v1','done',?,0)",
+  ).run(Date.now() - 1000);
+  db.prepare(
+    "insert into match_player (match_id, discord_id, team, placing) values (611,'sw',0,1)",
+  ).run();
+  assert.equal(weekly('gw', Date.now() - 7 * 24 * 60 * 60 * 1000).played, 1, 'still just the one');
+
+  // First sight only starts the clock: a bot deployed an hour ago has no week.
+  setConfig('gw', { panel_channel_id: 'c' });
+  assert.equal(claimRecap('gw', 1), null, 'nothing to report on a server just seen');
+  // every = 0: due the moment the clock has been started, which is the same
+  // arithmetic a week later without the wait.
+  const since = claimRecap('gw', 0);
+  assert.ok(since && since > 0, 'a week later it is due, and says what it covers');
+  assert.equal(claimRecap('gw', 1000), null, 'and not again until the next one');
+  assert.equal(claimRecap('never-set-up', 1), null, 'a server with no config gets none');
 }
 
 console.log('db ok');

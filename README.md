@@ -260,6 +260,35 @@ Delete either message by hand and the next tick puts it back; move the channel
 and the old ones are taken down with it; remove Quorum and they go. A ladder
 short enough to fit on one page gets no buttons at all.
 
+## Reasons to come back
+
+A ladder says who is best, which for most of a server is a list of names they
+will never catch. These three say something about *you*, and they are all read
+off matches the bot has already finished - nothing to set up and nothing to opt
+into.
+
+**A run.** Three rated matches in a row ending the same way shows on the result
+card and on `/scrim stats`. Wins only, and only from two: the other half of that
+number is a public note about who is having a bad week, and a player reads that
+under their own name once and stops queueing. A draw is neither and breaks a
+run rather than extending it.
+
+**The week**, once a week, in `#results`: how much got played, who climbed, and
+who played the most. Who *climbed*, not who leads - the player who won four off
+the bottom of the ladder sees nothing for it on a board that barely moves, and
+they are exactly who has to come back next week. Rolling seven days from the
+first time the bot saw the server rather than a fixed weekday, which would mean
+asking somebody for a timezone. A week nobody played is skipped rather than
+announced as zero.
+
+**A world record**, on the rare night somebody sets one: the card goes gold and
+says so above the scoreboard. KovaaK's already knows - the popular list carries
+the top score, so the check costs one request per scenario and every match ever
+played fails it. Anything that clears the bar is checked a second time against
+the global leaderboard itself, rank 1's score and Steam id against the Steam id
+KovaaK's gave us for that Discord account, because "X set a world record" is not
+a thing to be wrong about in front of a server.
+
 ## How a match runs
 
 The panel is one message with a **1v1** and a **2v2** button, sitting in every

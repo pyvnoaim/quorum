@@ -369,4 +369,78 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
   assert.ok(quiet.description!.includes('no games played yet'));
 }
 
+// The week in review, and the run a player is on. Both read the same finished
+// matches the rest of the ladder does, so they are seeded the same way.
+{
+  const { recapEmbed } = await import('./embeds.js');
+  const { db, ensurePlayer, weekly } = await import('./db.js');
+  const W = 'gweek';
+  ensurePlayer('w1', 'climber');
+  ensurePlayer('w2', 'other');
+  for (const id of [700, 701, 702]) {
+    db.prepare(
+      `insert into match (id, guild_id, channel_id, host_id, format, status, ended_at, scenarios)
+       values (?,?,'c','w1','1v1','done',?,'["1w6ts"]')`,
+    ).run(id, W, Date.now() - 1000);
+    db.prepare(
+      `insert into match_player (match_id, discord_id, team, placing, elo_before, elo_after, scores)
+       values (?,'w1',0,1,1000,1010,?), (?,'w2',1,2,1000,990,'{"1w6ts":100}')`,
+    ).run(id, JSON.stringify({ '1w6ts': 150 + id }), id);
+  }
+
+  const week = weekly(W, Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const recap = recapEmbed(W, week, 'https://example.test/ladder').data;
+  assert.equal(recap.title, 'The week · 3 matches');
+  const named = Object.fromEntries((recap.fields ?? []).map((f) => [f.name, f.value]));
+  assert.ok(named.Climbing.includes('**+30**'), 'the climber is the one who gained');
+  assert.ok(!named.Climbing.includes('w2'), 'and the player who dropped is not listed at all');
+  assert.ok(named.Playing.includes('**3** games'), 'played is counted separately from won');
+
+  // Three wins in a row shows on the card of the third. It is read after the
+  // match is scored, so it counts the one being posted.
+  const streakCard = resultsEmbed(
+    {
+      id: 702,
+      guild_id: W,
+      format: '1v1',
+      scenarios: '["1w6ts"]',
+    } as unknown as typeof match,
+    [
+      { discord_id: 'w1', team: 0, placing: 1, scores: '{"1w6ts":852}', pb: '{}' },
+      { discord_id: 'w2', team: 1, placing: 2, scores: '{"1w6ts":100}', pb: '{}' },
+    ] as unknown as typeof rows,
+    new Map([
+      ['w1', { discord_id: 'w1', kovaaks_username: 'climber', elo: 1030 }],
+      ['w2', { discord_id: 'w2', kovaaks_username: 'other', elo: 970 }],
+    ]) as unknown as typeof players,
+    new Map([
+      ['w1', 10],
+      ['w2', -10],
+    ]),
+  ).data;
+  assert.ok(streakCard.fields![0].value.includes('3 in a row'), 'the winner is on a run');
+  assert.ok(
+    !streakCard.fields![1].value.includes('in a row'),
+    'and a losing run is never printed under anybody',
+  );
+}
+
+// A world record says so above the scoreboard and turns the card gold. Passed
+// in already confirmed - see recordsSet() - so the card itself only has to
+// print it, and prints nothing at all for the other 99.99% of matches.
+{
+  const plain = resultsEmbed(match, rows, players, new Map([['a', 15], ['b', -15]]));
+  assert.ok(!plain.data.description!.includes('🌍'), 'an ordinary match says nothing about records');
+
+  const record = resultsEmbed(match, rows, players, new Map([['a', 15], ['b', -15]]), [
+    { id: 'a', scenario: scenarios[0], score: 5087 },
+  ]).data;
+  assert.notEqual(record.color, plain.data.color, 'a record card is not the colour of a normal one');
+  const said = record.description!.split('```')[0];
+  assert.ok(said.includes('ness just set the'), 'named');
+  assert.ok(said.includes(scenarios[0]), 'on the scenario it was set on');
+  assert.ok(said.includes('5087'), 'and the score itself');
+  assert.ok(record.description!.includes('```'), 'the scoreboard is still under it');
+}
+
 console.log('embeds ok');
