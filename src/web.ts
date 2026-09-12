@@ -290,13 +290,30 @@ type OwnedPerm = { id: string; options: PermissionOverwriteOptions };
  *  above. The record is the single source and this translates it: writing the
  *  same permissions out twice, in two shapes, is how the channel Quorum makes
  *  and the channel Quorum keeps end up disagreeing. */
-const asOverwrite = (o: OwnedPerm) => {
+export const asOverwrite = (o: OwnedPerm) => {
   const flags = (want: boolean) =>
     (Object.keys(o.options) as (keyof typeof PermissionFlagsBits)[])
       .filter((k) => o.options[k as keyof PermissionOverwriteOptions] === want)
       .map((k) => PermissionFlagsBits[k]);
   return { id: o.id, allow: flags(true), deny: flags(false) };
 };
+
+/** What `@everyone` gets on a channel Quorum writes overwrites on: the
+ *  category's own answer to "Who can see it", said again here.
+ *
+ *  It has to be said again, and this is the one thing about Discord permissions
+ *  that is easy to get backwards: a category does NOT govern its children at
+ *  runtime. It governs the ones SYNCED to it, by their holding a copy of its
+ *  overwrite list - and the moment anything gives a channel an overwrite of its
+ *  own, that copy is gone and the category has no say in it any more. So a
+ *  channel of ours that says nothing about View Channel is not inheriting the
+ *  category, it is open to the whole server whatever the category says, and a
+ *  server that had locked Quorum behind one role would be published by the next
+ *  save anybody made. */
+export const viewedBy = (
+  viewer: string | null,
+  extra: PermissionOverwriteOptions = {},
+): PermissionOverwriteOptions => ({ ViewChannel: viewer ? false : null, ...extra });
 
 /** Writes the overwrites Quorum owns and leaves every other one alone.
  *
@@ -502,16 +519,19 @@ async function syncRankChannelsToDiscord(
     ...meFull,
   ];
 
+  const seenBy = (extra: PermissionOverwriteOptions = {}) => viewedBy(viewer, extra);
+  const viewerAllowed: OwnedPerm[] = viewer
+    ? [{ id: viewer, options: { ViewChannel: true } }]
+    : [];
+
   // The unranked queue: the same read-only channel, minus the lock. It is the
   // one queue that must NOT be private to a bracket, because the players it
   // exists for are the ones who have no bracket yet - a channel locked to the
-  // ranks would be invisible to every single person it is for.
-  //
-  // ViewChannel is left unsaid rather than set true, so it inherits the
-  // category: a server that keeps the whole of Quorum behind one role keeps
-  // this behind it too, which is that server's call and not ours to overrule.
+  // ranks would be invisible to every single person it is for. Open to whoever
+  // can see the category, which is what seenBy() says.
   const openChannelPerms = (): OwnedPerm[] => [
-    { id: guild.roles.everyone.id, options: { ViewChannel: null, ...readOnly } },
+    { id: guild.roles.everyone.id, options: seenBy(readOnly) },
+    ...viewerAllowed,
     ...meFull,
   ];
 
@@ -522,6 +542,11 @@ async function syncRankChannelsToDiscord(
   const owned = new Set<string>([
     guild.roles.everyone.id,
     ...(me ? [me] : []),
+    // The visibility role too: this sync is what writes it onto a channel, so
+    // it is this sync that has to take it off again when the setting changes -
+    // left as somebody else's, a role that used to be "Who can see it" would
+    // keep its way in forever.
+    ...(viewer ? [viewer] : []),
     ...[...ranks, ...orphaned].map((r) => r.discord_role_id).filter((id): id is string => !!id),
   ]);
 
@@ -580,12 +605,12 @@ async function syncRankChannelsToDiscord(
   // Every match thread hangs here now, so this is where the watch-don't-talk
   // rule has to be written.
   //
-  // ViewChannel is left unsaid for @everyone so this channel answers to "Who
-  // can see it" like the rest of the category - but every rank role is allowed
-  // in by name, the same as its own queue channel. A player is the one person
-  // who must be able to open their own match, and a server that hides Quorum
-  // behind a members role would otherwise hide half its own matches from the
-  // people playing them.
+  // "Who can see it" is repeated here rather than left to the category - see
+  // seenBy() for why a channel with overwrites of its own stops answering to
+  // one - and every rank role is allowed in by name on top of it. A player is
+  // the one person who must be able to open their own match, and a server that
+  // hides Quorum behind a members role would otherwise hide half its own
+  // matches from the people playing them.
   //
   // Send Messages is left alone on purpose: #results is the one room in the
   // category people may actually chat in, and this sync is not the place to
@@ -594,7 +619,8 @@ async function syncRankChannelsToDiscord(
     await applyOwnedPerms(
       results,
       [
-        { id: guild.roles.everyone.id, options: { ViewChannel: null, ...threadRules } },
+        { id: guild.roles.everyone.id, options: seenBy(threadRules) },
+        ...viewerAllowed,
         ...ranks
           .map((r) => r.discord_role_id)
           .filter((id): id is string => !!id)
@@ -1634,10 +1660,17 @@ export function startWeb(client: Client, hooks: Hooks) {
         const cat = before.split_category_id
           ? guild.channels.cache.get(before.split_category_id)
           : null;
-        if (before.visible_role_id && before.visible_role_id !== nowViewer && cat &&
-            'permissionOverwrites' in cat) {
-          await cat.permissionOverwrites.delete(before.visible_role_id).catch(() => {});
-          if (!nowViewer) {
+        if (before.visible_role_id && before.visible_role_id !== nowViewer) {
+          // The channels that carry the answer themselves, not just the
+          // category - see seenBy(). A channel with its own overwrites does not
+          // answer to the category at all, so the old role's way in has to be
+          // taken off each of them by name or it survives the change.
+          for (const id of [before.split_category_id, before.split_results_id, before.split_unranked_id]) {
+            const chan = id ? guild.channels.cache.get(id) : null;
+            if (!chan || !('permissionOverwrites' in chan)) continue;
+            await chan.permissionOverwrites.delete(before.visible_role_id).catch(() => {});
+          }
+          if (!nowViewer && cat && 'permissionOverwrites' in cat) {
             await cat.permissionOverwrites
               .edit(guild.roles.everyone.id, { ViewChannel: null })
               .catch(() => {});

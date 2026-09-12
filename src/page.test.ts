@@ -104,4 +104,31 @@ for (const [, body] of scripts) {
   new Function(body);
 }
 
+// "Who can see it" has to survive a save. A channel Quorum writes overwrites on
+// stops answering to its category, so the lock is repeated per channel - and
+// the bug this guards was a channel that said nothing, which is not "ask the
+// category", it is "open to the server".
+{
+  const { viewedBy, asOverwrite } = await import('./web.js');
+  const { PermissionFlagsBits } = await import('discord.js');
+  const bits = (viewer: string | null) =>
+    asOverwrite({ id: 'everyone', options: viewedBy(viewer, { SendMessages: false }) });
+
+  const locked = bits('role-members');
+  assert.ok(
+    locked.deny.includes(PermissionFlagsBits.ViewChannel),
+    'a server that named a role denies everybody else, on the channel itself',
+  );
+  assert.ok(!locked.allow.includes(PermissionFlagsBits.ViewChannel), 'and never allows it back');
+
+  const open = bits(null);
+  assert.ok(
+    !open.deny.includes(PermissionFlagsBits.ViewChannel) &&
+      !open.allow.includes(PermissionFlagsBits.ViewChannel),
+    'a server that named nobody says nothing either way - the channel is as open as the category',
+  );
+  // Whatever else rides along is untouched by any of it.
+  assert.ok(locked.deny.includes(PermissionFlagsBits.SendMessages), 'the rest of the rules stand');
+}
+
 console.log('page ok');

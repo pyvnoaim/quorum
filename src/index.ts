@@ -411,12 +411,18 @@ async function openThread(guild: Guild, match: Match, rows: MatchPlayer[]) {
   if (!thread) return null;
 
   await Promise.all(rows.map((r) => thread.members.add(r.discord_id).catch(() => {})));
-  if (watchable) await grantThreadVoice(guild, match, rows);
+  // Whether or not the server is letting people watch RIGHT NOW. The deny that
+  // makes this grant matter is written by the spectate switch, and that switch
+  // can be flipped while a match is being played - so a match that only granted
+  // its players a voice when spectating was already on would go silent under
+  // them mid-ban, in the one room they cannot leave. Granted always, dropped
+  // always: with spectating off it permits what the channel permits anyway.
+  await grantThreadVoice(guild, match, rows);
   return thread.id;
 }
 
-/** Hands the players the only voice in a public match thread, and takes it back
- *  when the match ends.
+/** Hands the players the only voice in their own match thread, and takes it
+ *  back when the match ends.
  *
  *  Discord has no per-thread permission overwrites: a thread IS its parent
  *  channel's permissions. So a public thread anybody may read is a public
@@ -451,16 +457,24 @@ async function grantThreadVoice(guild: Guild, match: Match, rows: MatchPlayer[])
  *  ever played there, and every one of them would be a standing permission to
  *  talk in strangers' threads.
  *
- *  Both channels, because a match that started before threads moved holds its
- *  grant on the queue channel it was called in, and nothing else would ever go
- *  looking for it.
+ *  The thread's OWN parent first, asked of the thread rather than worked out
+ *  again: threadHome() answers with the results channel the server has now, and
+ *  a match that was played before staff pointed the dashboard at a new category
+ *  left its grants on the old one. Recomputing would clean a channel that was
+ *  never written to and leave the standing permission exactly where it is.
+ *  threadHome and the call's own channel stay in the list behind it, for a
+ *  thread already deleted by hand and for a match that predates any of this.
  *
  *  Only ever the overwrite this bot made - exactly that one allow and nothing
  *  denied. Anything else on the member is the server's, and deleting it would
  *  quietly undo a decision staff made by hand. */
 async function dropThreadVoice(match: Match) {
   const rows = matchPlayers(match.id);
-  for (const id of new Set([threadHome(match), match.channel_id])) {
+  const thread = match.thread_id
+    ? await client.channels.fetch(match.thread_id).catch(() => null)
+    : null;
+  const parent = thread?.isThread() ? thread.parentId : null;
+  for (const id of new Set([parent, threadHome(match), match.channel_id].filter((v) => v != null))) {
     const channel = await client.channels.fetch(id).catch(() => null);
     if (!channel || !('permissionOverwrites' in channel)) continue;
     for (const row of rows) {
@@ -1264,7 +1278,12 @@ client.on('messageCreate', async (msg) => {
   if (!msg.inGuild() || msg.author.bot || !msg.channel.isThread()) return;
   const match = matchInThread(msg.channelId);
   if (!match) return;
-  if (msg.member?.permissions.has(PermissionFlagsBits.ManageMessages)) return;
+  // Permissions HERE, not the ones their roles carry server-wide: a server that
+  // makes someone a match moderator with an overwrite on the results channel
+  // rather than on the role itself would otherwise have this bot deleting the
+  // messages of the very people it exempts.
+  if (msg.member && msg.channel.permissionsFor(msg.member).has(PermissionFlagsBits.ManageMessages))
+    return;
   if (matchPlayers(match.id).some((r) => r.discord_id === msg.author.id)) return;
   await msg.delete().catch(() => {});
 });
