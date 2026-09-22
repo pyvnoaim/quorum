@@ -244,12 +244,12 @@ assert.ok(
 // The saved spread is the only thing that decides the gate: a rank channel is
 // made visible to exactly the roles it admits, so the two cannot disagree.
 setRankSpread('gc', { '1v1': 2 });
-assert.deepEqual(getRankSpread('gc'), { '1v1': 2 }, 'stored spread applies');
+assert.deepEqual(getRankSpread('gc'), { '1v1': 2, '2v2': 0, '2v2 bo3': 0 }, 'stored spread applies');
 setRankSpread('gc', { '1v1': 0 });
 assert.equal(getRankSpread('gc')['1v1'], 0, 'and a per-format spread is kept per format');
 // a format that is turned off is not carried back in from a stored spread
-setRankSpread('gc', { '1v1': 1, '2v2': 3 });
-assert.deepEqual(getRankSpread('gc'), { '1v1': 1 }, 'only live formats come back');
+setRankSpread('gc', { '1v1': 1, group: 3 });
+assert.deepEqual(getRankSpread('gc'), { '1v1': 1, '2v2': 0, '2v2 bo3': 0 }, 'only live formats come back');
 
 // The format's knobs: clamped on the way out, and only the known keys survive
 // the trip in - the patch comes off the wire.

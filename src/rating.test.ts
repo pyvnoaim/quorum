@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { DEFAULT_RANKS, ROUNDS } from './config.js';
 import {
   advancePick,
+  advanceDuo,
+  duoStep,
+  startDuo,
   allRunsUsed,
   bandsInReach,
   forfeitUnused,
@@ -16,7 +19,7 @@ import {
   rankName,
   scorable,
 } from './rating.js';
-import type { Entrant } from './rating.js';
+import type { DuoVeto, Entrant } from './rating.js';
 
 const scenarios = ['a', 'b', 'c'];
 const p = (id: string, elo: number, team: number, s: (number | null)[]): Entrant => ({
@@ -373,3 +376,59 @@ assert.deepEqual(
   [null],
   'a scenario nobody scored on was won by nobody',
 );
+
+// Duo veto, replaying the rulebook's worked examples. The pool is the
+// tournament's shape: three mains, four subcategories, two scenarios each.
+{
+  const subs: Record<string, string[]> = {
+    Tap: ['Static', 'Micro', 'Reflex', 'Dynamic'],
+    Track: ['Steady', 'Reactive', 'Controlled', 'Elevation'],
+    Switch: ['Speed', 'Smooth', 'Static', 'Micro'],
+  };
+  const roll = {
+    subs: (m: string) => subs[m] ?? [],
+    tasks: (m: string, s: string) => [`${m} ${s} A`, `${m} ${s} B`],
+  };
+  const act = (v: DuoVeto, name: string, turn: number) => {
+    const step = duoStep(v)!;
+    assert.equal(step.turn, turn, `${name}: wrong side`);
+    const next = advanceDuo(v, step.options.indexOf(name), roll);
+    return next;
+  };
+  const hi = 1;
+  const lo = 0;
+
+  // bo1: Tap and Track banned, Speed Smooth Static banned, Micro picked from.
+  let v = startDuo(1, hi, ['Tap', 'Track', 'Switch'], roll);
+  for (const [name, turn] of [['Tap', hi], ['Track', lo], ['Speed', hi], ['Smooth', hi], ['Static', lo]] as const) {
+    const r = act(v, name, turn);
+    assert.ok('veto' in r);
+    v = r.veto;
+  }
+  assert.deepEqual(duoStep(v)!.options, ['Switch Micro A', 'Switch Micro B']);
+  assert.deepEqual(act(v, 'Switch Micro A', hi), { scenarios: ['Switch Micro A'] });
+
+  // bo3: hi picks Track, lo picks Tap, Switch is left. Game 1 is lo's veto
+  // (bans 2, hi bans 1, lo picks), game 2 is hi's, game 3 is hi's.
+  v = startDuo(3, hi, ['Tap', 'Track', 'Switch'], roll);
+  const script: [string, number][] = [
+    ['Track', hi], ['Tap', lo],
+    ['Steady', lo], ['Elevation', lo], ['Reactive', hi], ['Track Controlled B', lo],
+    ['Micro', hi], ['Reflex', hi], ['Dynamic', lo], ['Tap Static B', hi],
+    ['Speed', hi], ['Smooth', hi], ['Static', lo],
+  ];
+  for (const [name, turn] of script) {
+    const r = act(v, name, turn);
+    assert.ok('veto' in r, name);
+    v = r.veto;
+  }
+  assert.deepEqual(act(v, 'Switch Micro A', hi), {
+    scenarios: ['Track Controlled B', 'Tap Static B', 'Switch Micro A'],
+  });
+
+  // A thin pool plays rather than stalls: one main with one subcategory and
+  // one scenario needs nobody to choose anything.
+  const thin = startDuo(1, 0, ['Tap'], { subs: () => ['Static'], tasks: () => ['only'] });
+  assert.equal(duoStep(thin), null);
+  assert.equal(thin.games[0].task, 'only');
+}

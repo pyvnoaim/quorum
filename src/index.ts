@@ -26,6 +26,7 @@ import {
   PICK_SWEEP_MS,
   BASE_ELO,
   VOLTAIC_SEED,
+  duoOf,
   type Format,
 } from './config.js';
 import {
@@ -60,6 +61,7 @@ import {
 } from './db.js';
 import {
   divisionsMessage,
+  duoPickEmbed,
   leaderboardMessage,
   rankLabel,
   useClient,
@@ -83,10 +85,12 @@ import {
   worldRecordHolder,
 } from './kovaaks.js';
 import {
+  advanceDuo,
   advancePick,
   allRunsUsed,
   bandsInReach,
   canPlay,
+  duoStep,
   eloDeltas,
   forfeits,
   matchDeadline,
@@ -96,6 +100,9 @@ import {
   rankForRoles,
   rankName,
   scorable,
+  startDuo,
+  type DuoRoll,
+  type DuoVeto,
   type PickPhase,
 } from './rating.js';
 
@@ -246,19 +253,61 @@ function pickState(match: Match) {
   return { ...phase, ...pickTurn(phase.picked.length, phase.pool.length, phase.size) };
 }
 
+/** What a duo veto draws from: this match's pool read as mains, then the
+ *  subcategories filed under each, then two scenarios out of the survivor.
+ *  By main AND subcategory - Static under Clicking is not Static under
+ *  Switching. */
+function duoRoll(match: Match): DuoRoll {
+  const pool = matchPool(match);
+  return {
+    subs: (main) => [...new Set(pool.filter((s) => s.main === main).map((s) => s.category))],
+    tasks: (main, sub) =>
+      shuffle(pool.filter((s) => s.main === main && s.category === sub).map((s) => s.name)).slice(0, 2),
+  };
+}
+
+function duoState(match: Match): DuoVeto | null {
+  const raw: unknown = JSON.parse(match.scenarios);
+  return raw && typeof raw === 'object' && 'duo' in raw ? (raw as DuoVeto) : null;
+}
+
+/** Whose turn it is and how many choices are on the table, for either veto -
+ *  what the buttons and the sweep need, and nothing else. */
+function vetoTurn(match: Match) {
+  const duo = duoState(match);
+  if (duo) {
+    const step = duoStep(duo);
+    return step && { turn: step.turn, action: step.action, count: step.options.length };
+  }
+  const phase = pickState(match);
+  return phase && { turn: phase.turn, action: phase.action, count: phase.pool.length };
+}
+
 function render(match: Match) {
   const rows = matchPlayers(match.id);
   const players = new Map(rows.map((r) => [r.discord_id, getPlayer(r.discord_id)!]));
 
   if (match.status === 'lobby') {
-    return {
-      embeds: [openEmbed(match, rows, players)],
-      components: [
-        new ActionRowBuilder<ButtonBuilder>().addComponents(
+    // A duo is two people who came together, so you join a side rather than
+    // being shuffled onto one.
+    const join = duoOf(match.format)
+      ? [0, 1].map((team) =>
+          new ButtonBuilder()
+            .setCustomId(`pug:join:${match.id}:${team}`)
+            .setLabel(`Join Team ${team + 1}`)
+            .setStyle(ButtonStyle.Success),
+        )
+      : [
           new ButtonBuilder()
             .setCustomId(`pug:join:${match.id}`)
             .setLabel('Join')
             .setStyle(ButtonStyle.Success),
+        ];
+    return {
+      embeds: [openEmbed(match, rows, players)],
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          ...join,
           new ButtonBuilder()
             .setCustomId(`pug:cancel:${match.id}`)
             .setLabel('Cancel')
@@ -268,18 +317,22 @@ function render(match: Match) {
     };
   }
   if (match.status === 'banning') {
-    const phase = pickState(match);
+    const duo = duoState(match);
+    const step = duo && duoStep(duo);
+    const phase = duo ? null : pickState(match);
     // Nothing left to drive: the sweep cancels these, and until it does the
     // message says so rather than showing dead buttons.
-    if (!phase) return { embeds: [staleEmbed(match)], components: [] };
+    if (!step && !phase) return { embeds: [staleEmbed(match)], components: [] };
+    const options = step ? step.options : phase!.pool;
+    const action = step ? step.action : phase!.action;
     // Discord allows five buttons a row, and PICK_POOL is five.
-    const rowsOfFive = phase.pool.reduce<string[][]>((acc, name, n) => {
+    const rowsOfFive = options.reduce<string[][]>((acc, name, n) => {
       if (n % 5 === 0) acc.push([]);
       acc[acc.length - 1].push(name);
       return acc;
     }, []);
     return {
-      embeds: [pickEmbed(match, rows, phase)],
+      embeds: [step ? duoPickEmbed(match, rows, duo!, step) : pickEmbed(match, rows, phase!)],
       components: rowsOfFive.map((group, groupIdx) =>
         new ActionRowBuilder<ButtonBuilder>().addComponents(
           group.map((name, n) =>
@@ -288,7 +341,7 @@ function render(match: Match) {
               // longer than a custom id is allowed to be.
               .setCustomId(`pug:pick:${match.id}:${groupIdx * 5 + n}`)
               .setLabel(name.length > 78 ? name.slice(0, 77) + '…' : name)
-              .setStyle(phase.action === 'ban' ? ButtonStyle.Danger : ButtonStyle.Success),
+              .setStyle(action === 'ban' ? ButtonStyle.Danger : ButtonStyle.Success),
           ),
         ),
       ),
@@ -512,16 +565,39 @@ async function startMatch(guild: Guild, match: Match) {
 
   const rows = matchPlayers(match.id);
   const { teamSize } = FORMATS[match.format];
+  const duo = duoOf(match.format);
   const shuffled = [...rows].sort(() => Math.random() - 0.5);
-  shuffled.forEach((row, idx) => {
-    db.prepare('update match_player set team = ? where match_id = ? and discord_id = ?').run(
-      Math.floor(idx / teamSize),
-      match.id,
-      row.discord_id,
-    );
-  });
+  // A duo's sides were chosen at Join; everything else is shuffled into them.
+  if (!duo) {
+    shuffled.forEach((row, idx) => {
+      db.prepare('update match_player set team = ? where match_id = ? and discord_id = ?').run(
+        Math.floor(idx / teamSize),
+        match.id,
+        row.discord_id,
+      );
+    });
+  }
   const threadId = await openThread(guild, match, rows);
   db.prepare('update match set thread_id = ? where id = ?').run(threadId, match.id);
+
+  if (duo) {
+    // The higher seed is the side with more rating between them - the
+    // tournament's qualifier seed, as near as a scrim has one. Level is a coin.
+    const elo = (team: number) =>
+      rows
+        .filter((r) => r.team === team)
+        .reduce((sum, r) => sum + (getPlayer(r.discord_id)?.elo ?? 0), 0);
+    const hi = elo(1) > elo(0) || (elo(1) === elo(0) && Math.random() < 0.5) ? 1 : 0;
+    const pool = matchPool(match);
+    const mains = MAIN_CATEGORIES.filter((m) => pool.some((s) => s.main === m));
+    const veto = startDuo(duo, hi, mains, duoRoll(match));
+    // A pool too thin to leave anyone a choice just plays what it settled on.
+    if (!duoStep(veto)) {
+      return moveIntoThread(beginPlay(getMatch(match.id)!, veto.games.map((g) => g.task!)));
+    }
+    db.prepare('update match set scenarios = ? where id = ?').run(JSON.stringify(veto), match.id);
+    return moveIntoThread(getMatch(match.id)!);
+  }
 
   // Who picks first is already decided: the shuffle above put someone on side
   // 0, and side 0 holds the first pick. Nothing else to randomise.
@@ -593,6 +669,7 @@ async function moveIntoThread(match: Match) {
             runningEmbed(
               match,
               new Map(seated.map((r) => [r.discord_id, getPlayer(r.discord_id)!])),
+              seated,
             ),
           ],
           components: [],
@@ -621,6 +698,18 @@ function beginPlay(match: Match, scenarios: string[]) {
  *  phase is on. A pick either opens the next scenario's shortlist or, once the
  *  last one is picked, rolls the final scenario at random and starts the match. */
 function applyPick(match: Match, index: number) {
+  const duo = duoState(match);
+  if (duo) {
+    const next = advanceDuo(duo, index, duoRoll(match));
+    if ('scenarios' in next) return beginPlay(match, next.scenarios);
+    // Clock restarts on every act, same as below.
+    db.prepare('update match set scenarios = ?, created_at = ? where id = ?').run(
+      JSON.stringify(next.veto),
+      Date.now(),
+      match.id,
+    );
+    return getMatch(match.id)!;
+  }
   const phase = pickState(match);
   if (!phase) return match;
   const fmt = getFormat(match.guild_id);
@@ -1113,14 +1202,14 @@ async function expireStalePicks() {
     const match = getMatch(stale.id);
     if (!match || match.status !== 'banning') continue;
     if (match.created_at >= Date.now() - getFormat(match.guild_id).pickTtlS * 1000) continue;
-    const phase = pickState(match);
+    const phase = vetoTurn(match);
     // A phase this version can't read, or one with nothing left on the table,
     // can never be finished by anyone - by a player or by this sweep.
-    if (!phase || !phase.pool.length) {
+    if (!phase || !phase.count) {
       await cancelMatch(match);
       continue;
     }
-    applyPick(match, Math.floor(Math.random() * phase.pool.length));
+    applyPick(match, Math.floor(Math.random() * phase.count));
     await editMatchMessage(getMatch(match.id)!);
   }
 }
@@ -1557,7 +1646,7 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       await i.reply({ content: "You're not in that match.", flags: MessageFlags.Ephemeral });
       return;
     }
-    const phase = pickState(match);
+    const phase = vetoTurn(match);
     if (!phase) {
       await i.reply({
         content: 'That match was mid-pick when the bot changed under it, so it has been dropped.',
@@ -1624,6 +1713,14 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
       await i.reply({ content: 'That one just filled.', flags: MessageFlags.Ephemeral });
       return;
     }
+    // A duo's side comes off the button. Anything else sits on 0 until the
+    // shuffle at start.
+    const { teamSize } = FORMATS[match.format];
+    const team = duoOf(match.format) ? (extra === '1' ? 1 : 0) : 0;
+    if (duoOf(match.format) && seated.filter((r) => r.team === team).length >= teamSize) {
+      await i.reply({ content: `Team ${team + 1} is full.`, flags: MessageFlags.Ephemeral });
+      return;
+    }
     if (seated.some((r) => r.discord_id === i.user.id)) {
       await i.reply({ content: "You're already in it.", flags: MessageFlags.Ephemeral });
       return;
@@ -1682,9 +1779,10 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
         return;
       }
     }
-    db.prepare('insert into match_player (match_id, discord_id) values (?, ?)').run(
+    db.prepare('insert into match_player (match_id, discord_id, team) values (?, ?, ?)').run(
       match.id,
       i.user.id,
+      team,
     );
 
     const full = matchPlayers(match.id).length >= FORMATS[match.format].max;

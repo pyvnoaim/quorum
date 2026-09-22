@@ -350,3 +350,138 @@ export function eloDeltas(entrants: Entrant[], placing: Map<number, number>, k =
   }
   return deltas;
 }
+
+/** One game of a duo veto: its category, which side runs the veto inside it,
+ *  the subcategories still standing, and the two scenarios the survivor put
+ *  on the table. `size` is how many subcategories it started with - the only
+ *  way to count the bans, since `subs` shrinks in place. */
+export interface DuoGame {
+  main: string;
+  by: number;
+  subs: string[];
+  size: number;
+  tasks: string[];
+  task?: string;
+}
+
+/**
+ * The tournament veto, for 2v2. `hi` is the higher seed's team.
+ *
+ *  - duo 1: both sides ban a main (higher first); the higher seed bans two
+ *    subcategories and the lower one, then the higher seed picks one of two.
+ *  - duo 3: the higher seed picks game 1's main and the lower game 2's, the
+ *    leftover is game 3. In each game the side that did NOT pick the main runs
+ *    its veto (game 3: the higher seed), same shape as above.
+ *
+ * `mainsSize` is what `mains` started at, for counting duo 1's bans. `log` is
+ * only for the embed.
+ */
+export interface DuoVeto {
+  duo: 1 | 3;
+  hi: number;
+  mains: string[];
+  mainsSize: number;
+  games: DuoGame[];
+  log: { turn: number; action: 'ban' | 'pick'; name: string }[];
+}
+
+export interface DuoRoll {
+  subs: (main: string) => string[];
+  tasks: (main: string, sub: string) => string[];
+}
+
+/** Whose turn it is and what they choose from, or null once every game has
+ *  its scenario. Derived, like pickTurn(), so the turn cannot drift. */
+export function duoStep(v: DuoVeto) {
+  if (v.mains.length > 1) {
+    return v.duo === 1
+      ? {
+          action: 'ban' as const,
+          level: 'category',
+          turn: (v.mainsSize - v.mains.length) % 2 === 0 ? v.hi : 1 - v.hi,
+          options: v.mains,
+        }
+      : {
+          action: 'pick' as const,
+          level: `game ${v.games.length + 1}'s category`,
+          turn: v.games.length === 0 ? v.hi : 1 - v.hi,
+          options: v.mains,
+        };
+  }
+  const game = v.games.find((g) => !g.task);
+  if (!game) return null;
+  if (game.subs.length > 1) {
+    // ban, ban, then the other side's ban - so four subcategories go 2-1 and
+    // the side running the veto still ends it with the pick.
+    const done = game.size - game.subs.length;
+    return {
+      action: 'ban' as const,
+      level: `${game.main} subcategory`,
+      turn: done % 3 < 2 ? game.by : 1 - game.by,
+      options: game.subs,
+    };
+  }
+  return { action: 'pick' as const, level: `${game.main} · ${game.subs[0]}`, turn: game.by, options: game.tasks };
+}
+
+/** Everything that happens without anyone choosing: the last main standing
+ *  becomes a game (vetoed by the higher seed - the leftover in a bo3, the only
+ *  one in a bo1), a lone subcategory rolls its two scenarios, and a choice of
+ *  one is taken. A game whose subcategory rolled nothing is dropped rather than
+ *  left with no buttons in it. */
+function settle(v: DuoVeto, roll: DuoRoll): DuoVeto {
+  const next = { ...v, games: v.games.map((g) => ({ ...g })) };
+  for (;;) {
+    if (next.mains.length === 1) {
+      const [main] = next.mains;
+      const subs = roll.subs(main);
+      next.mains = [];
+      if (subs.length) next.games.push({ main, by: next.hi, subs, size: subs.length, tasks: [] });
+      continue;
+    }
+    const game = next.games.find((g) => !g.task);
+    if (next.mains.length || !game || game.subs.length > 1) return next;
+    if (!game.tasks.length) {
+      game.tasks = roll.tasks(game.main, game.subs[0]);
+      if (!game.tasks.length) next.games.splice(next.games.indexOf(game), 1);
+      else if (game.tasks.length > 1) return next;
+    }
+    if (game.tasks.length === 1) game.task = game.tasks[0];
+  }
+}
+
+/** A fresh veto, already moved past anything nobody has to choose. */
+export function startDuo(duo: 1 | 3, hi: number, mains: string[], roll: DuoRoll) {
+  return settle({ duo, hi, mains, mainsSize: mains.length, games: [], log: [] }, roll);
+}
+
+/** One ban or pick, by index into duoStep's options. Returns the veto to store,
+ *  or the scenarios once every game has one. An index that isn't there changes
+ *  nothing. */
+export function advanceDuo(
+  v: DuoVeto,
+  index: number,
+  roll: DuoRoll,
+): { veto: DuoVeto } | { scenarios: string[] } {
+  const step = duoStep(v);
+  const taken = step?.options[index];
+  if (!step || taken === undefined) return { veto: v };
+  const next: DuoVeto = { ...v, games: v.games.map((g) => ({ ...g })), log: [...v.log] };
+  const game = next.games.find((g) => !g.task);
+  if (next.mains.length > 1) {
+    next.mains = next.mains.filter((m) => m !== taken);
+    if (v.duo === 3) {
+      const subs = roll.subs(taken);
+      if (subs.length) next.games.push({ main: taken, by: 1 - step.turn, subs, size: subs.length, tasks: [] });
+    }
+  } else if (game && game.subs.length > 1) {
+    game.subs = game.subs.filter((s) => s !== taken);
+  } else if (game) {
+    game.task = taken;
+  }
+  next.log.push({ turn: step.turn, action: step.action, name: taken });
+  const settled = settle(next, roll);
+  return duoStep(settled)
+    ? { veto: settled }
+    : { scenarios: settled.games.map((g) => g.task!) };
+}

@@ -11,6 +11,7 @@ import {
   MAIN_CATEGORIES,
   PANEL_FORMATS,
   ROUNDS,
+  duoOf,
   RUNS_PER_SCENARIO,
   type Format,
 } from "./config.js";
@@ -41,6 +42,7 @@ import {
   rankForRoles,
   rankName,
   scenarioWinners,
+  type DuoVeto,
 } from "./rating.js";
 
 const BLURPLE = 0x5865f2;
@@ -124,6 +126,52 @@ export function pickEmbed(
     .setFooter(footer());
 }
 
+/** The duo veto. Everything on it - the seeds, what has gone, whose turn -
+ *  comes out of the stored veto, same as pickEmbed. */
+export function duoPickEmbed(
+  match: Match,
+  rows: MatchPlayer[],
+  veto: DuoVeto,
+  step: { action: "ban" | "pick"; level: string; turn: number; options: string[] },
+) {
+  const { pickTtlS } = getFormat(match.guild_id);
+  const side = (team: number) =>
+    rows
+      .filter((r) => r.team === team)
+      .map((r) => `<@${r.discord_id}>`)
+      .join(" & ");
+  const seeds = [veto.hi, 1 - veto.hi]
+    .map((t, n) => `**Team ${t + 1}** ${n === 0 ? "(higher seed)" : "(lower seed)"} · ${side(t)}`)
+    .join("\n");
+  const history = veto.log
+    .map((l) => `Team ${l.turn + 1} ${l.action === "ban" ? "banned" : "picked"} **${l.name}**`)
+    .join("\n");
+  const games = veto.duo === 3
+    ? veto.games
+        .map((g, n) => `**Game ${n + 1}** · ${g.main}${g.task ? ` · \`${g.task}\`` : ""}`)
+        .join("\n")
+    : "";
+  const what =
+    step.action === "ban"
+      ? `bans a **${step.level}**`
+      : step.level.includes("category")
+        ? `picks **${step.level}**`
+        : `picks the scenario from **${step.level}**`;
+
+  return new EmbedBuilder()
+    .setTitle(`${match.format} · veto`)
+    .setColor(BLURPLE)
+    .setDescription(
+      `${seeds}\n\n` +
+        (history ? `${history}\n\n` : "") +
+        (games ? `${games}\n\n` : "") +
+        `${side(step.turn)} ${what}. ` +
+        `Nobody acts within **${pickTtlS}s** and the bot ${step.action}s at random.\n\n` +
+        step.options.map((o) => `\`${o}\``).join("\n"),
+    )
+    .setFooter(footer());
+}
+
 /** A match whose stored pick phase predates this version of the bot. It cannot
  *  be finished, so it says so instead of showing buttons that do nothing. */
 export function staleEmbed(match: Match) {
@@ -144,8 +192,19 @@ export function staleEmbed(match: Match) {
  *  is that a queue channel with a game running should say so instead of going
  *  quiet, not that it should grow a message every time one starts. Taken down
  *  when the match ends, so what is on screen is only ever what is happening. */
-export function runningEmbed(match: Match, players: Map<string, Player>) {
-  const names = [...players.values()].map((p) => p.kovaaks_username);
+export function runningEmbed(
+  match: Match,
+  players: Map<string, Player>,
+  rows: MatchPlayer[],
+) {
+  // One name per side, teammates joined: a 2v2 is not four people each on
+  // their own.
+  const names = [...new Set(rows.map((r) => r.team))].map((team) =>
+    rows
+      .filter((r) => r.team === team)
+      .map((r) => players.get(r.discord_id)?.kovaaks_username ?? "someone")
+      .join(" & "),
+  );
   const deadline = Math.floor(
     matchDeadline(match.started_at ?? Date.now(), match.grace_from, getFormat(match.guild_id)) /
       1000,
@@ -180,13 +239,19 @@ export function openEmbed(
       // How many seats are left is the whole point of this message, so it goes
       // in the body at full size rather than in the grey line under it.
       `**${rows.length}/${max}** · starts the moment it fills\n\n` +
-        rows
-          .map((r) => {
-            const p = players.get(r.discord_id)!;
-            const band = rankLabel(match.guild_id, r.discord_id, p.elo);
-            return `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ""}`;
-          })
-          .join("\n"),
+        (duoOf(match.format) ? [0, 1] : [null])
+          .map((team) =>
+            (team == null ? "" : `**Team ${team + 1}**\n`) +
+            (rows
+              .filter((r) => team == null || r.team === team)
+              .map((r) => {
+                const p = players.get(r.discord_id)!;
+                const band = rankLabel(match.guild_id, r.discord_id, p.elo);
+                return `<@${r.discord_id}> · **${p.elo}**${band ? ` ${band}` : ""}`;
+              })
+              .join("\n") || "open"),
+          )
+          .join("\n\n"),
     )
     .setFooter(footer());
 }
@@ -285,6 +350,11 @@ export function panelMessage(
               : "You get a private thread to yourselves. ") +
             `Ban and pick **${rounds} scenarios** in it, ` +
             `**${runs} runs each**.\n\n` +
+            (formats.some((f) => duoOf(f))
+              ? `**2v2** is duos, played like the tournament: you join a side with your partner, ` +
+                `the higher-rated duo gets the better end of the veto, and it comes down to ` +
+                `one scenario (**bo3**: one per category). Both players' best runs are added together.\n\n`
+              : "") +
             `Scores are read straight off KovaaK's. Nothing to submit, nothing to screenshot, ` +
             `nothing to argue about.` +
             pulse,

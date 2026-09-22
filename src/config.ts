@@ -19,6 +19,11 @@ export const guildAllowed = (id: string) => !ALLOWED_GUILDS.size || ALLOWED_GUIL
  *    group:  { min: 3, max: 8, teamSize: 1 }   (no two sides, so no ban phase) */
 export const FORMATS = {
   '1v1': { min: 2, max: 2, teamSize: 1 },
+  // Duos, played like the Aimlabs 2.0 duos finals: a veto down to one scenario
+  // (duo 1) or one per main (duo 3, the semis and final), three runs each,
+  // and the two players' bests added together. See DuoVeto in rating.ts.
+  '2v2': { min: 4, max: 4, teamSize: 2, duo: 1 },
+  '2v2 bo3': { min: 4, max: 4, teamSize: 2, duo: 3 },
 } as const;
 export type Format = keyof typeof FORMATS;
 
@@ -60,6 +65,8 @@ export const VOLTAIC_SEED: Record<string, number> = {
  *  on first read and owned by the dashboard after that. */
 export const DEFAULT_RANK_SPREAD: Record<Format, number> = {
   '1v1': 0,
+  '2v2': 0,
+  '2v2 bo3': 0,
 };
 
 /** Seeds a server's rank ladder the first time it's read. After that the rows
@@ -146,7 +153,7 @@ export const PICK_POOL = 5;
 export const BAN_TTL_MS = 90 * 1000;
 
 /** Which formats get a button on the queue panel. */
-export const PANEL_FORMATS: Format[] = ['1v1'];
+export const PANEL_FORMATS: Format[] = ['1v1', '2v2', '2v2 bo3'];
 
 /** How long an untaken call stays up before the sweep bins it. */
 export const CALL_TTL_MS = 60 * 60 * 1000;
@@ -187,3 +194,9 @@ export const RECORD_RETRY_MS = 5 * 60 * 1000;
  *  tick because the ban timer is a number staff chose and expect to mean
  *  something: swept once a minute, a 90s window ran up to 150s. */
 export const PICK_SWEEP_MS = 10 * 1000;
+
+/** 1 or 3 for a duo format, undefined for everything else. */
+export const duoOf = (format: string) => {
+  const f = FORMATS[format as Format];
+  return f && 'duo' in f ? f.duo : undefined;
+};
