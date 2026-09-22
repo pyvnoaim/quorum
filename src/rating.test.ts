@@ -444,7 +444,7 @@ assert.deepEqual(
       elo: 1000,
       team,
       scores: { g: [50, 50, 60, 40][n] },
-      extra: { g: extra[n]?.length ? extra[n] : [] },
+      extra: { g: { cap: 0, runs: (extra[n] ?? []).map((sc, k): [number, number] => [k + 1, sc]) } },
       runs: { g: runs + (extra[n]?.length ?? 0) },
     }));
   const level = duo([]);
@@ -495,9 +495,36 @@ assert.deepEqual(
 // A no-show has no sudden-death round to run, so it does not hold one up.
 {
   const e = [
-    { id: 'a', elo: 0, team: 0, scores: { g: 100 }, extra: { g: [5] } },
-    { id: 'b', elo: 0, team: 1, scores: { g: 100 }, extra: { g: [9] } },
-    { id: 'c', elo: 0, team: 1, scores: { g: null }, extra: { g: [] } },
+    { id: 'a', elo: 0, team: 0, scores: { g: 100 }, extra: { g: { cap: 0, runs: [[1, 5]] as [number, number][] } } },
+    { id: 'b', elo: 0, team: 1, scores: { g: 100 }, extra: { g: { cap: 0, runs: [[1, 9]] as [number, number][] } } },
+    { id: 'c', elo: 0, team: 1, scores: { g: null } },
   ];
   assert.deepEqual(scenarioWinners(e, ['g']), [1]);
+}
+
+// A run past the cap played BEFORE the game went level is not a sudden-death
+// round: the game only tied once the last player's counted runs were in, at 50.
+{
+  const e = [
+    // ran a 4th at 40, while the other side was still on its counted runs
+    { id: 'a', elo: 0, team: 0, scores: { g: 100 }, extra: { g: { cap: 30, runs: [[40, 99], [60, 1]] as [number, number][] } } },
+    { id: 'b', elo: 0, team: 1, scores: { g: 100 }, extra: { g: { cap: 50, runs: [[70, 5]] as [number, number][] } } },
+  ];
+  assert.deepEqual(scenarioWinners(e, ['g']), [1], 'the 99 at 40 does not count; 1 vs 5 does');
+}
+
+// A player who never launched a game does not hold a 2-0 open, nor a tie's
+// sudden death: they are not waited on.
+{
+  const four = (g1: (number | null)[], g2: (number | null)[], runs: number[]) =>
+    [0, 0, 1, 1].map((team, n) => ({
+      id: `q${n}`,
+      elo: 0,
+      team,
+      scores: { g1: g1[n], g2: g2[n], g3: null },
+      runs: { g1: g1[n] == null ? 0 : runs[n], g2: g2[n] == null ? 0 : runs[n], g3: 0 },
+    }));
+  // q3 never shows; team 0 wins both games everyone else played out
+  assert.deepEqual(clinched(four([9, 9, 1, null], [9, 9, 1, null], [3, 3, 3, 0]), ['g1', 'g2', 'g3'], 3), ['g1', 'g2']);
+  assert.deepEqual(tiedGames(four([5, 5, 10, null], [1, 1, 1, null], [3, 3, 3, 0]), ['g1'], 3), ['g1']);
 }

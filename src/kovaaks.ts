@@ -200,7 +200,16 @@ interface RunRow {
 }
 
 export type WindowScore =
-  | { ok: true; score: number | null; prior: number | null; runs: number; extra: number[] }
+  | {
+      ok: true;
+      score: number | null;
+      prior: number | null;
+      runs: number;
+      /** When the last counted run landed - null until they have all of them. */
+      capAt: number | null;
+      /** Every run past the cap as [epoch ms, score], oldest first. */
+      extra: [number, number][];
+    }
   | { ok: false };
 
 /**
@@ -241,7 +250,9 @@ export async function scoreInWindow(
   // which is a real null score. Only an unreachable service must leave what is
   // already recorded alone.
   if (!res.ok)
-    return res.reachable ? { ok: true, score: null, prior: null, runs: 0, extra: [] } : { ok: false };
+    return res.reachable
+      ? { ok: true, score: null, prior: null, runs: 0, capAt: null, extra: [] }
+      : { ok: false };
 
   const runs: { epoch: number; score: number }[] = [];
   let prior: number | null = null;
@@ -265,6 +276,7 @@ export async function scoreInWindow(
     runs: runs.length,
     // Everything past the cap, in order - a duo's sudden death, see
     // suddenDeath() in rating.ts. Nothing else reads it.
-    extra: runs.slice(counted.length).map((r) => r.score),
+    capAt: runs.length >= runsCounted ? counted[counted.length - 1].epoch : null,
+    extra: runs.slice(counted.length).map((r) => [r.epoch, r.score]),
   };
 }

@@ -24,6 +24,7 @@ import {
   ROUNDS,
   TICK_MS,
   PICK_SWEEP_MS,
+  PANEL_FORMATS,
   BASE_ELO,
   VOLTAIC_SEED,
   duoOf,
@@ -816,9 +817,14 @@ async function refreshScores(match: Match) {
           if (res.ok) runs[scenario] = Math.max(runs[scenario] ?? 0, res.runs);
           // A duo's sudden-death runs, appended and never rewritten: a round
           // already on record stays that round even if the 50-run page slides.
-          const had = sd[scenario] ?? [];
-          if (duo && res.ok && res.extra.length > had.length) {
-            sd[scenario] = [...had, ...res.extra.slice(had.length)];
+          // The cap time too - it is the first answer's, for the same reason.
+          const had = sd[scenario];
+          if (duo && res.ok && res.capAt != null) {
+            const last = had?.runs.at(-1)?.[0] ?? -Infinity;
+            sd[scenario] = {
+              cap: had?.cap ?? res.capAt,
+              runs: [...(had?.runs ?? []), ...res.extra.filter(([at]) => at > last)],
+            };
           }
         }),
       );
@@ -1318,8 +1324,12 @@ const panelText = new Map<string, string>();
 async function refreshPanels() {
   for (const [guildId] of client.guilds.cache) {
     for (const panel of getPanels(guildId)) {
-      const body = panelMessage(panel.formats, guildId, panel.channel, panel.ranked !== false);
-      const next = body.embeds[0].data.description ?? '';
+      // Today's formats, not the ones saved when it was posted: every panel is
+      // posted with the whole list, so the saved one is only ever an older
+      // copy of it - and a format added since would never get its button.
+      const body = panelMessage(PANEL_FORMATS, guildId, panel.channel, panel.ranked !== false);
+      // The buttons as well as the text, for the same reason.
+      const next = JSON.stringify([body.embeds[0].data.description ?? '', body.components]);
       if (panelText.get(panel.message) === next) continue;
 
       const channel = await client.channels.fetch(panel.channel).catch(() => null);

@@ -19,7 +19,7 @@ import {
 } from './config.js';
 // rating.ts reads nothing but config, so scoring can be reused down here
 // without the two files ever pointing at each other.
-import { forfeits, scenarioWinners } from './rating.js';
+import { forfeits, scenarioWinners, type Overtime } from './rating.js';
 
 // ponytail: node:sqlite is in the stdlib (needs --experimental-sqlite on node 22),
 // so there's no db dependency and no migration tool. Swap for Postgres if this
@@ -1024,9 +1024,16 @@ export function matchInThread(threadId: string) {
     .get(threadId) as Match | undefined;
 }
 
-/** A player's sudden-death runs, for scenarioWinners(). Undefined outside a duo. */
-export const extraRuns = (r: { sd?: string | null }) =>
-  r.sd ? (JSON.parse(r.sd) as Record<string, number[]>) : undefined;
+/** A player's sudden-death runs, for scenarioWinners(). Undefined outside a
+ *  duo. A scenario still in the first shape - a bare list of scores with no
+ *  times on it - is dropped, and the next refresh writes it again with them. */
+export const extraRuns = (r: { sd?: string | null }): Record<string, Overtime> | undefined => {
+  if (!r.sd) return undefined;
+  const raw = JSON.parse(r.sd) as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(raw).filter(([, v]) => v && typeof v === 'object' && !Array.isArray(v)),
+  ) as Record<string, Overtime>;
+};
 
 export function matchPlayers(matchId: number) {
   return db

@@ -247,9 +247,15 @@ export interface Entrant {
   team: number;
   /** score per scenario; null = didn't play it (counts as 0, but is shown as "-") */
   scores: Record<string, number | null>;
-  /** Runs past the counted ones, oldest first, per scenario - a duo's sudden
-   *  death. Only duo matches record these; see suddenDeath(). */
-  extra?: Record<string, number[]>;
+  /** A duo's sudden death, per scenario: when this player's last counted run
+   *  landed, and every run after it as [epoch ms, score], oldest first. Only
+   *  duo matches record these; see suddenDeath(). */
+  extra?: Record<string, Overtime>;
+}
+
+export interface Overtime {
+  cap: number;
+  runs: [number, number][];
 }
 
 /**
@@ -265,14 +271,25 @@ function suddenDeath(all: Entrant[], scenario: string, tied: number[]): number |
   // waiting on one would leave the tie standing on the card while scorable()
   // - which already left them out - broke it for the rating.
   const entrants = all.filter((e) => e.scores[scenario] != null);
-  const longest = Math.max(0, ...entrants.map((e) => e.extra?.[scenario]?.length ?? 0));
+  // The game became level the moment the LAST player's counted runs were in.
+  // A run anybody put in before that was played with nothing tied, so it is
+  // not a sudden-death round - it is a run past the cap, which counts for
+  // nothing, same as it always did.
+  const levelAt = Math.max(...entrants.map((e) => e.extra?.[scenario]?.cap ?? Infinity));
+  const rounds = new Map(
+    entrants.map((e) => [
+      e,
+      (e.extra?.[scenario]?.runs ?? []).filter(([at]) => at > levelAt).map(([, score]) => score),
+    ]),
+  );
+  const longest = Math.max(0, ...[...rounds.values()].map((r) => r.length));
   for (let k = 0; k < longest; k++) {
-    if (entrants.some((e) => e.extra?.[scenario]?.[k] == null)) return null;
+    if (entrants.some((e) => rounds.get(e)![k] == null)) return null;
     const totals = tied.map((team) => ({
       team,
       total: entrants
         .filter((e) => e.team === team)
-        .reduce((sum, e) => sum + e.extra![scenario][k], 0),
+        .reduce((sum, e) => sum + rounds.get(e)![k], 0),
     }));
     const best = Math.max(...totals.map((t) => t.total));
     const top = totals.filter((t) => t.total === best);
@@ -327,6 +344,15 @@ export function scenarioWinners(entrants: Entrant[], scenarios: string[]): (numb
   });
 }
 
+/** Everyone who played this game has used every run on it. Somebody who never
+ *  launched it is not waited on: a no-show - or a player gone after game 1 -
+ *  would otherwise hold a 2-0 open until the clock, and there the forfeit
+ *  rule would hand the match to the side that lost it. */
+function playedOut(entrants: (Entrant & { runs: Record<string, number> })[], s: string, want: number) {
+  const played = entrants.filter((e) => e.scores[s] != null);
+  return played.length > 0 && played.every((e) => (e.runs[s] ?? 0) >= want);
+}
+
 /**
  * Duo games everyone has played out that are still level - the ones waiting on
  * a sudden-death run. A match with one of these is not over yet.
@@ -338,7 +364,7 @@ export function tiedGames(
 ) {
   const won = scenarioWinners(entrants, scenarios);
   return scenarios.filter((s, i) => {
-    if (won[i] !== null || !entrants.every((e) => (e.runs[s] ?? 0) >= want)) return false;
+    if (won[i] !== null || !playedOut(entrants, s, want)) return false;
     const teams = [...new Set(entrants.map((e) => e.team))];
     const totals = teams.map((t) =>
       entrants.filter((e) => e.team === t).reduce((sum, e) => sum + (e.scores[s] ?? 0), 0),
@@ -358,9 +384,7 @@ export function clinched(
   want: number,
 ): string[] | null {
   const won = scenarioWinners(entrants, scenarios);
-  const finished = scenarios.filter(
-    (s, i) => won[i] !== null && entrants.every((e) => (e.runs[s] ?? 0) >= want),
-  );
+  const finished = scenarios.filter((s, i) => won[i] !== null && playedOut(entrants, s, want));
   const wins = new Map<number, number>();
   for (const s of finished) {
     const team = won[scenarios.indexOf(s)]!;
