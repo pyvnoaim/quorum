@@ -21,6 +21,7 @@ import {
   getPlayer,
   getRankMode,
   getRanks,
+  extraRuns,
   getScenarios,
   guildStats,
   ladderSize,
@@ -42,6 +43,7 @@ import {
   rankForRoles,
   rankName,
   scenarioWinners,
+  tiedGames,
   type DuoVeto,
 } from "./rating.js";
 
@@ -806,6 +808,7 @@ export function liveEmbed(
       elo: 0,
       team: r.team,
       scores: forfeited.get(r.discord_id)!,
+      extra: extraRuns(r),
     })),
     scenarios,
   );
@@ -847,6 +850,7 @@ export function liveEmbed(
         `${scenarios.length}, or <t:${deadline}:R> either way - and that clock ` +
         `${match.grace_from ? "is running: somebody has finished" : "closes in once the first of you finishes"}. ` +
         `**Done** gives up the runs you have left.` +
+        duoRules(match, rows, scenarios, runs) +
         "\n```\n" +
         scoreTable(
           scenarios,
@@ -892,6 +896,33 @@ export function liveEmbed(
     });
   }
   return embed.setFooter(footer());
+}
+
+/** What a duo match adds to the board: runs past the cap are sudden death, a
+ *  best of three stops at two, and which games are level right now. */
+function duoRules(match: Match, rows: MatchPlayer[], scenarios: string[], runs: number) {
+  const duo = duoOf(match.format);
+  if (!duo) return "";
+  const level = tiedGames(
+    rows.map((r) => ({
+      id: r.discord_id,
+      elo: 0,
+      team: r.team,
+      scores: JSON.parse(r.scores) as Record<string, number | null>,
+      extra: extraRuns(r),
+      runs: JSON.parse(r.run_counts ?? "{}") as Record<string, number>,
+    })),
+    scenarios,
+    runs,
+  );
+  return (
+    `\n\nDuos: both players' bests are added together. A game that ends dead level goes to ` +
+    `**sudden death** - one more run each, higher duo total takes it, again until it breaks.` +
+    (duo === 3 ? ` First duo to **two games** wins; the third is not played if it isn't needed.` : "") +
+    (level.length
+      ? `\n\n⚔️ **Sudden death on ${level.join(" and ")}** - one more run each.`
+      : "")
+  );
 }
 
 /** Nobody posted a score. Said plainly, because the alternative - a results
@@ -1024,6 +1055,7 @@ export function resultsEmbed(
       elo: 0,
       team: r.team,
       scores: scores.get(r.discord_id)!,
+      extra: extraRuns(r),
     })),
     scenarios,
   );

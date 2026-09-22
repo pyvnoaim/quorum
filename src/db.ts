@@ -131,6 +131,9 @@ for (const stmt of [
   'alter table match add column bans text',
   'alter table match_player add column pb text',
   'alter table match_player add column run_counts text',
+  // JSON {scenario: [score, ...]}: runs past the counted ones, oldest first.
+  // Duo matches only - it is their sudden death on a tied game.
+  'alter table match_player add column sd text',
   // When the first player used every run - the moment the rest of the lobby
   // goes on a clock. Null while nobody has finished, which is also every match
   // that was already live when this shipped: those keep the plain TTL.
@@ -966,6 +969,9 @@ export interface MatchPlayer {
   /** JSON {scenario: runs put in so far}. A match ends itself when everyone has
    *  used all of them - see allRunsUsed(). Null on an older row. */
   run_counts: string | null;
+  /** JSON {scenario: runs past the counted ones}. Duo matches only - their
+   *  sudden death. Null everywhere else. */
+  sd: string | null;
   placing: number | null;
   elo_before: number | null;
   elo_after: number | null;
@@ -1017,6 +1023,10 @@ export function matchInThread(threadId: string) {
     .prepare("select * from match where thread_id = ? and status in ('banning', 'live')")
     .get(threadId) as Match | undefined;
 }
+
+/** A player's sudden-death runs, for scenarioWinners(). Undefined outside a duo. */
+export const extraRuns = (r: { sd?: string | null }) =>
+  r.sd ? (JSON.parse(r.sd) as Record<string, number[]>) : undefined;
 
 export function matchPlayers(matchId: number) {
   return db
@@ -1282,14 +1292,14 @@ export function claimRecap(guildId: string, every: number): number | null {
 export function categoryRecord(discordId: string, guildId: string) {
   const rows = db
     .prepare(
-      `select m.id, m.scenarios, p.discord_id, p.team, p.scores, p.run_counts
+      `select m.id, m.scenarios, p.discord_id, p.team, p.scores, p.run_counts, p.sd
        from match m join match_player p on p.match_id = m.id
        where m.guild_id = ? and m.status = 'done' and m.ranked <> 0
          and m.id in (select match_id from match_player
                       where discord_id = ? and placing is not null)`,
     )
     .all(guildId, discordId) as unknown as (Pick<Match, 'id' | 'scenarios'> &
-    Pick<MatchPlayer, 'discord_id' | 'team' | 'scores' | 'run_counts'>)[];
+    Pick<MatchPlayer, 'discord_id' | 'team' | 'scores' | 'run_counts' | 'sd'>)[];
 
   const byMatch = new Map<number, typeof rows>();
   for (const r of rows) byMatch.set(r.id, [...(byMatch.get(r.id) ?? []), r]);
@@ -1316,7 +1326,13 @@ export function categoryRecord(discordId: string, guildId: string) {
       want,
     );
     const won = scenarioWinners(
-      group.map((r) => ({ id: r.discord_id, elo: 0, team: r.team, scores: scores.get(r.discord_id)! })),
+      group.map((r) => ({
+        id: r.discord_id,
+        elo: 0,
+        team: r.team,
+        scores: scores.get(r.discord_id)!,
+        extra: extraRuns(r),
+      })),
       scenarios,
     );
     scenarios.forEach((name, at) => {

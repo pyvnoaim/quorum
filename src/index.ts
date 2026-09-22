@@ -33,6 +33,7 @@ import {
   db,
   ensurePlayer,
   dropPanel,
+  extraRuns,
   getConfig,
   getFormat,
   getMatch,
@@ -90,6 +91,7 @@ import {
   allRunsUsed,
   bandsInReach,
   canPlay,
+  clinched,
   duoStep,
   eloDeltas,
   forfeits,
@@ -101,6 +103,7 @@ import {
   rankName,
   scorable,
   startDuo,
+  tiedGames,
   type DuoRoll,
   type DuoVeto,
   type PickPhase,
@@ -761,12 +764,14 @@ async function refreshScores(match: Match) {
   const scenarios: string[] = JSON.parse(match.scenarios);
   const end = match.ended_at ?? Date.now();
   const want = getFormat(match.guild_id).runs;
+  const duo = duoOf(match.format);
   await Promise.all(
     matchPlayers(match.id).map(async (row) => {
       const player = getPlayer(row.discord_id)!;
       const scores = JSON.parse(row.scores) as Record<string, number | null>;
       const pb = JSON.parse(row.pb ?? '{}') as Record<string, number | null>;
       const runs = JSON.parse(row.run_counts ?? '{}') as Record<string, number>;
+      const sd = extraRuns(row) ?? {};
       await Promise.all(
         scenarios.map(async (scenario) => {
           const res = await scoreInWindow(
@@ -790,15 +795,22 @@ async function refreshScores(match: Match) {
           // Runs only ever go up. A blink from KovaaK's must not read as
           // "they un-played it" and re-open a match that had finished.
           if (res.ok) runs[scenario] = Math.max(runs[scenario] ?? 0, res.runs);
+          // A duo's sudden-death runs, appended and never rewritten: a round
+          // already on record stays that round even if the 50-run page slides.
+          const had = sd[scenario] ?? [];
+          if (duo && res.ok && res.extra.length > had.length) {
+            sd[scenario] = [...had, ...res.extra.slice(had.length)];
+          }
         }),
       );
       db.prepare(
-        `update match_player set scores = ?, pb = ?, run_counts = ?
+        `update match_player set scores = ?, pb = ?, run_counts = ?, sd = ?
          where match_id = ? and discord_id = ?`,
       ).run(
         JSON.stringify(scores),
         JSON.stringify(pb),
         JSON.stringify(runs),
+        duo ? JSON.stringify(sd) : null,
         match.id,
         row.discord_id,
       );
@@ -806,13 +818,69 @@ async function refreshScores(match: Match) {
   );
 }
 
-/** Whether this match has nothing left to play - see allRunsUsed(). */
+/** Everyone in a live match as tiedGames() and clinched() read them: raw
+ *  scores, their sudden-death runs, and how many runs they have put in. */
+function duoEntrants(match: Match) {
+  return matchPlayers(match.id).map((r) => ({
+    id: r.discord_id,
+    elo: 0,
+    team: r.team,
+    scores: JSON.parse(r.scores) as Record<string, number | null>,
+    extra: extraRuns(r),
+    runs: JSON.parse(r.run_counts ?? '{}') as Record<string, number>,
+  }));
+}
+
+/** Duo games level after everyone's runs, still waiting on sudden death. */
+function pendingSuddenDeath(match: Match): string[] {
+  if (!duoOf(match.format)) return [];
+  return tiedGames(duoEntrants(match), JSON.parse(match.scenarios), getFormat(match.guild_id).runs);
+}
+
+/** Whether this match has nothing left to play - see allRunsUsed(). A duo
+ *  game that is still level is not played out: it has a sudden death to go. */
 function nothingLeftToPlay(match: Match) {
-  return allRunsUsed(
-    JSON.parse(match.scenarios),
-    matchPlayers(match.id).map((r) => JSON.parse(r.run_counts ?? '{}') as Record<string, number>),
-    getFormat(match.guild_id).runs,
+  return (
+    allRunsUsed(
+      JSON.parse(match.scenarios),
+      matchPlayers(match.id).map((r) => JSON.parse(r.run_counts ?? '{}') as Record<string, number>),
+      getFormat(match.guild_id).runs,
+    ) && !pendingSuddenDeath(match).length
   );
+}
+
+/** Tells a duo match its game went to sudden death, once per game. A mention,
+ *  for the same reason warnTimeLow() is one: everyone who thinks they are done
+ *  is alt-tabbed somewhere else.
+ *  ponytail: remembered in memory, so a restart can say it once more. */
+const suddenDeathSaid = new Set<string>();
+async function announceSuddenDeath(match: Match) {
+  const tied = pendingSuddenDeath(match).filter((s) => !suddenDeathSaid.has(`${match.id}:${s}`));
+  if (!tied.length || !match.thread_id) return;
+  tied.forEach((s) => suddenDeathSaid.add(`${match.id}:${s}`));
+  const thread = await client.channels.fetch(match.thread_id).catch(() => null);
+  if (!thread?.isTextBased() || !thread.isSendable()) return;
+  const ids = matchPlayers(match.id).map((r) => r.discord_id);
+  await thread
+    .send({
+      content:
+        `⚔️ ${ids.map((id) => `<@${id}>`).join(' ')} - dead level on ` +
+        `${tied.map((s) => `**${s}**`).join(' and ')}. **Sudden death**: one more run each, ` +
+        `higher duo total takes it, and again until it breaks.`,
+      allowedMentions: { users: ids },
+    })
+    .catch(() => {});
+}
+
+/** A best of three one side has already taken two of: the rest is not played.
+ *  The match is cut down to the games that were played out, so the unplayed
+ *  one can neither score nor forfeit anybody. */
+function endIfClinched(match: Match) {
+  if (duoOf(match.format) !== 3) return false;
+  const played = clinched(duoEntrants(match), JSON.parse(match.scenarios), getFormat(match.guild_id).runs);
+  if (!played) return false;
+  db.prepare('update match set scenarios = ? where id = ?').run(JSON.stringify(played), match.id);
+  return true;
 }
 
 /** When this match ends, grace and floor included - see matchDeadline().
@@ -895,10 +963,11 @@ async function refreshMatch(match: Match) {
     openGrace(fresh);
     fresh = getMatch(match.id)!;
   }
-  if (fresh.status === 'live' && nothingLeftToPlay(fresh)) {
-    await concludeMatch(fresh);
+  if (fresh.status === 'live' && (endIfClinched(fresh) || nothingLeftToPlay(fresh))) {
+    await concludeMatch(getMatch(match.id)!);
     return getMatch(match.id)!;
   }
+  if (fresh.status === 'live') await announceSuddenDeath(fresh);
   return fresh;
 }
 
@@ -936,6 +1005,7 @@ async function finishMatch(match: Match) {
     elo: getPlayer(r.discord_id)!.elo,
     team: r.team,
     scores: forfeited.get(r.discord_id)!,
+    extra: extraRuns(r),
   }));
 
   // Only whoever actually ran something is scored - see scorable(). Not-played
@@ -1915,7 +1985,9 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
     }
     // Everyone has to call it, so whoever is ahead can't end the match while
     // their opponent still has runs left. The clock covers the other way out.
-    if (matchPlayers(match.id).every((r) => r.done)) await concludeMatch(getMatch(match.id)!);
+    // ...and a duo game still level is not done with, whoever pressed what.
+    if (matchPlayers(match.id).every((r) => r.done) && !pendingSuddenDeath(match).length)
+      await concludeMatch(getMatch(match.id)!);
     else if (confirmed) await editMatchMessage(getMatch(match.id)!);
     else await i.editReply(render(getMatch(match.id)!));
   }

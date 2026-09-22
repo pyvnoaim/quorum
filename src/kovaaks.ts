@@ -200,7 +200,7 @@ interface RunRow {
 }
 
 export type WindowScore =
-  | { ok: true; score: number | null; prior: number | null; runs: number }
+  | { ok: true; score: number | null; prior: number | null; runs: number; extra: number[] }
   | { ok: false };
 
 /**
@@ -240,7 +240,8 @@ export async function scoreInWindow(
   // A 4xx here is KovaaK's answering "no runs for that user and scenario",
   // which is a real null score. Only an unreachable service must leave what is
   // already recorded alone.
-  if (!res.ok) return res.reachable ? { ok: true, score: null, prior: null, runs: 0 } : { ok: false };
+  if (!res.ok)
+    return res.reachable ? { ok: true, score: null, prior: null, runs: 0, extra: [] } : { ok: false };
 
   const runs: { epoch: number; score: number }[] = [];
   let prior: number | null = null;
@@ -262,5 +263,8 @@ export async function scoreInWindow(
     score: counted.length ? Math.max(...counted.map((r) => r.score)) : null,
     prior,
     runs: runs.length,
+    // Everything past the cap, in order - a duo's sudden death, see
+    // suddenDeath() in rating.ts. Nothing else reads it.
+    extra: runs.slice(counted.length).map((r) => r.score),
   };
 }

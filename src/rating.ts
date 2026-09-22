@@ -247,6 +247,34 @@ export interface Entrant {
   team: number;
   /** score per scenario; null = didn't play it (counts as 0, but is shown as "-") */
   scores: Record<string, number | null>;
+  /** Runs past the counted ones, oldest first, per scenario - a duo's sudden
+   *  death. Only duo matches record these; see suddenDeath(). */
+  extra?: Record<string, number[]>;
+}
+
+/**
+ * A tied duo game, broken the tournament's way: one more run each, higher team
+ * total wins, again until it breaks. Round k is everyone's k-th run past the
+ * counted ones, so a round only counts once EVERY player has run it - one
+ * side's extra run is not a round on its own.
+ *
+ * Null while it is still level or somebody has not run the next round yet.
+ */
+function suddenDeath(entrants: Entrant[], scenario: string, tied: number[]): number | null {
+  const longest = Math.max(0, ...entrants.map((e) => e.extra?.[scenario]?.length ?? 0));
+  for (let k = 0; k < longest; k++) {
+    if (entrants.some((e) => e.extra?.[scenario]?.[k] == null)) return null;
+    const totals = tied.map((team) => ({
+      team,
+      total: entrants
+        .filter((e) => e.team === team)
+        .reduce((sum, e) => sum + e.extra![scenario][k], 0),
+    }));
+    const best = Math.max(...totals.map((t) => t.total));
+    const top = totals.filter((t) => t.total === best);
+    if (top.length === 1) return top[0].team;
+  }
+  return null;
 }
 
 /**
@@ -290,8 +318,51 @@ export function scenarioWinners(entrants: Entrant[], scenarios: string[]): (numb
     }));
     const best = Math.max(...totals.map((t) => t.total));
     const top = totals.filter((t) => t.total === best);
-    return best > 0 && top.length === 1 ? top[0].team : null;
+    if (best <= 0) return null;
+    return top.length === 1 ? top[0].team : suddenDeath(entrants, scenario, top.map((t) => t.team));
   });
+}
+
+/**
+ * Duo games everyone has played out that are still level - the ones waiting on
+ * a sudden-death run. A match with one of these is not over yet.
+ */
+export function tiedGames(
+  entrants: (Entrant & { runs: Record<string, number> })[],
+  scenarios: string[],
+  want: number,
+) {
+  const won = scenarioWinners(entrants, scenarios);
+  return scenarios.filter((s, i) => {
+    if (won[i] !== null || !entrants.every((e) => (e.runs[s] ?? 0) >= want)) return false;
+    const teams = [...new Set(entrants.map((e) => e.team))];
+    const totals = teams.map((t) =>
+      entrants.filter((e) => e.team === t).reduce((sum, e) => sum + (e.scores[s] ?? 0), 0),
+    );
+    return totals[0] > 0 && totals.every((t) => t === totals[0]);
+  });
+}
+
+/**
+ * A best of three that is already decided: the games everyone has played out,
+ * if one side has taken two of them. Null while it is still open. Played in
+ * any order, so it is any two finished games, not the first two.
+ */
+export function clinched(
+  entrants: (Entrant & { runs: Record<string, number> })[],
+  scenarios: string[],
+  want: number,
+): string[] | null {
+  const won = scenarioWinners(entrants, scenarios);
+  const finished = scenarios.filter(
+    (s, i) => won[i] !== null && entrants.every((e) => (e.runs[s] ?? 0) >= want),
+  );
+  const wins = new Map<number, number>();
+  for (const s of finished) {
+    const team = won[scenarios.indexOf(s)]!;
+    wins.set(team, (wins.get(team) ?? 0) + 1);
+  }
+  return [...wins.values()].some((n) => n >= 2) ? finished : null;
 }
 
 export function placings(entrants: Entrant[], scenarios: string[]): Map<number, number> {
@@ -306,10 +377,13 @@ export function placings(entrants: Entrant[], scenarios: string[]): Map<number, 
         .reduce((sum, e) => sum + (e.scores[scenario] ?? 0), 0),
     }));
     totals.sort((a, b) => b.total - a.total);
+    // A tie sudden death broke goes to the side that broke it.
+    const [won] = scenarioWinners(entrants, [scenario]);
     totals.forEach((row) => {
       // ties share the better placing, so an exact draw can't split the round
       const tiedWith = totals.findIndex((r) => r.total === row.total);
-      points.set(row.team, points.get(row.team)! + tiedWith + 1);
+      const place = won != null && row.team !== won && tiedWith === 0 ? 2 : tiedWith + 1;
+      points.set(row.team, points.get(row.team)! + place);
     });
   }
 

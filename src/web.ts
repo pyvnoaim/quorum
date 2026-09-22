@@ -26,6 +26,7 @@ import {
   getConfig,
   getMatch,
   getSeedMode,
+  extraRuns,
   getFormat,
   getRankSpread,
   getRanks,
@@ -986,6 +987,7 @@ function openMatches(guildId: string, client: Client) {
         elo: 0,
         team: r.team,
         scores: forfeited.get(r.discord_id)!,
+        extra: extraRuns(r),
       })),
       scenarios,
     );
@@ -1552,6 +1554,7 @@ export function startWeb(client: Client, hooks: Hooks) {
                 elo: 0,
                 team: r.team,
                 scores: counted.get(r.discord_id)!,
+                extra: extraRuns(r),
               })),
               played,
             );

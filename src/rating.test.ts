@@ -4,7 +4,9 @@ import { DEFAULT_RANKS, ROUNDS } from './config.js';
 import {
   advancePick,
   advanceDuo,
+  clinched,
   duoStep,
+  tiedGames,
   startDuo,
   allRunsUsed,
   bandsInReach,
@@ -431,4 +433,49 @@ assert.deepEqual(
   const thin = startDuo(1, 0, ['Tap'], { subs: () => ['Static'], tasks: () => ['only'] });
   assert.equal(duoStep(thin), null);
   assert.equal(thin.games[0].task, 'only');
+}
+
+// Sudden death: a tied duo game waits for a round everybody has run, and the
+// first round that differs decides it - and the placing with it.
+{
+  const duo = (extra: number[][], runs = 3) =>
+    [0, 0, 1, 1].map((team, n) => ({
+      id: `p${n}`,
+      elo: 1000,
+      team,
+      scores: { g: [50, 50, 60, 40][n] },
+      extra: { g: extra[n]?.length ? extra[n] : [] },
+      runs: { g: runs + (extra[n]?.length ?? 0) },
+    }));
+  const level = duo([]);
+  assert.deepEqual(scenarioWinners(level, ['g']), [null], 'level on 100 each');
+  assert.deepEqual(tiedGames(level, ['g'], 3), ['g'], 'and waiting on sudden death');
+  assert.deepEqual(tiedGames(duo([], 2), ['g'], 3), [], 'not before everyone has run out');
+
+  // one side has run its round, the other has not: still level
+  const half = duo([[9], [9], [], []]);
+  assert.deepEqual(scenarioWinners(half, ['g']), [null]);
+  // round 1 level again, round 2 goes to team 1
+  const broken = duo([[5, 1], [5, 1], [6, 2], [4, 1]]);
+  assert.deepEqual(scenarioWinners(broken, ['g']), [1]);
+  assert.deepEqual(tiedGames(broken, ['g'], 3), []);
+  const placing = placings(broken, ['g']);
+  assert.equal(placing.get(1), 1, 'sudden death decides the placing');
+  assert.equal(placing.get(0), 2);
+}
+
+// A bo3 is over at 2-0, whichever two games those were.
+{
+  const bo3 = (a: number[], b: number[], runs: number[]) =>
+    [0, 1].map((team) => ({
+      id: `t${team}`,
+      elo: 1000,
+      team,
+      scores: { x: [a, b][team][0], y: [a, b][team][1], z: [a, b][team][2] },
+      runs: { x: runs[0], y: runs[1], z: runs[2] },
+    }));
+  const games = ['x', 'y', 'z'];
+  assert.deepEqual(clinched(bo3([9, 1, 9], [1, 1, 1], [3, 0, 3]), games, 3), ['x', 'z']);
+  assert.equal(clinched(bo3([9, 1, 9], [1, 9, 1], [3, 3, 0]), games, 3), null, '1-1 plays on');
+  assert.equal(clinched(bo3([9, 9, 9], [1, 1, 1], [3, 2, 0]), games, 3), null, 'a game not played out is not won');
 }
