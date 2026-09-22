@@ -483,7 +483,8 @@ ${TOKENS}
   .th td { font-size: 12px; color: var(--muted); padding-bottom: 6px; }
   /* history: one match per line, so the row has to stay a line - names run
      inline and the placing is carried by order and weight, not by a column. */
-  .hist td { padding: 9px 12px 9px 0; font-size: 13px; }
+  /* Tabular digits: #191 is as wide as #188, so the columns stay columns. */
+  .hist td { padding: 9px 12px 9px 0; font-size: 13px; font-variant-numeric: tabular-nums; }
   /* Direct children only. As a descendant selector this also bordered the rows
      of the .hgrid nested inside an open row - and that table is width:auto, so
      every match drew a set of short lines that stopped halfway across the pane. */
@@ -494,7 +495,10 @@ ${TOKENS}
   .hp em { font-style: normal; margin-left: 5px; font-size: 12px; color: var(--muted); }
   .hrow { cursor: pointer; outline: none; }
   .hrow:hover td, .hrow:focus-visible td { color: var(--fg); }
-  .hrow td:last-child { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+  /* The flex box sits INSIDE the last cell, not on it: a td set to flex stops
+     being a table cell, gets sized per row, and the column wanders. */
+  .hrow .hacts { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; }
+  .hrow .hwhen { text-align: right; }
   .hrow svg { width: 13px; transition: transform .15s; }
   .hrow[aria-expanded="true"] svg { transform: rotate(180deg); }
   /* visible always, not hover-only: a control that appears on hover is a
@@ -783,9 +787,23 @@ const ICONS = {
  *  renders 1284 as "1.284", which reads as one point two eight four. */
 const num = (n) => (n == null ? null : n.toLocaleString('en-US'));
 
+/** Minutes, hours, days, weeks - and past a month the date itself, because
+ *  "7w ago" is arithmetic the reader has to do and "Aug 3" is not. */
 const ago = (ts) => {
   const m = Math.round((Date.now() - ts) / 60000);
-  return m < 1 ? 'Just now' : m < 60 ? m + 'm ago' : Math.round(m / 60) + 'h ago';
+  const h = Math.round(m / 60);
+  const d = Math.round(h / 24);
+  if (m < 1) return 'Just now';
+  if (m < 60) return m + 'm ago';
+  if (h < 24) return h + 'h ago';
+  if (d < 7) return d + 'd ago';
+  if (d < 30) return Math.round(d / 7) + 'w ago';
+  const when = new Date(ts);
+  return when.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    ...(when.getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }),
+  });
 };
 
 const mark = () =>
@@ -1665,7 +1683,7 @@ async function renderGuild(guild) {
   // know how it was won - then the same row opens onto what was picked, what
   // was banned, and what everyone actually scored.
   const histDetail = (m) => \`
-    <tr class="hx"><td colspan="5">
+    <tr class="hx"><td colspan="6">
       <table class="hgrid"><tbody>
         <tr class="th"><td></td>\${m.played.map((sc) => \`<td>\${h(sc)}</td>\`).join('')}</tr>
         \${m.players.map((p) => \`<tr>
@@ -1693,10 +1711,11 @@ async function renderGuild(guild) {
           p.placing === 1 ? ' won' : ''}">\${h(p.name)}\${
           m.ranked === false ? '' : \`<em>\${p.delta >= 0 ? '+' : ''}\${p.delta}</em>\`}</span>\`).join('')}</td>
         <td class="hint" style="white-space:nowrap">\${m.played.length} scn</td>
-        <td class="hint" style="white-space:nowrap">\${m.ended_at ? ago(m.ended_at) : ''}
+        <td class="hint hwhen" style="white-space:nowrap">\${m.ended_at ? ago(m.ended_at) : ''}</td>
+        <td style="width:1px;white-space:nowrap"><span class="hacts">
           <button type="button" class="icon-btn hdel" data-del="\${m.id}"
                   title="Delete match" aria-label="Delete match #\${m.id}">\${icon('x')}</button>
-          \${icon('chevron')}</td>
+          \${icon('chevron')}</span></td>
       </tr>\` + histDetail(m)).join('')
     : '<tr><td class="hint">Nothing has finished yet.</td></tr>';
 
