@@ -918,7 +918,10 @@ function duoRules(match: Match, rows: MatchPlayer[], scenarios: string[], runs: 
   return (
     `\n\nDuos: both players' bests are added together. A game that ends dead level goes to ` +
     `**sudden death** - one more run each, higher duo total takes it, again until it breaks.` +
-    (duo === 3 ? ` First duo to **two games** wins; the third is not played if it isn't needed.` : "") +
+    // Only a bo3 the pool actually gave three games: a thin one plays fewer.
+    (duo === 3 && scenarios.length === 3
+      ? ` First duo to **two games** wins; the third is not played if it isn't needed.`
+      : "") +
     (level.length
       ? `\n\n⚔️ **Sudden death on ${level.join(" and ")}** - one more run each.`
       : "")

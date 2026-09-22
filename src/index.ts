@@ -264,8 +264,12 @@ function duoRoll(match: Match): DuoRoll {
   const pool = matchPool(match);
   return {
     subs: (main) => [...new Set(pool.filter((s) => s.main === main).map((s) => s.category))],
-    tasks: (main, sub) =>
-      shuffle(pool.filter((s) => s.main === main && s.category === sub).map((s) => s.name)).slice(0, 2),
+    tasks: (main, sub, taken) =>
+      shuffle(
+        pool
+          .filter((s) => s.main === main && s.category === sub && !taken.includes(s.name))
+          .map((s) => s.name),
+      ).slice(0, 2),
   };
 }
 
@@ -275,15 +279,29 @@ function duoState(match: Match): DuoVeto | null {
 }
 
 /** Whose turn it is and how many choices are on the table, for either veto -
- *  what the buttons and the sweep need, and nothing else. */
+ *  what the buttons and the sweep need, and nothing else.
+ *
+ *  `stamp` names the step, and rides on every button: a button is an index,
+ *  and an index from one step means something else in the next. In a duo the
+ *  same side often acts twice running and two teammates share the turn, so a
+ *  second click landing a step late would ban or pick blind. */
 function vetoTurn(match: Match) {
   const duo = duoState(match);
   if (duo) {
     const step = duoStep(duo);
-    return step && { turn: step.turn, action: step.action, count: step.options.length };
+    return (
+      step && { turn: step.turn, action: step.action, count: step.options.length, stamp: `${duo.log.length}` }
+    );
   }
   const phase = pickState(match);
-  return phase && { turn: phase.turn, action: phase.action, count: phase.pool.length };
+  return (
+    phase && {
+      turn: phase.turn,
+      action: phase.action,
+      count: phase.pool.length,
+      stamp: `${phase.picked.length}.${phase.size - phase.pool.length}`,
+    }
+  );
 }
 
 function render(match: Match) {
@@ -328,6 +346,7 @@ function render(match: Match) {
     if (!step && !phase) return { embeds: [staleEmbed(match)], components: [] };
     const options = step ? step.options : phase!.pool;
     const action = step ? step.action : phase!.action;
+    const stamp = vetoTurn(match)!.stamp;
     // Discord allows five buttons a row, and PICK_POOL is five.
     const rowsOfFive = options.reduce<string[][]>((acc, name, n) => {
       if (n % 5 === 0) acc.push([]);
@@ -342,7 +361,7 @@ function render(match: Match) {
             new ButtonBuilder()
               // the index into the pool, not the name - a scenario name is
               // longer than a custom id is allowed to be.
-              .setCustomId(`pug:pick:${match.id}:${groupIdx * 5 + n}`)
+              .setCustomId(`pug:pick:${match.id}:${groupIdx * 5 + n}:${stamp}`)
               .setLabel(name.length > 78 ? name.slice(0, 77) + '…' : name)
               .setStyle(action === 'ban' ? ButtonStyle.Danger : ButtonStyle.Success),
           ),
@@ -980,8 +999,12 @@ async function finishMatch(match: Match) {
     .prepare("update match set status = 'done', ended_at = ? where id = ? and status = 'live'")
     .run(Date.now(), match.id);
   if (!claimed.changes) return null;
+  await refreshScores(getMatch(match.id)!);
+  // Here and not only in refreshMatch: the last Done, the clock and the
+  // dashboard all reach this without passing through there, and a 2-0 bo3
+  // scored with its unplayed third game still in would forfeit the winners.
+  endIfClinched(getMatch(match.id)!);
   const done = getMatch(match.id)!;
-  await refreshScores(done);
 
   const rows = matchPlayers(done.id);
   const scenarios: string[] = JSON.parse(done.scenarios);
@@ -1686,7 +1709,7 @@ async function onCommand(i: import('discord.js').ChatInputCommandInteraction) {
 }
 
 async function onButton(i: import('discord.js').ButtonInteraction) {
-  const [, action, arg, extra] = i.customId.split(':');
+  const [, action, arg, extra, stamp] = i.customId.split(':');
 
   // 'pug:open:1v1' is the rated queue and 'pug:open:1v1:casual' the one with
   // nothing on it. Carried on the button rather than worked out from the
@@ -1738,7 +1761,18 @@ async function onButton(i: import('discord.js').ButtonInteraction) {
     // first pick with its own - a double tap losing a ban.
     // ponytail: atomic because this is one process on a sync sqlite; a second
     // process would want the compare-and-swap finishMatch() uses.
-    const next = applyPick(match, Number(extra));
+    // A button from a step already gone, or one past the end of the list,
+    // changes nothing - and must not restart the clock either. No stamp is a
+    // message posted before buttons carried one.
+    const index = Number(extra);
+    if ((stamp !== undefined && stamp !== phase.stamp) || !(index >= 0 && index < phase.count)) {
+      await i.reply({
+        content: 'That choice is out of date - the veto has moved on. Pick from the buttons as they are now.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    const next = applyPick(match, index);
     await i.deferUpdate();
     await editMatchMessage(next);
     return;

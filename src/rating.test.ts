@@ -479,3 +479,25 @@ assert.deepEqual(
   assert.equal(clinched(bo3([9, 1, 9], [1, 9, 1], [3, 3, 0]), games, 3), null, '1-1 plays on');
   assert.equal(clinched(bo3([9, 9, 9], [1, 1, 1], [3, 2, 0]), games, 3), null, 'a game not played out is not won');
 }
+
+// A scenario filed under two mains is still only one game of a bo3.
+{
+  const roll = {
+    subs: () => ['S'],
+    tasks: (_m: string, _s: string, taken: string[]) => ['same', 'other'].filter((t) => !taken.includes(t)).slice(0, 1),
+  };
+  const v = startDuo(3, 0, ['Tap', 'Track'], roll);
+  const first = advanceDuo(v, 0, roll);
+  assert.ok('scenarios' in first);
+  assert.deepEqual(first.scenarios, ['same', 'other'], 'the second game does not repeat the first');
+}
+
+// A no-show has no sudden-death round to run, so it does not hold one up.
+{
+  const e = [
+    { id: 'a', elo: 0, team: 0, scores: { g: 100 }, extra: { g: [5] } },
+    { id: 'b', elo: 0, team: 1, scores: { g: 100 }, extra: { g: [9] } },
+    { id: 'c', elo: 0, team: 1, scores: { g: null }, extra: { g: [] } },
+  ];
+  assert.deepEqual(scenarioWinners(e, ['g']), [1]);
+}

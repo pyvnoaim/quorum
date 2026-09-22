@@ -260,7 +260,11 @@ export interface Entrant {
  *
  * Null while it is still level or somebody has not run the next round yet.
  */
-function suddenDeath(entrants: Entrant[], scenario: string, tied: number[]): number | null {
+function suddenDeath(all: Entrant[], scenario: string, tied: number[]): number | null {
+  // Only who actually played this game: a no-show has no round to run, and
+  // waiting on one would leave the tie standing on the card while scorable()
+  // - which already left them out - broke it for the rating.
+  const entrants = all.filter((e) => e.scores[scenario] != null);
   const longest = Math.max(0, ...entrants.map((e) => e.extra?.[scenario]?.length ?? 0));
   for (let k = 0; k < longest; k++) {
     if (entrants.some((e) => e.extra?.[scenario]?.[k] == null)) return null;
@@ -461,7 +465,8 @@ export interface DuoVeto {
 
 export interface DuoRoll {
   subs: (main: string) => string[];
-  tasks: (main: string, sub: string) => string[];
+  /** `taken` is what earlier games already play, so no two games repeat. */
+  tasks: (main: string, sub: string, taken: string[]) => string[];
 }
 
 /** Whose turn it is and what they choose from, or null once every game has
@@ -516,7 +521,8 @@ function settle(v: DuoVeto, roll: DuoRoll): DuoVeto {
     const game = next.games.find((g) => !g.task);
     if (next.mains.length || !game || game.subs.length > 1) return next;
     if (!game.tasks.length) {
-      game.tasks = roll.tasks(game.main, game.subs[0]);
+      const taken = next.games.flatMap((g) => (g.task ? [g.task] : []));
+      game.tasks = roll.tasks(game.main, game.subs[0], taken);
       if (!game.tasks.length) next.games.splice(next.games.indexOf(game), 1);
       else if (game.tasks.length > 1) return next;
     }
