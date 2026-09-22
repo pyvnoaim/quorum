@@ -693,6 +693,36 @@ function fillPool(embed: EmbedBuilder, cats: ReturnType<typeof poolCategories>) 
  *  enough to Discord's 6000 characters to be truncating, and a board that
  *  answers "why did I never see that scenario" must not be the one cut short. */
 export function rulesMessages(guildId: string) {
+  return [...regularRules(guildId), duoBoard(guildId)];
+}
+
+/** The duo pool, as its own message at the end of the board: it is a pool of
+ *  its own, and a player about to veto one needs to see what is in it. Its
+ *  rank restrictions are named per category, the same way a board with no
+ *  bracket split names them. */
+function duoBoard(guildId: string) {
+  const embed = new EmbedBuilder()
+    .setTitle("Duos · 2v2 and 2v2 bo3")
+    .setColor(BLURPLE)
+    .setDescription(
+      "Their own pool. The higher-rated duo bans a main first, then the other; " +
+        "in the one left the higher seed bans two subcategories and the other one, " +
+        "and the higher seed picks one of two scenarios from what survives. " +
+        "**bo3**: each side picks a main, the third is the decider, and the side " +
+        "that did not pick a game's main runs its veto. Both players' best runs " +
+        "are added; a dead level game goes to sudden death.",
+    );
+  return {
+    embeds: [
+      fillPool(embed, poolCategories(getScenarios(guildId, "duo"), getRanks(guildId))).setFooter(
+        footer(),
+      ),
+    ],
+    components: [],
+  };
+}
+
+function regularRules(guildId: string) {
   const fmt = getFormat(guildId);
   // Highest bracket first, which is the order getRanks gives - so a pair of
   // brackets sharing a pool stop reading as "Elite, Advanced" on one board and

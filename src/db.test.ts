@@ -623,3 +623,15 @@ assert.equal(claim(), 0, 'the second has nothing to score');
 }
 
 console.log('db ok');
+
+// The duo pool starts as a copy of the regular one, and from then on each is
+// saved without touching the other.
+{
+  const G = 'duopool';
+  setScenarios(G, [{ category: 'Speed', name: 'reg1', main: 'Switching', rank_ids: null }]);
+  assert.deepEqual(getScenarios(G, 'duo').map((s) => s.name), ['reg1'], 'copied on first read');
+  setScenarios(G, [{ category: 'Micro', name: 'duo1', main: 'Switching', rank_ids: null }], 'duo');
+  assert.deepEqual(getScenarios(G).map((s) => s.name), ['reg1'], 'the regular pool is untouched');
+  setScenarios(G, [{ category: 'Speed', name: 'reg2', main: 'Switching', rank_ids: null }]);
+  assert.deepEqual(getScenarios(G, 'duo').map((s) => s.name), ['duo1'], 'and the duo pool is its own');
+}

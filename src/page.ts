@@ -1473,6 +1473,12 @@ async function renderGuild(guild) {
 
     <section id="pool">
     <h2>Scenario pool</h2>
+    <div class="seg" id="poolkind" role="radiogroup" aria-label="Which pool" style="margin-bottom:10px">
+      <button type="button" role="radio" data-k="main" aria-checked="true">Regular</button>
+      <button type="button" role="radio" data-k="duo" aria-checked="false">Duos</button>
+    </div>
+    <p class="muted" id="regpoolnote">The pool 1v1 draws from. Duos have their own - switch above - so a change here does not reach them.</p>
+    <p class="muted" id="duopoolnote" hidden>The pool 2v2 and 2v2 bo3 draw from - its own, so it can be shaped like the tournament without touching 1v1. It started as a copy of the regular pool. Duos veto a main, then its subcategories, then pick one of two scenarios out of the last subcategory standing.</p>
     <p class="muted">A match rolls one scenario per main - Clicking, Tracking, Switching. Add subcategories to organise a main's pool; they file under it rather than taking a round of their own. Search pulls real names off KovaaK's, so a lookup can't miss on a typo. A category can be offered to just the ranks that should play it - pick them under its name, or leave it open to every rank.</p>
     <div id="poolbox"></div>
     <div class="bar">
@@ -1938,20 +1944,30 @@ async function renderGuild(guild) {
   // Categories live in their own list so a new, still-empty one survives until
   // something is put in it - the saved shape is a flat (category, name, main) list.
   const MAINS = data.mains ?? ['Clicking', 'Tracking', 'Switching'];
-  let pool = data.scenarios.map((s) => ({ ...s }));
-  let cats = MAINS.map((m) => ({ name: m, main: m, ranks: [] }));
-  for (const s of pool) {
-    if (!cats.some((c) => c.name === s.category)) {
-      cats.push({ name: s.category, main: MAINS.includes(s.main) ? s.main : MAINS[0], ranks: [] });
+  // Two pools, one editor: the switch above the pool swaps what it holds and
+  // where Save sends it. Unsaved edits to the one being left are dropped, the
+  // same as reloading the page would drop them.
+  const pools = { main: data.scenarios, duo: data.duoScenarios ?? [] };
+  let poolKind = 'main';
+  let pool = [];
+  let cats = [];
+  const loadPool = () => {
+    pool = pools[poolKind].map((s) => ({ ...s }));
+    cats = MAINS.map((m) => ({ name: m, main: m, ranks: [] }));
+    for (const s of pool) {
+      if (!cats.some((c) => c.name === s.category)) {
+        cats.push({ name: s.category, main: MAINS.includes(s.main) ? s.main : MAINS[0], ranks: [] });
+      }
     }
-  }
-  // A category is offered to the ranks someone named, and its rows carry them
-  // the same way they carry the main. Empty is every rank - the answer a pool
-  // has until somebody narrows it.
-  for (const c of cats) {
-    const mine = pool.filter((s) => s.category === c.name);
-    c.ranks = mine.length && Array.isArray(mine[0].rank_ids) ? mine[0].rank_ids.slice() : [];
-  }
+    // A category is offered to the ranks someone named, and its rows carry them
+    // the same way they carry the main. Empty is every rank - the answer a pool
+    // has until somebody narrows it.
+    for (const c of cats) {
+      const mine = pool.filter((s) => s.category === c.name);
+      c.ranks = mine.length && Array.isArray(mine[0].rank_ids) ? mine[0].rank_ids.slice() : [];
+    }
+  };
+  loadPool();
   let openCat = null;
   const poolBox = document.getElementById('poolbox');
 
@@ -2080,12 +2096,32 @@ async function renderGuild(guild) {
   document.getElementById('savepool').onclick = async () => {
     const el = document.getElementById('poolstatus');
     const scenarios = pool;
+    // Taken now, not after the await: the switch can be flipped while this is
+    // in flight, and the answer belongs to the pool that was sent.
+    const kind = poolKind;
     const res = await fetch(\`/api/guild/\${guild.id}/scenarios\`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ scenarios }),
+      body: JSON.stringify({ scenarios, pool: kind }),
     });
     const out = await res.json().catch(() => ({}));
-    el.textContent = res.ok ? \`Saved \${out.scenarios.length} scenarios\` : out.error ?? 'Save failed';
+    if (res.ok) pools[kind] = out.scenarios;
+    el.textContent = res.ok
+      ? \`Saved \${out.scenarios.length} \${kind === 'duo' ? 'duos ' : ''}scenarios\`
+      : out.error ?? 'Save failed';
+  };
+
+  document.getElementById('poolkind').onclick = (e) => {
+    const k = e.target.closest('button')?.dataset.k;
+    if (!k || k === poolKind) return;
+    poolKind = k;
+    document.querySelectorAll('#poolkind button').forEach((b) =>
+      b.setAttribute('aria-checked', String(b.dataset.k === k)));
+    document.getElementById('duopoolnote').hidden = k !== 'duo';
+    document.getElementById('regpoolnote').hidden = k === 'duo';
+    document.getElementById('poolstatus').textContent = '';
+    openCat = null;
+    loadPool();
+    drawPool();
   };
 
   /* Which row is open for editing, if any - one at a time on purpose. A rating

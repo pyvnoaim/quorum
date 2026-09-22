@@ -1484,6 +1484,7 @@ export function startWeb(client: Client, hooks: Hooks) {
             .map((r) => ({ id: r.id, name: r.name })),
           ranks,
           scenarios: getScenarios(guildId),
+          duoScenarios: getScenarios(guildId, 'duo'),
           players: players.map((p) => ({
             ...p,
             avatar: client.users.cache.get(p.discord_id)?.avatar ?? null,
@@ -1949,6 +1950,9 @@ export function startWeb(client: Client, hooks: Hooks) {
 
       if (action === '/scenarios' && req.method === 'PUT') {
         const body = await readJson(req);
+        // Anything but exactly 'duo' is the regular pool - the value is off the
+        // wire, and a typo must not start a third pool nobody can see.
+        const kind = body.pool === 'duo' ? 'duo' : 'main';
         const rows = Array.isArray(body.scenarios) ? body.scenarios : [];
         const rankIds = new Set(getRanks(guildId).map((r) => r.id));
         const clean = rows
@@ -1986,13 +1990,15 @@ export function startWeb(client: Client, hooks: Hooks) {
           json(res, 400, { error: 'the pool tops out at 500 scenarios' });
           return;
         }
-        const was = getScenarios(guildId).map((r) => r.name);
-        const now = setScenarios(guildId, clean);
+        const was = getScenarios(guildId, kind).map((r) => r.name);
+        const now = setScenarios(guildId, clean, kind);
         const poolDiff = listDiff(was, now.map((r) => r.name));
         await announce(
           guild,
           session.user.id,
-          poolDiff.length ? [`Scenario pool: ${poolDiff.join(', ')}`] : [],
+          poolDiff.length
+            ? [`${kind === 'duo' ? 'Duos scenario pool' : 'Scenario pool'}: ${poolDiff.join(', ')}`]
+            : [],
         );
         json(res, 200, { scenarios: now });
         return;

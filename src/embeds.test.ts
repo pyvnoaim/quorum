@@ -172,7 +172,10 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
   // the same scenarios - one pool, one message. A server with no difficulties
   // must not be split into a header and a board saying the same thing twice.
   const plain = rulesMessages('g2');
-  assert.equal(plain.length, 1, `one pool is one message, got ${plain.length}`);
+  // ...plus the duo pool, which is always its own message at the end.
+  assert.equal(plain.length, 2, `one pool is one message, plus duos, got ${plain.length}`);
+  assert.equal(plain[1].embeds[0].data.title, 'Duos · 2v2 and 2v2 bo3');
+  assert.ok(plain[1].embeds[0].data.fields!.length, 'the duo pool is listed, copied from the regular one');
   const [board] = plain[0].embeds;
   const text = board.data.description!;
   assert.ok(text.includes('**3**') && text.includes('**5**'), `rounds and pool, got ${text}`);
@@ -248,14 +251,14 @@ assert.ok(!fields![0].value.includes('forfeited'), 'a row with no run counts for
   const split = rulesMessages('g2');
   // Two boards, not three: Elite and Advanced are offered the same scenarios,
   // so they read one between them.
-  assert.equal(split.length, 3, `a header and a board per difficulty, got ${split.length}`);
+  assert.equal(split.length, 4, `a header, a board per difficulty and duos, got ${split.length}`);
   assert.equal(split[0].embeds[0].data.fields, undefined, 'the header is the format alone');
   assert.deepEqual(
-    split.slice(1).map((m) => m.embeds[0].data.title),
+    split.slice(1, -1).map((m) => m.embeds[0].data.title),
     ['Pool · Elite, Advanced', 'Pool · Novice'],
     'brackets sharing a pool share a board, highest first',
   );
-  for (const message of split.slice(1)) {
+  for (const message of split.slice(1, -1)) {
     const heads = message.embeds[0].data.fields!.map((f) => f.name);
     // What everyone plays is repeated onto every board: a player reads the one
     // with their bracket on it and has their whole pool, not most of it.

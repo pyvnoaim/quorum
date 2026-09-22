@@ -199,7 +199,7 @@ function matchPool(match: Match) {
   const ranks = getRanks(match.guild_id);
   const host = getPlayer(match.host_id);
   const band = callRank(match) ?? (host ? rankFor(ranks, host.elo) : undefined);
-  return poolFor(getScenarios(match.guild_id), band?.id);
+  return poolFor(getScenarios(match.guild_id, duoOf(match.format) ? 'duo' : 'main'), band?.id);
 }
 
 /** One scenario per main, cycling, so a match is never three of the same

@@ -14,6 +14,7 @@ import {
   RUNS_PER_SCENARIO,
   SEED_MODES,
   WARN_MS,
+  duoOf,
   type Format,
   type SeedMode,
 } from './config.js';
@@ -134,6 +135,9 @@ for (const stmt of [
   // JSON {scenario: [score, ...]}: runs past the counted ones, oldest first.
   // Duo matches only - it is their sudden death on a tied game.
   'alter table match_player add column sd text',
+  // Which pool a scenario is in: null is the regular one, 'duo' the one the
+  // 2v2 formats draw from. See getScenarios().
+  'alter table scenario add column pool text',
   // When the first player used every run - the moment the rest of the lobby
   // goes on a clock. Null while nobody has finished, which is also every match
   // that was already live when this shipped: those keep the plain TTL.
@@ -772,18 +776,27 @@ function parseRankIds(raw: string | null): number[] | null {
   }
 }
 
-/** The scenario pool, seeded from DEFAULT_CATEGORIES then owned by the dashboard. */
-export function getScenarios(guildId: string): PoolRow[] {
+/** The two pools a server has: the regular one, and the one the duo formats
+ *  draw from - kept apart so duos can be shaped like the tournament they
+ *  practise for without touching what 1v1 plays. */
+export type PoolKind = 'main' | 'duo';
+
+/** The scenario pool, seeded from DEFAULT_CATEGORIES then owned by the dashboard.
+ *  The duo pool starts as a copy of the regular one, taken the first time it is
+ *  read - staff edit it from there. */
+export function getScenarios(guildId: string, kind: PoolKind = 'main'): PoolRow[] {
+  const tag = kind === 'duo' ? 'duo' : null;
   const read = (): PoolRow[] =>
     (
       db
         .prepare(
-          'select category, name, main, rank_ids from scenario where guild_id = ? order by id',
+          'select category, name, main, rank_ids from scenario where guild_id = ? and pool is ? order by id',
         )
-        .all(guildId) as unknown as (Omit<PoolRow, 'rank_ids'> & { rank_ids: string | null })[]
+        .all(guildId, tag) as unknown as (Omit<PoolRow, 'rank_ids'> & { rank_ids: string | null })[]
     ).map((r) => ({ ...r, rank_ids: parseRankIds(r.rank_ids) }));
   const rows = read();
   if (rows.length) return rows;
+  if (kind === 'duo') return setScenarios(guildId, getScenarios(guildId), 'duo');
   for (const cat of DEFAULT_CATEGORIES) {
     for (const name of cat.scenarios) {
       db.prepare('insert into scenario (guild_id, category, name, main) values (?, ?, ?, ?)').run(
@@ -797,12 +810,13 @@ export function getScenarios(guildId: string): PoolRow[] {
   return read();
 }
 
-export function setScenarios(guildId: string, rows: PoolRow[]) {
+export function setScenarios(guildId: string, rows: PoolRow[], kind: PoolKind = 'main') {
+  const tag = kind === 'duo' ? 'duo' : null;
   const insert = db.prepare(
-    'insert into scenario (guild_id, category, name, main, rank_ids) values (?, ?, ?, ?, ?)',
+    'insert into scenario (guild_id, category, name, main, rank_ids, pool) values (?, ?, ?, ?, ?, ?)',
   );
   tx(() => {
-    db.prepare('delete from scenario where guild_id = ?').run(guildId);
+    db.prepare('delete from scenario where guild_id = ? and pool is ?').run(guildId, tag);
     for (const r of rows) {
       insert.run(
         guildId,
@@ -810,10 +824,11 @@ export function setScenarios(guildId: string, rows: PoolRow[]) {
         r.name,
         r.main,
         r.rank_ids?.length ? JSON.stringify(r.rank_ids) : null,
+        tag,
       );
     }
   });
-  return getScenarios(guildId);
+  return getScenarios(guildId, kind);
 }
 
 /** Everything still in play in one server - the dashboard's match list. */
@@ -1299,19 +1314,24 @@ export function claimRecap(guildId: string, every: number): number | null {
 export function categoryRecord(discordId: string, guildId: string) {
   const rows = db
     .prepare(
-      `select m.id, m.scenarios, p.discord_id, p.team, p.scores, p.run_counts, p.sd
+      `select m.id, m.format, m.scenarios, p.discord_id, p.team, p.scores, p.run_counts, p.sd
        from match m join match_player p on p.match_id = m.id
        where m.guild_id = ? and m.status = 'done' and m.ranked <> 0
          and m.id in (select match_id from match_player
                       where discord_id = ? and placing is not null)`,
     )
-    .all(guildId, discordId) as unknown as (Pick<Match, 'id' | 'scenarios'> &
+    .all(guildId, discordId) as unknown as (Pick<Match, 'id' | 'format' | 'scenarios'> &
     Pick<MatchPlayer, 'discord_id' | 'team' | 'scores' | 'run_counts' | 'sd'>)[];
 
   const byMatch = new Map<number, typeof rows>();
   for (const r of rows) byMatch.set(r.id, [...(byMatch.get(r.id) ?? []), r]);
 
-  const mainOf = new Map(getScenarios(guildId).map((s) => [s.name, s.main]));
+  // Each match against the pool it was played from. Read only when asked for:
+  // the first read of the duo pool is what copies it into being.
+  const mains = new Map<PoolKind, Map<string, string>>();
+  const mainsFor = (kind: PoolKind) =>
+    mains.get(kind) ??
+    mains.set(kind, new Map(getScenarios(guildId, kind).map((s) => [s.name, s.main]))).get(kind)!;
   const want = getFormat(guildId).runs;
   const tally = new Map(MAIN_CATEGORIES.map((m) => [m as string, { won: 0, lost: 0 }]));
 
@@ -1342,6 +1362,7 @@ export function categoryRecord(discordId: string, guildId: string) {
       })),
       scenarios,
     );
+    const mainOf = mainsFor(duoOf(group[0].format) ? 'duo' : 'main');
     scenarios.forEach((name, at) => {
       const row = tally.get(mainOf.get(name) ?? '');
       if (!row || won[at] === null) return;
